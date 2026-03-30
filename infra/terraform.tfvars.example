@@ -1,0 +1,14 @@
+# Copy to terraform.tfvars and fill in values
+
+# Optional - External OIDC Identity Provider (Okta, Azure AD, Amazon Federate, etc.)
+# enable_oidc_idp        = true
+# oidc_provider_name     = "AmazonFederate"
+# oidc_client_id         = "your-oidc-client-id"
+# oidc_client_secret_arn = "arn:aws:secretsmanager:us-west-2:ACCOUNT:secret:your-secret-XXXXX"
+# oidc_issuer_url        = "https://your-idp.example.com"
+
+# Optional
+# region              = "us-west-2"
+# project_name        = "eval-managed"
+# eks_cluster_version = "1.34"
+# cluster_admin_role_arns = ["arn:aws:iam::ACCOUNT:role/YourAdminRole"]

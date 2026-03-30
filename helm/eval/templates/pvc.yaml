@@ -1,0 +1,14 @@
+# Backend storage - EBS gp3 volume for SQLite databases
+# s3-backup sidecar periodically backs up to S3
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backend-data
+  namespace: {{ .Values.namespace }}
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: {{ .Values.storage.className | default "ebs-gp3" }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.size | default "200Gi" }}

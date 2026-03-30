@@ -1,0 +1,8 @@
+# These values are passed from Terraform - do not hardcode
+region: us-west-2
+namespace: eval-managed
+
+# Secret references (set by Terraform)
+dbSecretArn: ""            # module.rds.db_instance_master_user_secret_arn
+cognitoSecretName: ""      # aws_secretsmanager_secret.cognito_client.name
+oauth2ProxySecretName: ""  # aws_secretsmanager_secret.oauth2_proxy.name

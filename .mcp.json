@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "promptfoo": {
+      "command": "npx",
+      "args": ["promptfoo@0.119.0", "mcp", "--transport", "stdio"],
+      "description": "Promptfoo MCP server for LLM evaluation and testing"
+    }
+  }
+}

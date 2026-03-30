@@ -1,0 +1,12 @@
+{
+  "name": "eval-managed",
+  "version": "1.0.0",
+  "description": "LLM evaluation platform with MCP servers",
+  "scripts": {
+    "start": "./start.sh",
+    "dev": "./start.sh"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

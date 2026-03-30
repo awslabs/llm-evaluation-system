@@ -1,0 +1,58 @@
+version: 0.2
+
+env:
+  variables:
+    ACTION: "deploy"
+    TERRAFORM_VERSION: "1.12.1"
+    KUBECTL_VERSION: "1.32.4"
+    HELM_VERSION: "3.17.3"
+    NODE_OPTIONS: "--max-old-space-size=8192"
+
+phases:
+  install:
+    commands:
+      - echo "=== Installing tools ==="
+
+      # Terraform
+      - |
+        if ! command -v terraform &>/dev/null; then
+          echo "Installing terraform ${TERRAFORM_VERSION}..."
+          curl -fsSL --retry 3 --retry-delay 5 "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_arm64.zip" -o /tmp/terraform.zip
+          unzip -qo /tmp/terraform.zip -d /usr/local/bin
+          rm /tmp/terraform.zip
+        fi
+      - terraform version
+
+      # kubectl (only needed for deploy/destroy, not destroy-data)
+      - |
+        if [ "$ACTION" != "destroy-data" ] && ! command -v kubectl &>/dev/null; then
+          echo "Installing kubectl ${KUBECTL_VERSION}..."
+          curl -fsSL --retry 3 --retry-delay 5 "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/arm64/kubectl" -o /usr/local/bin/kubectl
+          chmod +x /usr/local/bin/kubectl
+        fi
+
+      # Helm (only needed for deploy/destroy, not destroy-data)
+      - |
+        if [ "$ACTION" != "destroy-data" ] && ! command -v helm &>/dev/null; then
+          echo "Installing helm ${HELM_VERSION}..."
+          curl -fsSL --retry 3 --retry-delay 5 "https://get.helm.sh/helm-v${HELM_VERSION}-linux-arm64.tar.gz" -o /tmp/helm.tar.gz
+          tar -xzf /tmp/helm.tar.gz -C /usr/local/bin --strip-components=1 linux-arm64/helm
+          rm /tmp/helm.tar.gz
+        fi
+
+  build:
+    commands:
+      - echo "=== ACTION=$ACTION ==="
+      - export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      - export AWS_REGION=${AWS_REGION:-$(aws configure get region)}
+      - export REGION_SUFFIX=$(echo "$AWS_REGION" | tr -d '-')
+      - export STATE_BUCKET="eval-managed-tfstate-${ACCOUNT_ID}-${REGION_SUFFIX}"
+
+      # Dispatch to the appropriate action
+      - |
+        case "$ACTION" in
+          deploy)       bash $CODEBUILD_SRC_DIR/buildspec-scripts/deploy.sh ;;
+          destroy)      bash $CODEBUILD_SRC_DIR/buildspec-scripts/destroy.sh ;;
+          destroy-data) bash $CODEBUILD_SRC_DIR/buildspec-scripts/destroy-data.sh ;;
+          *) echo "ERROR: Unknown ACTION=$ACTION"; exit 1 ;;
+        esac

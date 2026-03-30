@@ -1,0 +1,97 @@
+# Shared defaults for all environments
+projectName: ""  # REQUIRED: --set projectName=eval-managed-${REGION_SUFFIX}
+namespace: eval-managed
+
+# Feature flags (override per environment)
+hpa:
+  enabled: false
+
+# oauth2-proxy subchart configuration (see Chart.yaml dependencies)
+oauth2-proxy:
+  enabled: false  # Enable in AWS (values-aws.yaml)
+
+# AWS Configuration (for image registry)
+aws:
+  region: ""
+  accountId: ""
+
+# Image Configuration (ECR: constructed from aws.accountId + aws.region + projectName)
+image:
+  backendTag: "latest"
+  frontendTag: "latest"
+  pullPolicy: Always
+
+# Storage
+storage:
+  className: ""  # ebs-gp3 for EKS
+  size: "10Gi"
+
+# Backend Configuration
+backend:
+  replicas: 1
+  resources:
+    requests:
+      memory: "512Mi"
+      cpu: "250m"
+    limits:
+      memory: "1Gi"
+      cpu: "1000m"
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilization: 70
+    targetMemoryUtilization: 80
+
+# Frontend Configuration
+frontend:
+  replicas: 1
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "100m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilization: 70
+    targetMemoryUtilization: 80
+
+# SQLite Backup Sidecar (periodic backup to S3)
+backup:
+  intervalSeconds: 900  # 15 minutes
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "256Mi"
+      cpu: "250m"
+
+# MCP Sidecar Resources
+mcp:
+  syntheticEval:
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "100m"
+      limits:
+        memory: "2Gi"
+        cpu: "500m"
+  providers:
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "50m"
+      limits:
+        memory: "256Mi"
+        cpu: "250m"
+  dataset:
+    resources:
+      requests:
+        memory: "128Mi"
+        cpu: "50m"
+      limits:
+        memory: "256Mi"
+        cpu: "250m"

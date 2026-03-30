@@ -1,0 +1,170 @@
+import React from 'react';
+
+import CloseIcon from '@mui/icons-material/Close';
+import RestoreIcon from '@mui/icons-material/Restore';
+import SettingsIcon from '@mui/icons-material/Settings';
+import Button from '@mui/material/Button';
+import Dialog from '@mui/material/Dialog';
+import DialogActions from '@mui/material/DialogActions';
+import DialogContent from '@mui/material/DialogContent';
+import DialogTitle from '@mui/material/DialogTitle';
+import Divider from '@mui/material/Divider';
+import IconButton from '@mui/material/IconButton';
+import Stack from '@mui/material/Stack';
+import { alpha, useTheme } from '@mui/material/styles';
+import Typography from '@mui/material/Typography';
+import useMediaQuery from '@mui/material/useMediaQuery';
+import SettingsPanel from './components/SettingsPanel';
+import { useSettingsState } from './hooks/useSettingsState';
+import { tokens } from './tokens';
+
+interface SettingsModalProps {
+  open: boolean;
+  onClose: () => void;
+}
+
+const TableSettingsModal = ({ open, onClose }: SettingsModalProps) => {
+  const theme = useTheme();
+  const isMobile = useMediaQuery(theme.breakpoints.down('sm'));
+
+  const { resetToDefaults } = useSettingsState(open);
+
+  const handleClose = () => {
+    onClose();
+  };
+
+  return (
+    <Dialog
+      open={open}
+      onClose={handleClose}
+      fullWidth
+      maxWidth="md"
+      PaperProps={{
+        elevation: tokens.elevation.dialog,
+        sx: {
+          maxWidth: 680,
+          borderRadius: tokens.borderRadius.medium,
+          overflow: 'hidden',
+          backgroundImage:
+            theme.palette.mode === 'dark'
+              ? `linear-gradient(${alpha(theme.palette.background.paper, 0.8)}, ${alpha(theme.palette.background.paper, 0.95)})`
+              : `linear-gradient(${alpha(theme.palette.background.paper, 0.97)}, ${theme.palette.background.paper})`,
+          backdropFilter: 'blur(8px)',
+        },
+      }}
+      sx={{
+        '& .MuiBackdrop-root': {
+          backdropFilter: 'blur(4px)',
+          backgroundColor: alpha(theme.palette.background.default, 0.4),
+        },
+      }}
+      aria-labelledby="settings-dialog-title"
+      fullScreen={isMobile}
+    >
+      <DialogTitle
+        id="settings-dialog-title"
+        sx={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          p: tokens.spacing.padding.container,
+          pb: tokens.spacing.padding.item,
+          borderBottom: `1px solid ${alpha(theme.palette.divider, 0.1)}`,
+        }}
+      >
+        <Stack direction="row" alignItems="center" spacing={tokens.spacing.stack.medium}>
+          <SettingsIcon
+            color="primary"
+            sx={{
+              fontSize: '1.75rem',
+              opacity: 0.9,
+            }}
+          />
+          <Typography variant="h6" fontWeight={600}>
+            Table Settings
+          </Typography>
+        </Stack>
+        <IconButton
+          edge="end"
+          color="inherit"
+          onClick={handleClose}
+          aria-label="close"
+          sx={{
+            transition: `all ${tokens.animation.fast}ms ease`,
+            '&:hover': {
+              backgroundColor: alpha(theme.palette.primary.main, 0.08),
+            },
+          }}
+        >
+          <CloseIcon />
+        </IconButton>
+      </DialogTitle>
+
+      <DialogContent
+        sx={{
+          p: 0,
+          minHeight: {
+            xs: 'auto',
+            sm: 'auto',
+          },
+        }}
+      >
+        <SettingsPanel />
+      </DialogContent>
+
+      <Divider sx={{ opacity: 0.6 }} />
+
+      <DialogActions
+        sx={{
+          px: {
+            xs: tokens.spacing.padding.item,
+            sm: tokens.spacing.padding.container,
+          },
+          py: tokens.spacing.padding.item,
+          justifyContent: 'space-between',
+        }}
+      >
+        <Button
+          startIcon={<RestoreIcon />}
+          onClick={resetToDefaults}
+          color="inherit"
+          size="small"
+          aria-label="Reset settings to defaults"
+          title="Reset all settings to their default values"
+          sx={{
+            borderRadius: tokens.borderRadius.pill,
+            px: tokens.spacing.padding.item,
+            py: tokens.spacing.padding.compact - 0.25,
+            transition: `all ${tokens.animation.fast}ms ease-in-out`,
+            '&:hover': {
+              backgroundColor: alpha(theme.palette.text.primary, 0.07),
+            },
+          }}
+        >
+          Reset to Defaults
+        </Button>
+        <Button
+          onClick={handleClose}
+          color="primary"
+          variant="contained"
+          disableElevation
+          sx={{
+            borderRadius: tokens.borderRadius.pill,
+            px: tokens.spacing.padding.container,
+            py: tokens.spacing.padding.compact - 0.1,
+            fontWeight: 600,
+            transition: `all ${tokens.animation.fast}ms ease-in-out`,
+            '&:hover': {
+              boxShadow: theme.shadows[2],
+              transform: 'translateY(-1px)',
+            },
+          }}
+        >
+          Done
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+};
+
+export default React.memo(TableSettingsModal);

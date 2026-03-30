@@ -1,0 +1,112 @@
+# AWS EKS production environment
+
+# Feature flags
+hpa:
+  enabled: false  # Single pod, no horizontal autoscaling
+
+# AWS Configuration (REQUIRED: override with --set)
+aws:
+  region: ""      # --set aws.region=$AWS_REGION
+  accountId: ""   # --set aws.accountId=$AWS_ACCOUNT
+
+# ECR images (repository constructed from aws.accountId + aws.region + projectName)
+image:
+  backendTag: "backend-latest"
+  frontendTag: "frontend-latest"
+  pullPolicy: Always
+
+# Storage - EBS gp3 with periodic S3 backup
+# 200Gi is cheap (~$16/month) and avoids auto-scaling complexity
+storage:
+  className: "ebs-gp3"
+  size: "200Gi"
+
+# Single pod architecture - simple and reliable
+# s3-backup sidecar provides periodic S3 backup (every 15 min) for data safety
+# Brief downtime (~30s) on deploys is acceptable trade-off for simplicity
+# Over-provisioned to t4g.large (~$48/month) for ~50-100 concurrent users
+backend:
+  replicas: 1
+  resources:
+    requests:
+      cpu: "1000m"      # Gets t4g.large (2 vCPU, 8GB)
+      memory: "4Gi"
+    limits:
+      cpu: "1800m"      # Within allocatable (~1930m), throttles gracefully
+      memory: "6Gi"     # Safe headroom (allocatable ~7Gi), avoids OOM
+  autoscaling:
+    minReplicas: 1
+    maxReplicas: 1
+    targetCPUUtilization: 70
+    targetMemoryUtilization: 80
+
+frontend:
+  replicas: 2
+  autoscaling:
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilization: 70
+    targetMemoryUtilization: 80
+
+# OIDC Auth - configured via External Secrets from AWS SSM/Secrets Manager
+# OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, NEXTAUTH_SECRET, NEXTAUTH_URL
+# all come from external-secrets.yaml automatically
+
+# oauth2-proxy subchart - handles all authentication at the edge
+oauth2-proxy:
+  enabled: true
+  fullnameOverride: oauth2-proxy
+  namespaceOverride: eval-managed
+  replicaCount: 2
+
+  config:
+    existingSecret: oauth2-proxy-secrets
+    configFile: |-
+      provider = "oidc"
+      provider_display_name = "SSO"
+      email_domains = [ "*" ]
+      skip_provider_button = true
+      insecure_oidc_allow_unverified_email = true
+      cookie_secure = true
+      cookie_samesite = "lax"
+      prompt = "login"
+      cookie_expire = "12h"
+      cookie_refresh = "0"
+      session_cookie_minimal = true
+      cookie_csrf_per_request = true
+      set_xauthrequest = true
+      pass_access_token = false
+      pass_authorization_header = false
+      silence_ping_logging = true
+      reverse_proxy = true
+      upstream_timeout = "120s"
+      # Public routes (/, /_next/*, /favicon.ico) bypassed at ALB level for better UX
+      # Only /health and /ping need skip here (for health checks that reach oauth2-proxy)
+      api_routes = ["/api/"]
+      skip_auth_routes = ["^/health$", "^/ping$"]
+      upstreams = ["http://backend:8080/api/", "http://backend:8080/viewer/", "http://frontend:3000/"]
+
+  extraEnv:
+    - name: OAUTH2_PROXY_OIDC_ISSUER_URL
+      valueFrom:
+        configMapKeyRef:
+          name: app-config
+          key: OIDC_ISSUER
+    # CLOUDFRONT_DOMAIN comes from envFrom below, $(VAR) syntax expands it
+    - name: OAUTH2_PROXY_REDIRECT_URL
+      value: "https://$(CLOUDFRONT_DOMAIN)/oauth2/callback"
+
+  envFrom:
+    - configMapRef:
+        name: app-config
+
+  service:
+    portNumber: 4180
+
+  resources:
+    requests:
+      memory: "64Mi"
+      cpu: "50m"
+    limits:
+      memory: "128Mi"
+      cpu: "200m"

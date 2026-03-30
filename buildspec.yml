@@ -1,0 +1,37 @@
+version: 0.2
+
+env:
+  variables:
+    NODE_OPTIONS: "--max-old-space-size=8192"
+  # AWS_REGION and AWS_ACCOUNT_ID are automatically set by CodeBuild
+
+phases:
+  pre_build:
+    commands:
+      - echo Logging in to Amazon ECR...
+      - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+      - REGION_SUFFIX=$(echo $AWS_REGION | tr -d '-')
+      - IMAGE_REPO_NAME=eval-managed-${REGION_SUFFIX}/app
+      - REPOSITORY_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$IMAGE_REPO_NAME
+      - IMAGE_TAG=build-${CODEBUILD_BUILD_NUMBER}
+      - echo "Using image tag $IMAGE_TAG"
+
+  build:
+    commands:
+      - echo Building Docker images for ARM64...
+      # Backend (FastAPI + MCP servers + promptfoo)
+      - docker build --platform linux/arm64 -f docker/backend.Dockerfile -t $REPOSITORY_URI:backend-$IMAGE_TAG .
+      # Frontend (Next.js)
+      - docker build --platform linux/arm64 -f docker/frontend.Dockerfile -t $REPOSITORY_URI:frontend-$IMAGE_TAG .
+
+  post_build:
+    commands:
+      - echo Pushing Docker images to ECR...
+      - docker push $REPOSITORY_URI:backend-$IMAGE_TAG
+      - docker push $REPOSITORY_URI:frontend-$IMAGE_TAG
+      # Also tag and push as latest for simpler deployments
+      - docker tag $REPOSITORY_URI:backend-$IMAGE_TAG $REPOSITORY_URI:backend-latest
+      - docker tag $REPOSITORY_URI:frontend-$IMAGE_TAG $REPOSITORY_URI:frontend-latest
+      - docker push $REPOSITORY_URI:backend-latest
+      - docker push $REPOSITORY_URI:frontend-latest
+      - echo "Build completed"

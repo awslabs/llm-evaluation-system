@@ -1,0 +1,12 @@
+.editor-container {
+  position: relative;
+  overflow: hidden;
+}
+
+.editor-readonly {
+  cursor: not-allowed;
+}
+
+.editor-container pre {
+  margin: 0;
+}

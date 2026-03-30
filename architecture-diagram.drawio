@@ -1,0 +1,226 @@
+<mxfile host="app.diagrams.net" modified="2026-03-16T00:00:00.000Z" agent="draw.io" version="24.0.0" type="device">
+  <diagram id="eval-platform-arch" name="LLM Evaluation Platform">
+    <mxGraphModel dx="2074" dy="1156" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1200" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" value="Agentic AI-Guided LLM Evaluation Platform" style="text;html=1;fontSize=20;fontStyle=1;align=center;verticalAlign=middle;whiteSpace=wrap;" vertex="1" parent="1">
+          <mxGeometry x="400" y="10" width="800" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="user" value="User&#xa;(Browser)" style="shape=actor;whiteSpace=wrap;html=1;fontSize=12;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="750" y="60" width="60" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="aws-cloud" value="AWS Cloud" style="rounded=1;whiteSpace=wrap;html=1;fillColor=none;strokeColor=#232F3E;strokeWidth=2;verticalAlign=top;fontStyle=1;fontSize=14;dashed=1;spacingTop=5;spacingLeft=10;arcSize=3;" vertex="1" parent="1">
+          <mxGeometry x="80" y="150" width="1440" height="1020" as="geometry" />
+        </mxCell>
+        <mxCell id="edge-group" value="Edge Layer" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;fontStyle=1;fontSize=12;dashed=1;dashPattern=5 5;" vertex="1" parent="1">
+          <mxGeometry x="530" y="170" width="500" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="waf" value="AWS WAF&#xa;Rate Limit +&#xa;Managed Rules" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="560" y="190" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cloudfront" value="Amazon CloudFront&#xa;HTTPS, HTTP/2+3" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="720" y="190" width="140" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="vpc-origin-label" value="VPC Origin&#xa;(Private Network)" style="text;html=1;fontSize=9;align=center;verticalAlign=middle;whiteSpace=wrap;fontColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="880" y="200" width="120" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="e-user-cf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=2;" edge="1" source="user" target="cloudfront" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-user-cf-label" value="HTTPS" style="edgeLabel;html=1;fontSize=9;fontColor=#6c8ebf;" vertex="1" connectable="0" parent="e-user-cf">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e-waf-cf" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=1;dashed=1;" edge="1" source="waf" target="cloudfront" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="vpc" value="VPC (10.0.0.0/16) - 2 AZs, Private Subnets" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;fontStyle=1;fontSize=12;dashed=0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="120" y="300" width="1360" height="840" as="geometry" />
+        </mxCell>
+        <mxCell id="alb" value="Internal ALB&#xa;(Not Internet-Facing)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="710" y="330" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-cf-alb" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#9673a6;strokeWidth=2;" edge="1" source="cloudfront" target="alb" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-cf-alb-label" value="VPC Origin" style="edgeLabel;html=1;fontSize=9;fontColor=#9673a6;" vertex="1" connectable="0" parent="e-cf-alb">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="eks" value="Amazon EKS (K8s 1.34) - Graviton ARM64 Nodes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;verticalAlign=top;fontStyle=1;fontSize=12;dashed=0;strokeWidth=2;" vertex="1" parent="1">
+          <mxGeometry x="160" y="420" width="1280" height="500" as="geometry" />
+        </mxCell>
+        <mxCell id="oauth2proxy" value="oauth2-proxy&#xa;(Auth Gateway) :4180" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="700" y="450" width="160" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="e-alb-oauth" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=2;" edge="1" source="alb" target="oauth2proxy" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-alb-oauth-label" value="All protected routes" style="edgeLabel;html=1;fontSize=9;fontColor=#b85450;" vertex="1" connectable="0" parent="e-alb-oauth">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="frontend-pod" value="Frontend Pod&#xa;Next.js :3000&#xa;Chat UI, SSE Streaming" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="440" y="540" width="180" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="backend-group" value="Backend Pod (Single Replica + Sidecars)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;fontStyle=1;fontSize=11;dashed=1;dashPattern=5 5;" vertex="1" parent="1">
+          <mxGeometry x="200" y="660" width="1200" height="240" as="geometry" />
+        </mxCell>
+        <mxCell id="backend-api" value="FastAPI Backend :8080&#xa;- Chat/Agent API&#xa;- Viewer Proxy&#xa;- File Upload&#xa;- Session Mgmt" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="230" y="700" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="mcp-synthetic" value="MCP: Synthetic-Eval :8002&#xa;- QA Generation&#xa;- Judge Creation&#xa;- Run Evaluations" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="440" y="700" width="180" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="mcp-providers" value="MCP: Providers :8004&#xa;- Bedrock Model&#xa;  Discovery" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="650" y="700" width="160" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="mcp-dataset" value="MCP: Dataset :8005&#xa;- CSV/JSON Analysis&#xa;- Format Conversion" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;align=left;spacingLeft=8;" vertex="1" parent="1">
+          <mxGeometry x="840" y="700" width="160" height="110" as="geometry" />
+        </mxCell>
+        <mxCell id="s3-backup-sidecar" value="S3 Backup Sidecar&#xa;(Every 15 min)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6d0de;strokeColor=#996185;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="700" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s3-restore-init" value="S3 Restore Init Container&#xa;(On Startup)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6d0de;strokeColor=#996185;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1030" y="770" width="140" height="50" as="geometry" />
+        </mxCell>
+        <mxCell id="ebs" value="EBS gp3 200Gi&#xa;/data/users/{user_id}/" style="shape=cylinder3;whiteSpace=wrap;html=1;boundedLbl=1;backgroundOutline=1;size=10;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1210" y="710" width="150" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="e-backend-ebs" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=1;" edge="1" source="backend-api" target="ebs" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-backend-ebs-label" value="SQLite DBs + User Data" style="edgeLabel;html=1;fontSize=8;fontColor=#82b366;" vertex="1" connectable="0" parent="e-backend-ebs">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e-oauth-fe" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=1;" edge="1" source="oauth2proxy" target="frontend-pod" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-oauth-be" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=1;" edge="1" source="oauth2proxy" target="backend-api" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-oauth-be-label" value="X-Forwarded-User header" style="edgeLabel;html=1;fontSize=8;fontColor=#82b366;" vertex="1" connectable="0" parent="e-oauth-be">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e-be-mcp-syn" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=1;" edge="1" source="backend-api" target="mcp-synthetic" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-be-mcp-syn-label" value="HTTP (MCP)" style="edgeLabel;html=1;fontSize=8;fontColor=#d6b656;" vertex="1" connectable="0" parent="e-be-mcp-syn">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e-be-mcp-prov" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=1;" edge="1" source="backend-api" target="mcp-providers" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-be-mcp-ds" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=1;" edge="1" source="backend-api" target="mcp-dataset" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="services-group" value="AWS Managed Services" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF;strokeColor=#232F3E;verticalAlign=top;fontStyle=1;fontSize=12;dashed=1;dashPattern=5 5;" vertex="1" parent="1">
+          <mxGeometry x="120" y="950" width="1360" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="bedrock" value="Amazon Bedrock&#xa;Claude, Nova, Llama,&#xa;Mistral, DeepSeek" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="150" y="990" width="140" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cognito" value="Amazon Cognito&#xa;User Pool + OIDC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="320" y="990" width="130" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="rds" value="Amazon RDS&#xa;PostgreSQL 16&#xa;Chat Sessions, IAM Auth" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="480" y="990" width="140" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="s3-docs" value="S3 Documents&#xa;Bucket&#xa;(User Uploads)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="650" y="990" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="s3-backup" value="S3 Backup&#xa;Bucket&#xa;(SQLite Backups)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="800" y="990" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="secrets" value="Secrets Manager&#xa;Cognito + OAuth2" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="950" y="990" width="130" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="ecr" value="Amazon ECR&#xa;Container Images" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1110" y="990" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="codebuild" value="CodeBuild&#xa;CI/CD, ARM64&#xa;Docker Builds" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1260" y="990" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="e-be-bedrock" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=1;" edge="1" source="backend-api" target="bedrock" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-be-bedrock-label" value="Agent + Eval API Calls" style="edgeLabel;html=1;fontSize=8;fontColor=#82b366;" vertex="1" connectable="0" parent="e-be-bedrock">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e-mcp-syn-bedrock" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=1;dashed=1;" edge="1" source="mcp-synthetic" target="bedrock" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-oauth-cognito" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=1;" edge="1" source="oauth2proxy" target="cognito" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-oauth-cognito-label" value="OIDC Auth" style="edgeLabel;html=1;fontSize=8;fontColor=#b85450;" vertex="1" connectable="0" parent="e-oauth-cognito">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e-be-rds" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#6c8ebf;strokeWidth=1;" edge="1" source="backend-api" target="rds" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-be-rds-label" value="IAM Auth" style="edgeLabel;html=1;fontSize=8;fontColor=#6c8ebf;" vertex="1" connectable="0" parent="e-be-rds">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e-be-s3docs" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#82b366;strokeWidth=1;" edge="1" source="backend-api" target="s3-docs" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-be-s3docs-label" value="Presigned URLs" style="edgeLabel;html=1;fontSize=8;fontColor=#82b366;" vertex="1" connectable="0" parent="e-be-s3docs">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="e-backup-s3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#996185;strokeWidth=1;" edge="1" source="s3-backup-sidecar" target="s3-backup" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-backup-s3-label" value="Periodic SQLite Backup" style="edgeLabel;html=1;fontSize=8;fontColor=#996185;" vertex="1" connectable="0" parent="e-backup-s3">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="ext-secrets" value="External Secrets&#xa;Operator" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="960" y="455" width="120" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="e-extsec-sm" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#b85450;strokeWidth=1;dashed=1;" edge="1" source="ext-secrets" target="secrets" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-extsec-sm-label" value="Sync Secrets to K8s" style="edgeLabel;html=1;fontSize=8;fontColor=#b85450;" vertex="1" connectable="0" parent="e-extsec-sm">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="karpenter" value="Karpenter&#xa;(Auto-scaling)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="455" width="110" height="40" as="geometry" />
+        </mxCell>
+        <mxCell id="e-cb-ecr" style="edgeStyle=orthogonalEdgeStyle;rounded=1;strokeColor=#d6b656;strokeWidth=1;" edge="1" source="codebuild" target="ecr" parent="1">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-cb-ecr-label" value="Push Images" style="edgeLabel;html=1;fontSize=8;fontColor=#d6b656;" vertex="1" connectable="0" parent="e-cb-ecr">
+          <mxGeometry x="-0.2" relative="1" as="geometry"><mxPoint as="offset" /></mxGeometry>
+        </mxCell>
+        <mxCell id="legend" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFF;strokeColor=#999;dashed=1;" vertex="1" parent="1">
+          <mxGeometry x="1260" y="310" width="200" height="130" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-title" value="Infrastructure Layers" style="text;html=1;fontSize=11;fontStyle=1;align=center;" vertex="1" parent="1">
+          <mxGeometry x="1270" y="315" width="180" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-data" value="" style="rounded=1;fillColor=#82b366;strokeColor=#82b366;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="1275" y="345" width="15" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-data-text" value="Data Layer (persistent)" style="text;html=1;fontSize=9;align=left;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="343" width="140" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-platform" value="" style="rounded=1;fillColor=#9673a6;strokeColor=#9673a6;opacity=30;" vertex="1" parent="1">
+          <mxGeometry x="1275" y="370" width="15" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-platform-text" value="Platform Layer (ephemeral)" style="text;html=1;fontSize=9;align=left;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="368" width="140" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-mcp" value="" style="rounded=1;fillColor=#fff2cc;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="1275" y="395" width="15" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-mcp-text" value="MCP Servers (sidecars)" style="text;html=1;fontSize=9;align=left;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="393" width="140" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-auth" value="" style="rounded=1;fillColor=#f8cecc;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="1275" y="420" width="15" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-auth-text" value="Auth / Security" style="text;html=1;fontSize=9;align=left;" vertex="1" parent="1">
+          <mxGeometry x="1300" y="418" width="140" height="20" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

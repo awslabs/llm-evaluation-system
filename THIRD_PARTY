@@ -1,0 +1,62 @@
+** Third-Party Software Notices **
+
+This project depends on third-party packages. All packages are used
+without modification. The majority are licensed under MIT, Apache-2.0,
+BSD, or ISC — standard permissive licenses pre-approved for distribution.
+
+The following packages require explicit attribution:
+
+--------------------------------------------------------------------------------
+
+certifi 2025.8.3
+  Copyright: Kenneth Reitz
+  License: Mozilla Public License 2.0 (MPL-2.0)
+  Source: https://github.com/certifi/python-certifi
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+  certifi is a transitive dependency (pulled in by httpx and boto3)
+  providing a curated bundle of Root CA certificates for TLS verification.
+  It is distributed unmodified.
+
+--------------------------------------------------------------------------------
+
+postcss-values-parser 6.0.2
+  Copyright: Andrew Powell (shellscape)
+  License: Mozilla Public License 2.0 (MPL-2.0)
+  Source: https://github.com/shellscape/postcss-values-parser
+
+  This Source Code Form is subject to the terms of the Mozilla Public
+  License, v. 2.0. If a copy of the MPL was not distributed with this
+  file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
+  postcss-values-parser is a transitive dependency of promptfoo used for
+  CSS value parsing. It is distributed unmodified.
+
+--------------------------------------------------------------------------------
+
+@img/sharp-libvips-* 1.2.4
+  Copyright: Lovell Fuller <npm@lovell.info>
+  License: LGPL-3.0-or-later
+  Source: https://github.com/lovell/sharp-libvips
+
+  This library is free software; you can redistribute it and/or modify it
+  under the terms of the GNU Lesser General Public License as published by
+  the Free Software Foundation; either version 3 of the License, or (at
+  your option) any later version.
+
+  sharp-libvips provides prebuilt libvips binaries for image processing,
+  used by the sharp npm package. It is distributed unmodified. The source
+  code can be obtained from the repository above.
+
+--------------------------------------------------------------------------------
+
+caniuse-lite 1.0.30001759
+  "caniuse-lite" by Ben Briggs, licensed under CC BY 4.0
+  (https://creativecommons.org/licenses/by/4.0/).
+  Source: https://github.com/browserslist/caniuse-lite
+
+  caniuse-lite is a dataset of browser compatibility data used by
+  Browserslist and related build tools. It is distributed unmodified.

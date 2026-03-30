@@ -1,0 +1,403 @@
+{{- define "eval.backendImage" -}}
+{{- if not .Values.projectName }}{{ fail "projectName is required" }}{{- end -}}
+{{ .Values.aws.accountId }}.dkr.ecr.{{ .Values.aws.region }}.amazonaws.com/{{ .Values.projectName }}/app:{{ .Values.image.backendTag }}
+{{- end -}}
+
+{{- define "eval.frontendImage" -}}
+{{- if not .Values.projectName }}{{ fail "projectName is required" }}{{- end -}}
+{{ .Values.aws.accountId }}.dkr.ecr.{{ .Values.aws.region }}.amazonaws.com/{{ .Values.projectName }}/app:{{ .Values.image.frontendTag }}
+{{- end -}}
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: backend
+spec:
+  replicas: {{ .Values.backend.replicas }}
+  strategy:
+    type: Recreate  # Single pod with RWO storage - can't have two pods mounting same volume
+  selector:
+    matchLabels:
+      app: backend
+  template:
+    metadata:
+      labels:
+        app: backend
+      annotations:
+        # Disable CloudWatch OTEL Python auto-injection - has bugs with Bedrock streaming
+        # See: https://github.com/open-telemetry/opentelemetry-python-contrib/issues/3827
+        instrumentation.opentelemetry.io/inject-python: "false"
+    spec:
+      serviceAccountName: backend-sa
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      terminationGracePeriodSeconds: 30
+      initContainers:
+        # S3 restore - downloads SQLite databases from S3 backup on startup
+        # Simple: list S3 objects, download each .db file if not already present locally
+        - name: s3-restore
+          image: {{ include "eval.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["python", "-c"]
+          args:
+            - |
+              import boto3, os
+              from pathlib import Path
+
+              # Sentinel file to skip restore if already done (shared storage)
+              sentinel = Path("/data/.restore-complete")
+              if sentinel.exists():
+                  print("Restore sentinel exists, skipping restore")
+                  exit(0)
+
+              bucket = os.environ['BACKUP_BUCKET']
+              region = os.environ['AWS_REGION']
+
+              print(f"Restoring databases from s3://{bucket}/...")
+              s3 = boto3.client('s3', region_name=region)
+
+              # List all .db files in backup bucket
+              paginator = s3.get_paginator('list_objects_v2')
+              for page in paginator.paginate(Bucket=bucket, Prefix='users/'):
+                  for obj in page.get('Contents', []):
+                      key = obj['Key']
+                      if not key.endswith('.db'):
+                          continue
+
+                      # key is like 'users/{user_id}/promptfoo.db'
+                      local_path = f"/data/{key}"
+
+                      if os.path.exists(local_path):
+                          print(f"Skipping {key} (exists)")
+                          continue
+
+                      os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                      print(f"Downloading {key}...")
+                      s3.download_file(bucket, key, local_path)
+
+              sentinel.touch()
+              print("Restore complete")
+          env:
+            - name: BACKUP_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: BACKUP_BUCKET
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: AWS_REGION
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: user-data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+        # Native sidecar containers (K8s 1.28+) - start before main container
+        - name: synthetic-eval-mcp
+          restartPolicy: Always
+          image: {{ include "eval.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          command: ["/sbin/tini", "--", "python", "-m", "backend.mcp_servers.synthetic.server_http"]
+          ports:
+            - containerPort: 8002
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: USER_STORAGE_BASE
+              value: "/data/users"
+            - name: VIEWER_BASE_URL
+              value: "https://$(CLOUDFRONT_DOMAIN)"
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: db-credentials
+          volumeMounts:
+            - name: user-data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.mcp.syntheticEval.resources | nindent 12 }}
+        - name: providers-mcp
+          restartPolicy: Always
+          image: {{ include "eval.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          command: ["/sbin/tini", "--", "python", "-m", "backend.mcp_servers.providers.server_http"]
+          ports:
+            - containerPort: 8004
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+          envFrom:
+            - configMapRef:
+                name: app-config
+          resources:
+            {{- toYaml .Values.mcp.providers.resources | nindent 12 }}
+        - name: dataset-mcp
+          restartPolicy: Always
+          image: {{ include "eval.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          command: ["/sbin/tini", "--", "python", "-m", "backend.mcp_servers.dataset.server_http"]
+          ports:
+            - containerPort: 8005
+          env:
+            - name: HOST
+              value: "0.0.0.0"
+            - name: USER_STORAGE_BASE
+              value: "/data/users"
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: db-credentials
+          volumeMounts:
+            - name: user-data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.mcp.dataset.resources | nindent 12 }}
+        # S3 backup sidecar - periodically backs up SQLite databases to S3
+        # Uses native sqlite3 .backup for consistent snapshots (safe during writes)
+        - name: s3-backup
+          restartPolicy: Always
+          image: {{ include "eval.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/sbin/tini", "--", "python", "-c"]
+          args:
+            - |
+              import boto3, os, time, sqlite3, tempfile, subprocess
+              from pathlib import Path
+              from datetime import datetime
+
+              bucket = os.environ['BACKUP_BUCKET']
+              region = os.environ['AWS_REGION']
+              interval = int(os.environ.get('BACKUP_INTERVAL_SECONDS', '900'))  # 15 min default
+              users_dir = Path('/data/users')
+
+              s3 = boto3.client('s3', region_name=region)
+              print(f"S3 backup sidecar started (interval={interval}s)")
+
+              while True:
+                  start = datetime.now()
+                  backed_up = 0
+
+                  for db_path in users_dir.glob('*/promptfoo.db'):
+                      user_id = db_path.parent.name
+                      s3_key = f"users/{user_id}/promptfoo.db"
+
+                      try:
+                          # Use sqlite3 .backup for consistent snapshot
+                          with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as tmp:
+                              tmp_path = tmp.name
+
+                          conn = sqlite3.connect(str(db_path))
+                          backup_conn = sqlite3.connect(tmp_path)
+                          conn.backup(backup_conn)
+                          backup_conn.close()
+                          conn.close()
+
+                          # Upload to S3
+                          s3.upload_file(tmp_path, bucket, s3_key)
+                          os.unlink(tmp_path)
+                          backed_up += 1
+                      except Exception as e:
+                          print(f"Error backing up {user_id}: {e}")
+
+                  elapsed = (datetime.now() - start).total_seconds()
+                  print(f"Backed up {backed_up} databases in {elapsed:.1f}s")
+
+                  # Sleep until next interval
+                  sleep_time = max(0, interval - elapsed)
+                  time.sleep(sleep_time)
+          env:
+            - name: BACKUP_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: BACKUP_BUCKET
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: AWS_REGION
+            - name: BACKUP_INTERVAL_SECONDS
+              value: "{{ .Values.backup.intervalSeconds }}"
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          volumeMounts:
+            - name: user-data
+              mountPath: /data
+          resources:
+            {{- toYaml .Values.backup.resources | nindent 12 }}
+      containers:
+        - name: backend
+          image: {{ include "eval.backendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: db-credentials
+          env:
+            - name: USER_STORAGE_BASE
+              value: "/data/users"
+            - name: SYNTHETIC_EVAL_MCP_URL
+              value: "http://localhost:8002/mcp"
+            - name: PROVIDERS_MCP_URL
+              value: "http://localhost:8004/mcp"
+            - name: DATASET_MCP_URL
+              value: "http://localhost:8005/mcp"
+          resources:
+            {{- toYaml .Values.backend.resources | nindent 12 }}
+          volumeMounts:
+            - name: user-data
+              mountPath: /data
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5       # Allow for event loop delays (default: 1s)
+            failureThreshold: 6     # 60s before restart (default: 3)
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3       # Slightly more lenient (default: 1s)
+            failureThreshold: 3
+      volumes:
+        - name: user-data
+          persistentVolumeClaim:
+            claimName: backend-data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: frontend
+spec:
+  replicas: {{ .Values.frontend.replicas }}
+  selector:
+    matchLabels:
+      app: frontend
+  template:
+    metadata:
+      labels:
+        app: frontend
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+      containers:
+        - name: frontend
+          image: {{ include "eval.frontendImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - containerPort: 3000
+              name: http
+          envFrom:
+            - configMapRef:
+                name: app-config
+            - secretRef:
+                name: oidc-credentials
+          env:
+            - name: NEXT_PUBLIC_API_URL
+              value: ""
+            - name: APP_URL
+              value: "https://$(CLOUDFRONT_DOMAIN)"
+            - name: BACKEND_URL
+              value: "http://backend:8080"
+            - name: OIDC_PROVIDER_NAME
+              value: "SSO"
+            # Logout requires these to construct Cognito logout URL
+            - name: NEXT_PUBLIC_COGNITO_DOMAIN
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: COGNITO_DOMAIN
+            - name: NEXT_PUBLIC_COGNITO_CLIENT_ID
+              valueFrom:
+                configMapKeyRef:
+                  name: app-config
+                  key: COGNITO_CLIENT_ID
+            - name: NEXT_PUBLIC_APP_URL
+              value: "https://$(CLOUDFRONT_DOMAIN)"
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 5

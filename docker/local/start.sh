@@ -99,7 +99,7 @@ echo "Starting frontend..."
 if [ "$DEV_MODE" = "true" ]; then
     cd /app/frontend-src
     if [ ! -d node_modules/next ]; then
-        npm ci &>/dev/null
+        npm ci
     fi
     HOSTNAME=127.0.0.1 PORT=3000 npx next dev &
     FRONTEND_PID=$!

@@ -83,6 +83,7 @@ RUN chmod +x /app/start.sh
 # Create data directories owned by node user
 RUN mkdir -p /data/users /data/pgdata /app/backend/logs \
     /var/lib/nginx/logs /var/lib/nginx/tmp \
+    /app/frontend-src/node_modules \
     && chown -R node:node /data /app /var/lib/nginx /var/log/nginx
 
 # ── Environment ──────────────────────────────────────────

@@ -252,11 +252,12 @@ fi
 if [ -z "$BUILD_ID" ]; then
   # Resolve caller's IAM role ARN for EKS access grants.
   # For assumed-role ARNs (arn:aws:sts::ACCT:assumed-role/RoleName/session),
-  # convert to the IAM role ARN (arn:aws:iam::ACCT:role/RoleName).
+  # look up the full IAM role ARN via get-role. SSO roles include a path
+  # (e.g. /aws-reserved/sso.amazonaws.com/REGION/) that EKS requires.
   CALLER_ROLE_ARN=""
   if echo "$IDENTITY_ARN" | grep -q "assumed-role"; then
     ROLE_NAME="$(echo "$IDENTITY_ARN" | cut -d'/' -f2)"
-    CALLER_ROLE_ARN="arn:aws:iam::${ACCOUNT_ID}:role/${ROLE_NAME}"
+    CALLER_ROLE_ARN="$(aws iam get-role --role-name "$ROLE_NAME" --query 'Role.Arn' --output text 2>/dev/null || true)"
   fi
 
   ENV_OVERRIDES='[

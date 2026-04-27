@@ -1,16 +1,15 @@
 """Comparison API for viewing evaluation results across multiple models.
 
-Reads .eval log files via subprocess (avoids uvloop conflict with inspect_ai),
-groups them by run_id, and returns structured JSON for the comparison frontend.
+Uses read_eval_log_async() directly since FastAPI endpoints are already
+in an async context — no subprocess or nest_asyncio needed.
 """
 
-import asyncio
-import json
 import logging
 from collections import defaultdict
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from inspect_ai.log import read_eval_log_async
 
 from backend.core.user_storage import get_user_dir
 
@@ -26,137 +25,87 @@ async def _get_user_id(request: Request) -> str:
     return user_id
 
 
-async def _read_logs_subprocess(log_dir: Path, header_only: bool = True) -> list[dict]:
-    """Read .eval log files via subprocess to avoid uvloop conflict."""
+async def _read_log_headers(log_dir: Path) -> list[dict]:
+    """Read .eval log headers (no samples) from a directory."""
     eval_files = sorted(log_dir.glob("*.eval"), key=lambda f: f.stat().st_mtime, reverse=True)
-    if not eval_files:
-        return []
-
-    file_list = json.dumps([str(f) for f in eval_files])
-    script = f"""
-import json, sys
-from inspect_ai.log import read_eval_log
-
-files = json.loads('''{file_list}''')
-results = []
-for f in files:
-    try:
-        log = read_eval_log(f, header_only={header_only})
-        entry = {{
-            "file": f,
-            "run_id": log.eval.run_id if log.eval.run_id else None,
-            "task": log.eval.task,
-            "model": log.eval.model,
-            "status": log.status,
-            "created": log.eval.created,
-            "dataset_samples": log.eval.dataset.samples if log.eval.dataset else 0,
-        }}
-        if log.results and log.results.scores:
-            entry["scores"] = []
-            for s in log.results.scores:
-                entry["scores"].append({{
-                    "name": s.name,
-                    "metrics": {{n: m.value for n, m in s.metrics.items()}}
-                }})
-        if log.stats:
-            usage = {{}}
-            if log.stats.model_usage:
-                for model_name, mu in log.stats.model_usage.items():
-                    usage[model_name] = {{
-                        "input_tokens": mu.input_tokens,
-                        "output_tokens": mu.output_tokens,
-                        "total_tokens": mu.total_tokens,
-                    }}
-            entry["model_usage"] = usage
-            if log.stats.started_at:
-                entry["started_at"] = str(log.stats.started_at)
-            if log.stats.completed_at:
-                entry["completed_at"] = str(log.stats.completed_at)
-        results.append(entry)
-    except Exception as e:
-        results.append({{"file": f, "error": str(e)}})
-
-print(json.dumps(results))
-"""
-    proc = await asyncio.create_subprocess_exec(
-        "python3", "-c", script,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        logger.error(f"Log reading subprocess failed: {stderr.decode()[:500]}")
-        return []
-    try:
-        return json.loads(stdout.decode())
-    except json.JSONDecodeError:
-        logger.error(f"Failed to parse log subprocess output")
-        return []
+    results = []
+    for f in eval_files:
+        try:
+            log = await read_eval_log_async(str(f), header_only=True)
+            entry = {
+                "file": str(f),
+                "run_id": log.eval.run_id if log.eval.run_id else None,
+                "task": log.eval.task,
+                "model": log.eval.model,
+                "status": log.status,
+                "created": log.eval.created,
+                "dataset_samples": log.eval.dataset.samples if log.eval.dataset else 0,
+            }
+            if log.results and log.results.scores:
+                entry["scores"] = [
+                    {"name": s.name, "metrics": {n: m.value for n, m in s.metrics.items()}}
+                    for s in log.results.scores
+                ]
+            if log.stats:
+                usage = {}
+                if log.stats.model_usage:
+                    for model_name, mu in log.stats.model_usage.items():
+                        usage[model_name] = {
+                            "input_tokens": mu.input_tokens,
+                            "output_tokens": mu.output_tokens,
+                            "total_tokens": mu.total_tokens,
+                        }
+                entry["model_usage"] = usage
+                if log.stats.started_at:
+                    entry["started_at"] = str(log.stats.started_at)
+                if log.stats.completed_at:
+                    entry["completed_at"] = str(log.stats.completed_at)
+            results.append(entry)
+        except Exception as e:
+            logger.warning(f"Failed to read log {f}: {e}")
+    return results
 
 
-async def _read_full_logs_subprocess(log_files: list[str]) -> list[dict]:
-    """Read full .eval logs with samples for detail view."""
-    file_list = json.dumps(log_files)
-    script = f"""
-import json, sys
-from inspect_ai.log import read_eval_log
-
-files = json.loads('''{file_list}''')
-results = []
-for f in files:
-    try:
-        log = read_eval_log(f, header_only=False)
-        entry = {{
-            "file": f,
-            "model": log.eval.model,
-            "status": log.status,
-        }}
-        samples = []
-        if log.samples:
-            for s in log.samples:
-                sample = {{
-                    "id": str(s.id),
-                    "input": str(s.input) if isinstance(s.input, str) else str(s.input[0].content if s.input else ""),
-                    "target": s.target[0] if isinstance(s.target, list) else str(s.target) if s.target else "",
-                    "output": s.output.completion[:500] if s.output else "",
-                }}
-                if s.scores:
-                    sample["scores"] = {{}}
-                    for scorer_name, score in s.scores.items():
-                        score_data = {{
-                            "value": str(score.value),
-                            "explanation": score.explanation or "",
-                        }}
-                        if score.metadata:
-                            score_data["metadata"] = score.metadata
-                        sample["scores"][scorer_name] = score_data
-                if s.model_usage:
-                    sample["model_usage"] = {{
-                        k: {{"input_tokens": v.input_tokens, "output_tokens": v.output_tokens, "total_tokens": v.total_tokens}}
-                        for k, v in s.model_usage.items()
-                    }}
-                samples.append(sample)
-        entry["samples"] = samples
-        results.append(entry)
-    except Exception as e:
-        results.append({{"file": f, "error": str(e)}})
-
-print(json.dumps(results, default=str))
-"""
-    proc = await asyncio.create_subprocess_exec(
-        "python3", "-c", script,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        logger.error(f"Full log reading failed: {stderr.decode()[:500]}")
-        return []
-    try:
-        return json.loads(stdout.decode())
-    except json.JSONDecodeError:
-        logger.error(f"Failed to parse full log output")
-        return []
+async def _read_full_logs(log_files: list[str]) -> list[dict]:
+    """Read full .eval logs with samples."""
+    results = []
+    for f in log_files:
+        try:
+            log = await read_eval_log_async(f, header_only=False)
+            entry: dict = {
+                "file": f,
+                "model": log.eval.model,
+                "status": log.status,
+                "samples": [],
+            }
+            if log.samples:
+                for s in log.samples:
+                    sample: dict = {
+                        "id": str(s.id),
+                        "input": str(s.input) if isinstance(s.input, str) else str(s.input[0].content if s.input else ""),
+                        "target": s.target[0] if isinstance(s.target, list) else str(s.target) if s.target else "",
+                        "output": s.output.completion[:500] if s.output else "",
+                    }
+                    if s.scores:
+                        sample["scores"] = {}
+                        for scorer_name, score in s.scores.items():
+                            score_data: dict = {
+                                "value": str(score.value),
+                                "explanation": score.explanation or "",
+                            }
+                            if score.metadata:
+                                score_data["metadata"] = score.metadata
+                            sample["scores"][scorer_name] = score_data
+                    if s.model_usage:
+                        sample["model_usage"] = {
+                            k: {"input_tokens": v.input_tokens, "output_tokens": v.output_tokens, "total_tokens": v.total_tokens}
+                            for k, v in s.model_usage.items()
+                        }
+                    entry["samples"].append(sample)
+            results.append(entry)
+        except Exception as e:
+            logger.warning(f"Failed to read full log {f}: {e}")
+    return results
 
 
 @router.get("/groups")
@@ -167,8 +116,7 @@ async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
     if not log_dir.exists():
         return {"groups": []}
 
-    logs = await _read_logs_subprocess(log_dir, header_only=True)
-    logs = [l for l in logs if "error" not in l]
+    logs = await _read_log_headers(log_dir)
 
     # Group by run_id
     groups_map: dict[str, list[dict]] = defaultdict(list)
@@ -187,7 +135,6 @@ async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
                     metrics.update(s["metrics"])
                 scores_by_model[l["model"]] = metrics
 
-        # Extract config name from task (our tasks are named after the config)
         task_name = run_logs[0].get("task", "unknown")
         config_name = task_name.replace("eval_task", "").strip("_") or task_name
 
@@ -202,7 +149,6 @@ async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
             "scores": scores_by_model,
         })
 
-    # Sort by created time, newest first
     groups.sort(key=lambda g: g["created"], reverse=True)
     return {"groups": groups}
 
@@ -215,22 +161,18 @@ async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_
     if not log_dir.exists():
         raise HTTPException(status_code=404, detail="No logs found")
 
-    # First get headers to find files in this group
-    headers = await _read_logs_subprocess(log_dir, header_only=True)
-    headers = [h for h in headers if "error" not in h]
+    headers = await _read_log_headers(log_dir)
 
     # Filter to the requested group
     group_logs = [h for h in headers if h.get("run_id") == group_id]
     if not group_logs:
-        # Fallback: try matching by file path
         group_logs = [h for h in headers if h["file"] == group_id]
     if not group_logs:
         raise HTTPException(status_code=404, detail="Group not found")
 
     # Read full logs with samples
     log_files = [l["file"] for l in group_logs]
-    full_logs = await _read_full_logs_subprocess(log_files)
-    full_logs = [l for l in full_logs if "error" not in l]
+    full_logs = await _read_full_logs(log_files)
 
     if not full_logs:
         raise HTTPException(status_code=500, detail="Failed to read evaluation logs")
@@ -253,16 +195,13 @@ async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_
                     "results": {},
                 }
 
-            # Extract score data
-            score_data = {"passed": False, "score": 0.0, "output": sample.get("output", "")[:300]}
+            score_data: dict = {"passed": False, "score": 0.0, "output": sample.get("output", "")[:300]}
             if sample.get("scores"):
                 for scorer_name, score in sample["scores"].items():
                     score_data["passed"] = score["value"] == "C"
                     metadata = score.get("metadata", {})
                     score_data["score"] = metadata.get("jury_score", 1.0 if score["value"] == "C" else 0.0)
                     score_data["explanation"] = score.get("explanation", "")
-
-                    # Extract criteria results
                     criteria_results = metadata.get("criteria_results", [])
                     score_data["criteriaResults"] = criteria_results
                     for cr in criteria_results:
@@ -332,15 +271,14 @@ async def get_sample_detail(
     """Get full detail for a single sample including judge reasoning."""
     user_dir = get_user_dir(user_id)
 
-    # Security: ensure the log file is within user's directory
     log_path = Path(log_file)
     if not str(log_path).startswith(str(user_dir)):
         raise HTTPException(status_code=403, detail="Access denied")
     if not log_path.exists():
         raise HTTPException(status_code=404, detail="Log file not found")
 
-    full_logs = await _read_full_logs_subprocess([str(log_path)])
-    if not full_logs or "error" in full_logs[0]:
+    full_logs = await _read_full_logs([str(log_path)])
+    if not full_logs:
         raise HTTPException(status_code=500, detail="Failed to read log")
 
     log = full_logs[0]

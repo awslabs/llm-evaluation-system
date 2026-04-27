@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { Sample } from "./ComparisonView";
 
 function formatModel(model: string): string {
@@ -122,47 +123,41 @@ export default function SampleDetailPanel({
         )}
 
         {/* Question */}
-        <div>
-          <h4 className="mb-1 text-xs font-medium uppercase tracking-wider text-claude-muted">
-            Question
-          </h4>
-          <p className="rounded bg-claude-bg p-3 text-sm text-claude-text">
-            {sample.input}
-          </p>
-        </div>
+        <ExpandableSection title="Question" content={sample.input} />
 
         {/* Expected answer */}
-        <div>
-          <h4 className="mb-1 text-xs font-medium uppercase tracking-wider text-claude-muted">
-            Expected Answer
-          </h4>
-          <p className="rounded bg-claude-bg p-3 text-sm text-claude-text">
-            {sample.target}
-          </p>
-        </div>
+        <ExpandableSection title="Expected Answer" content={sample.target} />
 
         {/* Model response */}
-        <div>
-          <h4 className="mb-1 text-xs font-medium uppercase tracking-wider text-claude-muted">
-            Model Response
-          </h4>
-          <p className="rounded bg-claude-bg p-3 text-sm text-claude-text whitespace-pre-wrap">
-            {result.output}
-          </p>
-        </div>
+        <ExpandableSection title="Model Response" content={result.output} />
 
-        {/* Open in Inspect */}
-        <div className="pt-2 border-t border-claude-border">
-          <a
-            href="/inspect/"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="text-xs text-claude-accent hover:text-claude-hover"
-          >
-            Open in Inspect Viewer &rarr;
-          </a>
-        </div>
       </div>
+    </div>
+  );
+}
+
+function ExpandableSection({ title, content }: { title: string; content: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const isLong = content.length > 200;
+
+  const truncated = isLong ? content.slice(0, content.lastIndexOf(" ", 200)) + "..." : content;
+
+  return (
+    <div>
+      <h4 className="mb-1 text-xs font-medium uppercase tracking-wider text-claude-muted">
+        {title}
+      </h4>
+      <div className="rounded bg-claude-bg p-3 text-sm text-claude-text whitespace-pre-wrap">
+        {isLong && !expanded ? truncated : content}
+      </div>
+      {isLong && (
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="mt-1 text-xs text-claude-accent hover:text-claude-hover"
+        >
+          {expanded ? "▲ Show less" : "▼ Show more"}
+        </button>
+      )}
     </div>
   );
 }

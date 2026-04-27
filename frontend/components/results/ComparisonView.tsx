@@ -33,6 +33,7 @@ interface ComparisonData {
   task: string;
   models: string[];
   criteria: string[];
+  criteriaDescriptions: Record<string, string>;
   aggregate: Record<string, { overall: number; byCriterion: Record<string, number> }>;
   samples: Sample[];
   stats: Record<string, Record<string, unknown>>;
@@ -92,7 +93,9 @@ export default function ComparisonView({ groupId }: { groupId: string }) {
           models={data.models}
           aggregate={data.aggregate}
           criteria={data.criteria}
+          criteriaDescriptions={data.criteriaDescriptions}
           stats={data.stats}
+          sampleCount={data.samples.length}
         />
         <ComparisonGrid
           models={data.models}

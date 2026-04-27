@@ -4,13 +4,16 @@ Uses read_eval_log_async() directly since FastAPI endpoints are already
 in an async context — no subprocess or nest_asyncio needed.
 """
 
+import json
 import logging
 from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from inspect_ai.log import read_eval_log_async
 
+from backend.core.pricing import calculate_cost
 from backend.core.user_storage import get_user_dir
 
 logger = logging.getLogger(__name__)
@@ -84,7 +87,7 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
                         "id": str(s.id),
                         "input": str(s.input) if isinstance(s.input, str) else str(s.input[0].content if s.input else ""),
                         "target": s.target[0] if isinstance(s.target, list) else str(s.target) if s.target else "",
-                        "output": s.output.completion[:500] if s.output else "",
+                        "output": s.output.completion if s.output else "",
                     }
                     if s.scores:
                         sample["scores"] = {}
@@ -153,6 +156,26 @@ async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
     return {"groups": groups}
 
 
+def _load_criteria_descriptions(user_dir: Path, task_name: str, criteria_names: set[str]) -> dict[str, str]:
+    """Load criteria descriptions from the config JSON file that matches this eval."""
+    configs_dir = user_dir / "configs"
+    if not configs_dir.exists():
+        return {}
+    # Find the config whose criteria names match this eval's criteria
+    for json_file in configs_dir.glob("*.json"):
+        try:
+            data = json.loads(json_file.read_text())
+            criteria = data.get("criteria", [])
+            if not criteria:
+                continue
+            config_names = {c["name"] for c in criteria}
+            if criteria_names and criteria_names.issubset(config_names):
+                return {c["name"]: c["description"] for c in criteria}
+        except Exception:
+            continue
+    return {}
+
+
 @router.get("/detail")
 async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_id)):
     """Get full comparison data for a specific evaluation group."""
@@ -190,12 +213,12 @@ async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_
             if sid not in samples_by_id:
                 samples_by_id[sid] = {
                     "id": sid,
-                    "input": sample["input"][:300],
-                    "target": sample["target"][:300],
+                    "input": sample["input"],
+                    "target": sample["target"],
                     "results": {},
                 }
 
-            score_data: dict = {"passed": False, "score": 0.0, "output": sample.get("output", "")[:300]}
+            score_data: dict = {"passed": False, "score": 0.0, "output": sample.get("output", "")}
             if sample.get("scores"):
                 for scorer_name, score in sample["scores"].items():
                     score_data["passed"] = score["value"] == "C"
@@ -235,27 +258,63 @@ async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_
 
         aggregate[model] = {"overall": overall, "byCriterion": by_criterion}
 
-    # Stats from headers
+    # Stats from headers: tokens, cost, latency
     stats: dict[str, dict] = {}
     for log in group_logs:
         model = log["model"]
+        started = log.get("started_at")
+        completed = log.get("completed_at")
+
+        # Calculate latency
+        latency_seconds = None
+        if started and completed:
+            try:
+                t0 = datetime.fromisoformat(started)
+                t1 = datetime.fromisoformat(completed)
+                latency_seconds = (t1 - t0).total_seconds()
+            except (ValueError, TypeError):
+                pass
+
+        sample_count = log.get("dataset_samples", 1) or 1
+        avg_latency = latency_seconds / sample_count if latency_seconds else None
+
         stats[model] = {
-            "startedAt": log.get("started_at"),
-            "completedAt": log.get("completed_at"),
+            "startedAt": started,
+            "completedAt": completed,
+            "totalSeconds": latency_seconds,
+            "latencySeconds": round(avg_latency, 2) if avg_latency else None,
         }
+
         if log.get("model_usage"):
-            total_usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            total_input = 0
+            total_output = 0
+            total_tokens = 0
             for usage in log["model_usage"].values():
-                total_usage["input_tokens"] += usage.get("input_tokens", 0)
-                total_usage["output_tokens"] += usage.get("output_tokens", 0)
-                total_usage["total_tokens"] += usage.get("total_tokens", 0)
-            stats[model].update(total_usage)
+                total_input += usage.get("input_tokens", 0)
+                total_output += usage.get("output_tokens", 0)
+                total_tokens += usage.get("total_tokens", 0)
+            stats[model]["input_tokens"] = total_input
+            stats[model]["output_tokens"] = total_output
+            stats[model]["total_tokens"] = total_tokens
+
+            # Calculate cost from pricing table
+            cost = calculate_cost(model, total_input, total_output)
+            stats[model]["cost"] = cost
+
+            # Tokens per second
+            if latency_seconds and latency_seconds > 0:
+                stats[model]["tokensPerSecond"] = round(total_output / latency_seconds, 1)
+
+    # Load criteria descriptions from config file
+    task_name = group_logs[0].get("task", "")
+    criteria_descriptions = _load_criteria_descriptions(user_dir, task_name, criteria_set)
 
     return {
         "groupId": group_id,
-        "task": group_logs[0].get("task", ""),
+        "task": task_name,
         "models": models,
         "criteria": sorted(criteria_set),
+        "criteriaDescriptions": criteria_descriptions,
         "aggregate": aggregate,
         "samples": list(samples_by_id.values()),
         "stats": stats,

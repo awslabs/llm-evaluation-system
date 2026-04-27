@@ -55,6 +55,10 @@ services:
       DATASET_MCP_URL: http://127.0.0.1:8005/mcp
       USER_STORAGE_BASE: /data/users
       APP_URL: http://127.0.0.1:4001
+      # External provider keys (optional — set in .env.keys)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -95,6 +99,9 @@ services:
     environment:
       PYTHONPATH: /app
       WATCHFILES_FORCE_POLLING: "true"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}

@@ -73,7 +73,10 @@ test_*.yaml
 
 # Environment variables
 .env
+.env.*
+!.env.keys.example
 .env.local
+.env.keys
 .env.production
 
 # Temporary files

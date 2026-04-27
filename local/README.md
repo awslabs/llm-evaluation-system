@@ -1,96 +1,98 @@
-# Local Deployment
+# Local Development
 
-Run the full application locally in a single container. No AWS infrastructure costs — only Bedrock API calls.
+Run the full application locally with Docker Compose. Mirrors the production EKS topology — each service runs in its own container with shared network (like K8s pod sidecars).
 
 ## Prerequisites
 
-- **Podman** or **Docker** installed (`brew install podman` or `brew install --cask docker`)
-- **AWS credentials** with Bedrock access (SSO, credential_process, static keys, or Bedrock API key)
-- **AWS CLI** installed (`brew install awscli`) — used to resolve credentials (not needed with API key)
+- **Docker** with Compose V2 (`docker compose`)
+- **AWS credentials** with Bedrock access (`aws sso login`)
+- **AWS CLI** installed
 
 ## Quick Start
 
 ```bash
-# Using AWS SSO/profile
 AWS_PROFILE=my-profile make dev
-
-# Using a Bedrock API key (no IAM credentials needed)
-AWS_BEARER_TOKEN_BEDROCK=your-key make dev
 ```
 
-Open **http://localhost:4001** when it's ready.
+Open **http://127.0.0.1:4001** when ready (~2 minutes first build, ~30 seconds after).
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `make dev` | Dev mode with hot reload (code changes apply instantly) |
-| `make run` | Production mode (built assets, runs in background) |
-| `make build` | Build container image |
-| `make stop` | Stop container |
-| `make logs` | Tail container logs |
-| `make clean` | Stop and remove build caches (preserves data) |
+| `make dev` | Start all services with hot reload |
+| `make stop` | Stop all services |
+| `make logs` | Tail all logs |
+| `make logs s=backend` | Tail one service's logs |
+| `make restart s=backend` | Restart one service with fresh creds |
+| `make build` | Build all images |
+| `make clean` | Stop and remove all data volumes |
 
-## What's Running
+## Architecture
 
 ```
-┌─── Single Container ────────────────────────────────┐
-│  ├── nginx (reverse proxy)  :4001  ← your browser   │
-│  ├── PostgreSQL              :5432                   │
-│  ├── Synthetic MCP server    :8002                   │
-│  ├── Providers MCP server    :8004                   │
-│  ├── Dataset MCP server      :8005                   │
-│  ├── Backend (FastAPI)       :8080                   │
-│  └── Frontend (Next.js)      :3000                   │
-└──────────────────────────────────────────────────────┘
+┌─── Docker Compose ──────────────────────────────────────────┐
+│                                                              │
+│  nginx (:4001) ← your browser                               │
+│    ├── /api/* → backend                                      │
+│    ├── /inspect/* → backend (Inspect AI viewer)              │
+│    └── /* → frontend                                         │
+│                                                              │
+│  backend (:8080)         ─┐                                  │
+│  synthetic-mcp (:8002)    │ shared network (127.0.0.1)       │
+│  providers-mcp (:8004)    │ like K8s pod sidecars            │
+│  dataset-mcp (:8005)     ─┘                                  │
+│                                                              │
+│  frontend (:3000)          separate network                  │
+│  postgres (:5432)          separate network                  │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-nginx routes `/api/*` directly to the backend (preserving SSE streaming) and everything else to the frontend — mirroring the production ALB + oauth2-proxy routing.
+## Hot Reload
 
-## Data Persistence
+Each service reloads independently:
+- Edit `backend/api/` or `backend/core/` → only backend restarts
+- Edit `backend/mcp_servers/synthetic/` → only synthetic-mcp restarts
+- Edit `frontend/` → only frontend reloads
+- No cascade crashes
 
-All data is stored in the `eval-data` volume:
-- Chat history (PostgreSQL data)
-- Datasets, judges, evaluation configs
-- Evaluation results
-- Uploaded documents
+## Credential Refresh
 
-Data survives container restarts. To reset everything:
+AWS credentials are injected at startup. When they expire:
 
 ```bash
-make stop
-podman volume rm eval-data  # or: docker volume rm eval-data
+aws sso login
+make restart s=backend    # restart just backend with fresh creds
 ```
 
-## Environment Variables
+Or restart everything: `make stop && make dev`
 
-| Variable | Description |
-|----------|-------------|
-| `AWS_PROFILE` | AWS credential profile (for SSO/IAM auth) |
-| `AWS_REGION` | AWS region for Bedrock (default: us-west-2) |
-| `AWS_BEARER_TOKEN_BEDROCK` | Bedrock API key (alternative to IAM credentials) |
+## Data
+
+All data is in Docker volumes:
+- `pgdata` — PostgreSQL (chat history)
+- `userdata` — user files, eval logs, datasets, judges
+- `frontend-nm` — frontend node_modules
+
+Data survives restarts. To reset: `make clean`
 
 ## Troubleshooting
 
-**Build fails with OOM / SIGKILL:**
-The Podman VM needs at least 8GB of memory. The Makefile handles Podman clock sync but not memory. Set it manually:
+**Build fails with ECR 403:**
 ```bash
-podman machine stop
-podman machine set --memory 8192
-podman machine start
+aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
+make dev
 ```
 
-**Container exits immediately:**
-Check logs with `make logs`. Common causes:
-- Missing AWS credentials — run `aws sso login` first if using SSO
-- Port 4001 already in use — stop whatever is using it
-
-**Bedrock errors:**
-Ensure your AWS credentials have `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` permissions.
+**Backend won't start (MCP connection error):**
+MCP servers need to be up first. The backend waits for them, but if they fail:
+```bash
+make logs s=synthetic-mcp   # check what's wrong
+make restart s=backend       # retry after MCP is up
+```
 
 **Credentials expired:**
-If using SSO or session tokens, credentials are resolved at container start time. Restart to pick up fresh credentials:
 ```bash
-aws sso login  # if using SSO
-make stop && make dev
+aws sso login
+make restart s=backend
 ```

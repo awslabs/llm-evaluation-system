@@ -33,7 +33,7 @@ Technical reference for developers working on the LLM Evaluation Platform.
                     └──────────────────────┼──────────────────────┘
                                            │
                               ┌────────────▼────────────┐
-                              │   SQLite + EBS Storage   │
+                              │   JSON + EBS Storage   │
                               │  Periodic S3 backup      │
                               └─────────────────────────┘
 ```
@@ -54,7 +54,7 @@ Internet → CloudFront (HTTPS + WAF) → VPC Origin → Internal ALB → Pods
 ## Project Structure
 
 ```
-managed_eval/
+llm-evaluation-system/
 ├── backend/
 │   ├── api/           # FastAPI backend (main.py)
 │   ├── core/          # Core modules (agent, bedrock_client, database, etc.)
@@ -63,7 +63,7 @@ managed_eval/
 │       ├── providers/ # Bedrock model discovery
 │       └── dataset/   # Dataset management
 ├── frontend/          # Next.js chat interface
-├── promptfoo/         # Vendored promptfoo source (built from source)
+├── inspect/       # Inspect AI configuration
 ├── docker/            # Dockerfiles
 ├── helm/
 │   ├── eval/                      # App Helm chart
@@ -88,7 +88,7 @@ Persistent resources that survive `./destroy.sh`:
 - **VPC** — 10.0.0.0/16 CIDR, 2 AZs, public/private/intra subnets, NAT gateway, S3 VPC endpoint
 - **RDS PostgreSQL** — db.t3.micro, 20GB (auto-scales to 100GB), IAM auth enabled
 - **S3 Documents Bucket** — User uploads, versioned
-- **S3 Backup Bucket** — Periodic SQLite backups, versioned
+- **S3 Backup Bucket** — Periodic JSON backups, versioned
 
 ### Platform Layer (`infra/platform/`)
 
@@ -287,7 +287,7 @@ helm template eval ./helm/eval -f ./helm/eval/values-aws.yaml \
 
 ### Storage Management
 
-Backend uses single-pod architecture with EBS gp3 storage (200Gi). Sidecar backs up SQLite databases to S3 every 15 minutes. Brief downtime (~30s) occurs during deploys.
+Backend uses single-pod architecture with EBS gp3 storage (200Gi). Sidecar backs up JSON databases to S3 every 15 minutes. Brief downtime (~30s) occurs during deploys.
 
 ```bash
 # Check disk usage
@@ -315,6 +315,5 @@ cd infra/platform && terraform state list
 
 ### Docker Rebuild Required For
 
-- Promptfoo source changes (React UI)
 - Dockerfile changes
 - New Python dependencies (pyproject.toml)

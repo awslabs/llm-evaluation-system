@@ -1,23 +1,26 @@
 """List available evaluation configuration files."""
 
+import json
 from pathlib import Path
 from typing import Any, Dict, List
 from mcp.types import TextContent
-import yaml
 
 
 async def handle_list_eval_configs(args: Dict[str, Any]) -> List[TextContent]:
     """Handle list_eval_configs tool call.
 
-    Lists all evaluation configuration files in the .promptfoo/configs/ directory.
-    Returns details about each config including providers, dataset path, and judge.
+    Lists all evaluation task files in the user's configs/ directory.
+    Returns details about each config.
     """
     try:
-        # Get optional search filter
         search_term = (args.get("searchTerm") or "").lower()
+        user_id = args.get("user_id")
 
-        # Look in the standard configs directory
-        configs_dir = Path(".promptfoo/configs")
+        from backend.core.user_storage import get_user_dir
+        if user_id:
+            configs_dir = get_user_dir(user_id) / "configs"
+        else:
+            configs_dir = Path("configs")
 
         if not configs_dir.exists():
             return [
@@ -27,62 +30,29 @@ async def handle_list_eval_configs(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
-        # Find all YAML config files
-        config_files = list(configs_dir.glob("*.yaml")) + list(configs_dir.glob("*.yml"))
+        # Find all Python task files
+        config_files = list(configs_dir.glob("*.py"))
 
         if not config_files:
             return [
                 TextContent(
                     type="text",
-                    text="No evaluation configs found in .promptfoo/configs/",
+                    text="No evaluation configs found.",
                 )
             ]
 
-        # Parse and format config information
         configs_info = []
         for config_file in sorted(config_files):
-            try:
-                with open(config_file, "r") as f:
-                    config_data = yaml.safe_load(f)
+            config_name = config_file.stem
 
-                # Extract key information
-                config_name = config_file.stem
-
-                # Apply search filter
-                if search_term and search_term not in config_name.lower():
-                    continue
-
-                providers = config_data.get("providers", [])
-                provider_names = []
-                for provider in providers:
-                    if isinstance(provider, str):
-                        provider_names.append(provider)
-                    elif isinstance(provider, dict):
-                        provider_names.append(provider.get("id", "unknown"))
-
-                tests = config_data.get("tests", [])
-                dataset_path = tests[0].get("vars") if tests and isinstance(tests[0].get("vars"), str) else "inline"
-
-                judge = ""
-                if tests and "assert" in tests[0]:
-                    assertions = tests[0]["assert"]
-                    if assertions and isinstance(assertions, list):
-                        judge_assert = next((a for a in assertions if a.get("type") == "llm-rubric"), None)
-                        if judge_assert:
-                            judge = judge_assert.get("value", "")[:100]  # First 100 chars
-
-                config_info = {
-                    "name": config_name,
-                    "path": str(config_file),
-                    "providers": provider_names,
-                    "dataset": dataset_path,
-                    "judge_preview": judge if judge else "No judge",
-                }
-                configs_info.append(config_info)
-
-            except Exception:
-                # Skip files that can't be parsed
+            if search_term and search_term not in config_name.lower():
                 continue
+
+            config_info = {
+                "name": config_name,
+                "type": "inspect_task",
+            }
+            configs_info.append(config_info)
 
         if not configs_info:
             return [
@@ -92,17 +62,11 @@ async def handle_list_eval_configs(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
-        # Format output
-        output = f"Found {len(configs_info)} evaluation config(s):\n\n"
-
-        for config in configs_info:
-            output += f"📋 **{config['name']}**\n"
-            output += f"   Path: {config['path']}\n"
-            output += f"   Providers: {', '.join(config['providers'])}\n"
-            output += f"   Dataset: {config['dataset']}\n"
-            output += f"   Judge: {config['judge_preview']}\n\n"
-
-        return [TextContent(type="text", text=output)]
+        return [TextContent(type="text", text=json.dumps({
+            "success": True,
+            "configs": configs_info,
+            "total": len(configs_info),
+        }, indent=2))]
 
     except Exception as e:
         return [

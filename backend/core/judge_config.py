@@ -1,20 +1,19 @@
 """Configuration for Jury multi-judge evaluation.
 
 Defines configurable judges (LLM models) and criteria (evaluation dimensions).
-Used by create_eval_config.py to generate promptfoo configs with multi-judge
-llm-rubric assertions.
+Used by create_eval_config.py to generate Inspect AI eval configs with multi-judge
+scoring.
 """
 
 from typing import Dict, List
 
 
-# Judge models for multi-judge evaluation via promptfoo llm-rubric
-# Model IDs with "bedrock:" prefix (used with promptfoo)
-# These models output JSON reliably when asked in the prompt
+# Judge models for multi-judge evaluation
+# Model IDs use Inspect AI provider format (bedrock/ prefix)
 JUDGE_MODELS: Dict[str, str] = {
-    "claude": "bedrock:us.anthropic.claude-sonnet-4-6",
-    "nova": "bedrock:us.amazon.nova-pro-v1:0",
-    "llama": "bedrock:us.meta.llama3-3-70b-instruct-v1:0",
+    "claude": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "nova": "bedrock/us.amazon.nova-pro-v1:0",
+    "llama": "bedrock/us.meta.llama3-3-70b-instruct-v1:0",
 }
 
 # Default criteria for evaluation - binary (0 or 1)
@@ -56,7 +55,7 @@ class JudgeConfig:
         judges: Dict mapping judge labels to model IDs
 
     Example:
-        # Default configuration (4 judges × 4 criteria = 16 signals)
+        # Default configuration (4 judges x 4 criteria = 16 signals)
         config = JudgeConfig()
 
         # Custom criteria
@@ -106,7 +105,7 @@ class JudgeConfig:
 
     @property
     def num_signals(self) -> int:
-        """Total signals = judges × criteria."""
+        """Total signals = judges x criteria."""
         return len(self.judges) * len(self.criteria)
 
     def get_criteria_description(self, name: str) -> str:

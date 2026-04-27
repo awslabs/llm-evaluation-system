@@ -2,13 +2,18 @@
 """
 Providers MCP Server - HTTP implementation.
 
-Provides dynamic Bedrock provider discovery across all available model providers.
+Provides model discovery across Bedrock and external providers (OpenAI, Anthropic, Google, etc.).
+External providers are detected based on API key environment variables.
 """
 
 import json
 import os
 from mcp.server import FastMCP
 from backend.core.bedrock_client import create_boto3_bedrock_client
+from backend.mcp_servers.providers.external_providers import (
+    detect_available_providers,
+    get_external_models,
+)
 
 # Get configuration
 region = os.environ.get("AWS_REGION", "us-west-2")
@@ -18,10 +23,10 @@ host = os.environ.get("HOST", "127.0.0.1")
 # Initialize FastMCP server
 mcp = FastMCP("providers-server", port=port, host=host)
 
-# Curated models with pricing support in promptfoo. Updated Mar 2026.
+# Curated models supported for evaluations. Updated Mar 2026.
 # Base IDs for models invokable directly + us. prefixed IDs for models
 # requiring cross-region inference profiles (newer Anthropic/Amazon/Meta).
-PROMPTFOO_SUPPORTED_MODELS = {
+SUPPORTED_MODELS = {
     # Amazon Nova
     "amazon.nova-micro-v1:0", "amazon.nova-lite-v1:0",
     "amazon.nova-pro-v1:0", "amazon.nova-premier-v1:0",
@@ -122,7 +127,7 @@ def list_bedrock_models(
     Get list of AWS Bedrock models available for evaluations.
 
     Queries both inference profiles (cross-region) and foundation models to return
-    all models you have access to. Returns models with correct format (bedrock:*) ready to use.
+    all models you have access to. Returns models with correct format (bedrock/*) ready to use.
 
     Args:
         provider: Filter by provider name (case-insensitive):
@@ -181,8 +186,8 @@ def list_bedrock_models(
         if provider_filter.lower() != "all" and provider_filter.lower() != provider_name.lower():
             return False
 
-        # Only include models supported by promptfoo
-        if model_id not in PROMPTFOO_SUPPORTED_MODELS:
+        # Only include supported models
+        if model_id not in SUPPORTED_MODELS:
             return False
 
         return True
@@ -200,7 +205,7 @@ def list_bedrock_models(
             # Mark base ID as seen so foundation model won't duplicate
             seen_base_ids.add(strip_regional_prefix(profile_id))
             models.append({
-                'id': f"bedrock:{profile_id}",
+                'id': f"bedrock/{profile_id}",
                 'modelId': profile_id,
                 'name': profile_name,
                 'provider': extract_provider_name(profile_id),
@@ -226,7 +231,7 @@ def list_bedrock_models(
 
             seen_base_ids.add(base_id)
             models.append({
-                'id': f"bedrock:{model_id}",
+                'id': f"bedrock/{model_id}",
                 'modelId': model_id,
                 'name': model_name,
                 'provider': extract_provider_name(model_id),
@@ -261,6 +266,73 @@ def list_bedrock_models(
             "text_only": text_only
         },
         "note": "Shows inference profiles and foundation models. Use text_only=false to include image/embedding models."
+    }, indent=2)
+
+
+@mcp.tool()
+def list_available_models(
+    provider: str = "all",
+    source: str = "all",
+) -> str:
+    """
+    List all models available for evaluations, across Bedrock and external providers.
+
+    Combines AWS Bedrock models with any external providers that have API keys configured
+    (OpenAI, Anthropic direct, Google Gemini, etc.).
+
+    Args:
+        provider: Filter by provider name (case-insensitive):
+            - "all" (default): All providers
+            - "openai": OpenAI models (requires OPENAI_API_KEY)
+            - "anthropic": Anthropic models (Bedrock + direct API if key set)
+            - "google": Google Gemini models (requires GOOGLE_API_KEY)
+            - Or any Bedrock provider name (amazon, meta, mistral, etc.)
+
+        source: Filter by source:
+            - "all" (default): Bedrock + external providers
+            - "bedrock": Only AWS Bedrock models
+            - "external": Only external provider models (OpenAI, Anthropic direct, Google, etc.)
+
+    Returns:
+        JSON with available models from all configured providers, sorted by source then provider
+    """
+    all_models = []
+
+    # 1. Get Bedrock models (unless filtered to external only)
+    if source in ("all", "bedrock"):
+        try:
+            bedrock_result = json.loads(list_bedrock_models(provider=provider))
+            if "models" in bedrock_result:
+                for m in bedrock_result["models"]:
+                    m["source"] = "bedrock"
+                all_models.extend(bedrock_result["models"])
+        except Exception:
+            pass  # Bedrock may not be available
+
+    # 2. Get external models (unless filtered to bedrock only)
+    if source in ("all", "external"):
+        external = get_external_models(provider=provider)
+        for m in external:
+            m["source"] = "external"
+            m["type"] = "external"
+        all_models.extend(external)
+
+    # Detect which external providers are configured
+    available_providers = detect_available_providers()
+
+    if not all_models:
+        return json.dumps({
+            "models": [],
+            "count": 0,
+            "available_providers": available_providers,
+            "note": "No models found. Check AWS credentials for Bedrock, or configure API keys for external providers (make keys / deploy.sh --keys)."
+        })
+
+    return json.dumps({
+        "models": all_models,
+        "count": len(all_models),
+        "available_providers": available_providers,
+        "note": "Models from Bedrock and external providers. Use source='bedrock' or source='external' to filter."
     }, indent=2)
 
 

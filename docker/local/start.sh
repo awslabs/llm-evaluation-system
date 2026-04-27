@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# ── Align promptfoo's Bedrock region with AWS_REGION ──
+# ── Align Bedrock region with AWS_REGION ──
 export AWS_BEDROCK_REGION=${AWS_BEDROCK_REGION:-$AWS_REGION}
 
 # ── Set NODE_ENV based on mode ────────────────────────────

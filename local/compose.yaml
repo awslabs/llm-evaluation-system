@@ -1,0 +1,155 @@
+# Local dev — mirrors prod EKS topology.
+# MCP servers share the backend's network (like K8s sidecar containers in a pod).
+# Each service restarts independently. Hot reload per service.
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: evaldb
+      POSTGRES_USER: node
+      POSTGRES_PASSWORD: localdev
+      POSTGRES_HOST_AUTH_METHOD: trust
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U node -d evaldb"]
+      interval: 2s
+      timeout: 5s
+      retries: 10
+
+  # Backend — main API server. MCP servers attach to its network.
+  backend:
+    build:
+      context: ..
+      dockerfile: local/Dockerfile.python
+    command: >
+      sh -c "
+        echo 'Waiting for MCP servers...' &&
+        while ! python3 -c \"import socket; socket.create_connection(('127.0.0.1',8002),1)\" 2>/dev/null; do sleep 1; done &&
+        while ! python3 -c \"import socket; socket.create_connection(('127.0.0.1',8004),1)\" 2>/dev/null; do sleep 1; done &&
+        while ! python3 -c \"import socket; socket.create_connection(('127.0.0.1',8005),1)\" 2>/dev/null; do sleep 1; done &&
+        echo 'MCP servers ready, starting backend...' &&
+        uvicorn local.entrypoint:app --host 0.0.0.0 --port 8080 --log-level info
+          --reload --reload-dir /app/backend/api --reload-dir /app/backend/core --reload-dir /app/local
+      "
+    volumes:
+      - ../backend:/app/backend
+      - ../local:/app/local
+      - userdata:/data/users
+    environment:
+      PYTHONPATH: /app
+      WATCHFILES_FORCE_POLLING: "true"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+      AWS_REGION: ${AWS_REGION}
+      AWS_DEFAULT_REGION: ${AWS_REGION}
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: evaldb
+      POSTGRES_USER: node
+      POSTGRES_PASSWORD: localdev
+      SYNTHETIC_EVAL_MCP_URL: http://127.0.0.1:8002/mcp
+      PROVIDERS_MCP_URL: http://127.0.0.1:8004/mcp
+      DATASET_MCP_URL: http://127.0.0.1:8005/mcp
+      USER_STORAGE_BASE: /data/users
+      APP_URL: http://127.0.0.1:4001
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8080),2); s.close()"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # MCP servers share backend's network (like K8s pod sidecars)
+  synthetic-mcp:
+    build:
+      context: ..
+      dockerfile: local/Dockerfile.python
+    network_mode: "service:backend"
+    command: watchfiles "python -m backend.mcp_servers.synthetic.server_http" /app/backend/mcp_servers/synthetic
+    volumes:
+      - ../backend:/app/backend
+      - userdata:/data/users
+    environment:
+      PYTHONPATH: /app
+      WATCHFILES_FORCE_POLLING: "true"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+      AWS_REGION: ${AWS_REGION}
+      AWS_DEFAULT_REGION: ${AWS_REGION}
+      USER_STORAGE_BASE: /data/users
+
+  providers-mcp:
+    build:
+      context: ..
+      dockerfile: local/Dockerfile.python
+    network_mode: "service:backend"
+    command: watchfiles "python -m backend.mcp_servers.providers.server_http" /app/backend/mcp_servers/providers
+    volumes:
+      - ../backend:/app/backend
+    environment:
+      PYTHONPATH: /app
+      WATCHFILES_FORCE_POLLING: "true"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+      AWS_REGION: ${AWS_REGION}
+      AWS_DEFAULT_REGION: ${AWS_REGION}
+
+  dataset-mcp:
+    build:
+      context: ..
+      dockerfile: local/Dockerfile.python
+    network_mode: "service:backend"
+    command: watchfiles "python -m backend.mcp_servers.dataset.server_http" /app/backend/mcp_servers/dataset
+    volumes:
+      - ../backend:/app/backend
+      - userdata:/data/users
+    environment:
+      PYTHONPATH: /app
+      WATCHFILES_FORCE_POLLING: "true"
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+      AWS_REGION: ${AWS_REGION}
+      AWS_DEFAULT_REGION: ${AWS_REGION}
+      USER_STORAGE_BASE: /data/users
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: local/Dockerfile.frontend
+    volumes:
+      - ../frontend:/app
+      - frontend-nm:/app/node_modules
+    environment:
+      BACKEND_URL: http://backend:8080
+      NEXT_TELEMETRY_DISABLED: "1"
+      WATCHPACK_POLLING: "true"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "4001:4001"
+    volumes:
+      - ./nginx-compose.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  userdata:
+  frontend-nm:

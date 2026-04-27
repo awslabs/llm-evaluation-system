@@ -28,14 +28,19 @@ const nextConfig: NextConfig = {
         source: "/api/sessions",
         destination: `${backendUrl}/api/sessions`,
       },
-      // Viewer proxy
+      // Comparison API
       {
-        source: "/api/viewer/:path*",
-        destination: `${backendUrl}/api/viewer/:path*`,
+        source: "/api/compare/:path*",
+        destination: `${backendUrl}/api/compare/:path*`,
+      },
+      // Inspect AI viewer
+      {
+        source: "/api/inspect/:path*",
+        destination: `${backendUrl}/api/inspect/:path*`,
       },
       {
-        source: "/viewer/:path*",
-        destination: `${backendUrl}/viewer/:path*`,
+        source: "/inspect/:path*",
+        destination: `${backendUrl}/inspect/:path*`,
       },
     ];
   },

@@ -49,7 +49,7 @@ class MultiMCPClient:
         """Initialize the MCP client with multiple servers.
 
         Args:
-            working_dir: Working directory for promptfoo
+            working_dir: Working directory for eval data
             region: AWS region for Bedrock
         """
         self.sessions: Dict[str, ClientSession] = {}
@@ -63,7 +63,7 @@ class MultiMCPClient:
 
         # Get current environment and merge with custom vars
         env = os.environ.copy()
-        env["PROMPTFOO_CONFIG_DIR"] = cwd
+        env["INSPECT_LOG_DIR"] = cwd
         env["AWS_REGION"] = region
 
         # Server configurations - ALL HTTP (no stdio!)
@@ -421,8 +421,8 @@ class MultiMCPClient:
                 break
 
         if not server_name:
-            # Default to promptfoo server for backward compatibility
-            server_name = "promptfoo"
+            # Default to synthetic-eval server for backward compatibility
+            server_name = "synthetic-eval"
 
         if server_name not in self.sessions:
             raise RuntimeError(f"Server '{server_name}' not connected")
@@ -432,5 +432,5 @@ class MultiMCPClient:
         return result
 
 
-# Backward compatibility alias
-PromptfooMCPClient = MultiMCPClient
+
+

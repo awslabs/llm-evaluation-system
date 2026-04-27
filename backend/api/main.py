@@ -4,7 +4,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
@@ -12,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import httpx
-from fastapi import Depends, FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -28,7 +27,6 @@ from backend.core.s3_client import (
     get_s3_document_content,
 )
 from backend.core.user_storage import save_document
-from backend.core.viewer_manager import ViewerManager
 
 # Configure logging at module level (runs when uvicorn loads the app)
 logging.basicConfig(
@@ -44,90 +42,6 @@ logger = logging.getLogger(__name__)
 mcp_client: Optional[MultiMCPClient] = None
 bedrock_client: Optional[BedrockClient] = None
 db: Optional[Database] = None
-viewer_manager: Optional[ViewerManager] = None
-
-# Cache for viewer API responses (serves stale data when DB is locked during evals)
-# Key: (user_id, path), Value: (content, content_type, status_code)
-viewer_api_cache: Dict[tuple, tuple] = {}
-
-
-class ViewerCircuitBreaker:
-    """Circuit breaker pattern for viewer requests.
-
-    States:
-    - CLOSED: Normal operation, requests pass through
-    - OPEN: Failing, reject requests immediately
-    - HALF_OPEN: Testing if viewer recovered
-    """
-
-    def __init__(
-        self,
-        failure_threshold: int = 3,      # Failures before opening circuit
-        recovery_timeout: float = 10.0,   # Seconds before trying again
-        max_concurrent_per_user: int = 10, # Max concurrent requests per user
-    ):
-        self.failure_threshold = failure_threshold
-        self.recovery_timeout = recovery_timeout
-        self.max_concurrent_per_user = max_concurrent_per_user
-
-        # Per-user state
-        self._failures: Dict[str, int] = {}           # user_id -> failure count
-        self._last_failure: Dict[str, float] = {}     # user_id -> timestamp
-        self._user_active: Dict[str, int] = {}        # user_id -> active request count
-        self._lock = asyncio.Lock()                   # Protects _user_active
-
-    def is_open(self, user_id: str) -> bool:
-        """Check if circuit is open (should reject requests)."""
-        failures = self._failures.get(user_id, 0)
-        if failures < self.failure_threshold:
-            return False
-
-        # Check if recovery timeout has passed
-        last_failure = self._last_failure.get(user_id, 0)
-        if time.time() - last_failure > self.recovery_timeout:
-            # Half-open: allow one request through to test
-            return False
-
-        return True
-
-    def record_success(self, user_id: str):
-        """Record a successful request, reset failure count."""
-        self._failures[user_id] = 0
-
-    def record_failure(self, user_id: str):
-        """Record a failed request."""
-        self._failures[user_id] = self._failures.get(user_id, 0) + 1
-        self._last_failure[user_id] = time.time()
-
-        if self._failures[user_id] >= self.failure_threshold:
-            logger.warning(f"Circuit breaker OPEN for user {user_id} after {self._failures[user_id]} failures")
-
-    async def try_acquire(self, user_id: str) -> bool:
-        """Try to acquire permission. Returns False immediately if at limit (no waiting)."""
-        if self.is_open(user_id):
-            logger.warning(f"Circuit breaker rejecting request for user {user_id} (circuit open)")
-            return False
-
-        async with self._lock:
-            # Check per-user limit (atomic with increment)
-            user_active = self._user_active.get(user_id, 0)
-            if user_active >= self.max_concurrent_per_user:
-                logger.warning(f"Per-user rate limit hit for {user_id} ({user_active}/{self.max_concurrent_per_user})")
-                return False
-
-            # Acquire slot
-            self._user_active[user_id] = user_active + 1
-            return True
-
-    async def release(self, user_id: str):
-        """Release slot after request completes."""
-        async with self._lock:
-            if user_id in self._user_active:
-                self._user_active[user_id] = max(0, self._user_active[user_id] - 1)
-
-
-# Global circuit breaker for viewer requests
-viewer_circuit_breaker = ViewerCircuitBreaker()
 
 # Supported file types for document upload (formats Claude can read)
 SUPPORTED_DOCUMENT_TYPES = {
@@ -174,7 +88,7 @@ cancelled_sessions: Dict[str, dict] = {}  # session_id -> cancel info (evalId, c
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle: startup and shutdown."""
-    global mcp_client, bedrock_client, db, viewer_manager
+    global mcp_client, bedrock_client, db
 
     # Startup
     print("🚀 Initializing backend...")
@@ -196,11 +110,6 @@ async def lifespan(app: FastAPI):
         # Initialize Bedrock client
         bedrock_client = BedrockClient(region=region)
         print("  ✓ Bedrock client initialized")
-
-        # Initialize viewer manager for per-user promptfoo viewers
-        viewer_manager = ViewerManager()
-        await viewer_manager.start()
-        print("  ✓ Viewer manager initialized")
 
         print("✓ Backend ready\n")
 
@@ -252,7 +161,7 @@ async def lifespan(app: FastAPI):
                 print(f"  ⚠ Error waiting for tasks: {e}")
                 logger.error(f"[SHUTDOWN] Task wait error: {e}")
 
-        # Wait for running promptfoo evaluations to complete
+        # Wait for running evaluations to complete
         try:
             from backend.mcp_servers.synthetic.tools.run_evaluation import (
                 _running_evaluations,
@@ -282,14 +191,6 @@ async def lifespan(app: FastAPI):
             print(f"  ⚠ Error handling running evaluations: {e}")
             logger.error(f"[SHUTDOWN] Eval shutdown error: {e}")
 
-        if viewer_manager:
-            try:
-                await viewer_manager.stop()
-                print("  ✓ Viewer manager stopped")
-            except Exception as e:
-                print(f"  ⚠ Error stopping viewer manager: {e}")
-                logger.error(f"[SHUTDOWN] Viewer manager stop error: {e}")
-
         if mcp_client:
             try:
                 await mcp_client.disconnect()
@@ -312,7 +213,7 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app with lifespan
 app = FastAPI(
-    title="Promptfoo Chat Backend",
+    title="Eval Platform Backend",
     lifespan=lifespan
 )
 
@@ -532,7 +433,7 @@ async def process_qa_dataset_content(
         - error: str (if failed)
     """
     from backend.core.user_storage import save_dataset_to_db
-    from backend.mcp_servers.dataset.tools.save_dataset import parse_content_to_rows, rows_to_promptfoo_yaml, generate_dataset_name
+    from backend.mcp_servers.dataset.tools.save_dataset import parse_content_to_rows, rows_to_test_cases, generate_dataset_name
 
     logger = logging.getLogger(__name__)
     logger.info(f"Processing QA dataset: {filename} for user {user_id}")
@@ -639,7 +540,7 @@ async def process_qa_dataset_content(
 
         # Step 2: Save the dataset locally (parse full content + save to DB directly)
         rows = parse_content_to_rows(content_str, filename)
-        test_cases = rows_to_promptfoo_yaml(rows, column_mapping["question"], column_mapping["golden_answer"])
+        test_cases = rows_to_test_cases(rows, column_mapping["question"], column_mapping["golden_answer"])
 
         if not test_cases:
             return {
@@ -1327,7 +1228,6 @@ async def list_documents(user_id: str = Depends(get_current_user_id)):
 async def get_current_user(request: Request):
     """Get the current authenticated user from oauth2-proxy headers.
 
-    Also pre-warms the viewer in the background (non-blocking).
     Returns logout URL for proper Cognito sign-out.
     """
     user_id = request.headers.get("X-Forwarded-User")
@@ -1341,11 +1241,6 @@ async def get_current_user(request: Request):
         "email": email,
         "name": email.split("@")[0] if email else user_id,
     }
-
-    # Pre-warm viewer in background (non-blocking)
-    # This also refreshes the 48-hour login timer if viewer exists
-    if viewer_manager:
-        await viewer_manager.on_user_login(user_id)
 
     # Build logout URL that clears both oauth2-proxy and Cognito sessions
     cognito_domain = os.environ.get("COGNITO_DOMAIN")
@@ -1365,314 +1260,32 @@ async def get_current_user(request: Request):
     return {"user": user, "logoutUrl": logout_url}
 
 
-# ============== Viewer Management Endpoints ==============
+# ============== Inspect AI Viewer ==============
 
-class ViewerResponse(BaseModel):
-    url: str
-    status: str
+from backend.api.compare import router as compare_router
+from backend.core.inspect_viewer import create_viewer_app, get_viewer_dist_directory
+from inspect_ai._view.fastapi_server import _InspectStaticFiles
+from inspect_ai._util.file import filesystem
+from inspect_ai._view._dist import resolve_dist_directory
 
+# Mount comparison API before the Inspect viewer (include_router takes priority over mount)
+app.include_router(compare_router, prefix="/api/compare")
 
-@app.get("/api/viewer/url")
-async def get_viewer_url(user_id: str = Depends(get_current_user_id)) -> ViewerResponse:
-    """Get the promptfoo viewer URL for the authenticated user.
+_log_dir = os.environ.get("INSPECT_LOG_DIR", os.environ.get("USER_STORAGE_BASE", "backend/users"))
+_fs = filesystem(_log_dir)
+if not _fs.exists(_log_dir):
+    _fs.mkdir(_log_dir, True)
+_resolved_log_dir = _fs.info(_log_dir).name
 
-    Starts a new viewer instance if one isn't running for this user.
-    Each user gets their own isolated viewer pointing to their data.
-    """
-    if not viewer_manager:
-        raise HTTPException(status_code=500, detail="Viewer manager not initialized")
+# The Inspect SPA hardcodes API calls to /api/* at root. Mount viewer API
+# at /api alongside our backend routes (no conflicts: viewer uses /api/logs,
+# /api/log-dir etc; our backend uses /api/chat, /api/auth, /api/sessions).
+_viewer_api = create_viewer_app(log_dir=_resolved_log_dir)
+app.mount("/api", _viewer_api)
 
-    try:
-        logger.info(f"Getting viewer URL for user {user_id}")
-        url = await viewer_manager.get_viewer_url(user_id)
-        return ViewerResponse(url=url, status="ready")
-    except RuntimeError as e:
-        logger.error(f"RuntimeError getting viewer URL: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-    except Exception as e:
-        logger.error(f"Error getting viewer URL for user {user_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Failed to start viewer")
-
-
-@app.get("/api/viewer/status")
-async def get_viewer_status(user_id: str = Depends(get_current_user_id)):
-    """Get the status of the authenticated user's viewer instance."""
-    if not viewer_manager:
-        raise HTTPException(status_code=500, detail="Viewer manager not initialized")
-
-    status = viewer_manager.get_viewer_status(user_id)
-    if status is None:
-        return {"running": False, "message": "No viewer running for this user"}
-
-    return status
-
-
-@app.post("/api/internal/invalidate-cache/{user_id}")
-async def invalidate_viewer_cache(user_id: str, request: Request):
-    """Invalidate cached viewer API responses for a user.
-
-    Called by MCP server after eval completes to ensure fresh data is served.
-    Only accepts requests from within the cluster (no CloudFront headers).
-    """
-    # Block external requests - CloudFront adds these headers
-    if request.headers.get("x-amz-cf-id") or request.headers.get("cloudfront-viewer-country"):
-        raise HTTPException(status_code=403, detail="Internal endpoint - not accessible externally")
-    # Clear all cached responses for this user
-    keys_to_remove = [key for key in viewer_api_cache if key[0] == user_id]
-    for key in keys_to_remove:
-        del viewer_api_cache[key]
-
-    logger.info(f"Invalidated {len(keys_to_remove)} cached responses for user {user_id}")
-    return {"success": True, "invalidated": len(keys_to_remove)}
-
-
-async def validate_session(request: Request, expected_user_id: str) -> bool:
-    """Validate that request is from expected user via oauth2-proxy headers."""
-    user_id = request.headers.get("X-Forwarded-User")
-    if not user_id:
-        return False
-    return user_id == expected_user_id
-
-
-@app.api_route("/viewer/{user_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
-async def proxy_viewer(user_id: str, path: str, request: Request):
-    """Proxy requests to user's viewer instance.
-
-    This ensures users can only access their own viewer and
-    internal ports aren't exposed externally.
-
-    Uses circuit breaker + rate limiting to prevent cascade failures:
-    - Circuit breaker: After 3 failures, reject requests for 10s
-    - Rate limiting: Max 10 concurrent requests per user
-    """
-    if not viewer_manager:
-        raise HTTPException(status_code=500, detail="Viewer manager not initialized")
-
-    # Only rate limit API calls, not static assets (page load needs many assets in parallel)
-    is_api_call = path.startswith('api/')
-    if is_api_call:
-        # Rate limiting FIRST - reject fast before any HTTP calls
-        if not await viewer_circuit_breaker.try_acquire(user_id):
-            raise HTTPException(
-                status_code=429,
-                detail="Too many requests. Please slow down."
-            )
-
-    # Validate session - user can only access their own viewer
-    if not await validate_session(request, user_id):
-        if is_api_call:
-            await viewer_circuit_breaker.release(user_id)  # Release slot on auth failure
-        raise HTTPException(status_code=403, detail="Access denied - invalid session or user mismatch")
-
-    try:
-        # Get or start the user's viewer
-        try:
-            viewer_url = await viewer_manager.get_viewer_url(user_id)
-        except Exception as e:
-            logger.error(f"Failed to get viewer for user {user_id}: {e}")
-            viewer_circuit_breaker.record_failure(user_id)
-            raise HTTPException(status_code=500, detail="Failed to start viewer")
-
-        # Build target URL
-        # For SPA routes (non-asset paths), serve root and let client-side router handle it
-        is_asset = any(path.endswith(ext) for ext in ['.js', '.css', '.json', '.ico', '.png', '.svg', '.woff', '.woff2', '.map']) or path.startswith('api/')
-        if is_asset:
-            target_url = f"{viewer_url}/{path}"
-        else:
-            target_url = f"{viewer_url}/"
-        if request.query_params:
-            target_url += f"?{request.query_params}"
-
-        # Proxy the request
-        # Don't request compressed content - let httpx handle decompression
-        proxy_headers = {k: v for k, v in request.headers.items()
-                         if k.lower() not in ['host', 'content-length', 'accept-encoding']}
-
-        # Retry logic for API requests that may fail due to SQLite locking
-        is_api_request = path.startswith('api/')
-        max_retries = 3 if is_api_request else 1
-        retry_delay = 0.5  # seconds between retries
-        request_body = await request.body() if request.method in ['POST', 'PUT'] else None
-        cache_key = (user_id, path)
-
-        async with httpx.AsyncClient() as client:
-            response = None
-            last_error = None
-
-            for attempt in range(max_retries):
-                try:
-                    # Forward the request
-                    response = await client.request(
-                        method=request.method,
-                        url=target_url,
-                        headers=proxy_headers,
-                        content=request_body,
-                        timeout=10.0,  # Reduced from 30s - fail fast if viewer hung
-                    )
-
-                    # Retry on 500 (likely DB locked)
-                    if is_api_request and response.status_code >= 500 and attempt < max_retries - 1:
-                        logger.warning(f"Viewer returned {response.status_code} for {path}, retrying ({attempt + 1}/{max_retries})")
-                        await asyncio.sleep(retry_delay)
-                        continue
-
-                    break  # Success or non-retryable error
-                except httpx.RequestError as e:
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        logger.warning(f"Viewer request failed, retrying ({attempt + 1}/{max_retries}): {e}")
-                        await asyncio.sleep(retry_delay)
-                        continue
-                    # Don't raise yet - try cache first
-                    response = None
-                    break
-
-            # If API request failed after retries, try to serve from cache
-            if is_api_request and (response is None or response.status_code >= 500):
-                if cache_key in viewer_api_cache:
-                    cached_content, cached_content_type, cached_status = viewer_api_cache[cache_key]
-                    logger.info(f"Serving cached response for {user_id}/{path} (DB likely locked)")
-                    return Response(
-                        content=cached_content,
-                        status_code=cached_status,
-                        media_type=cached_content_type,
-                    )
-                elif response is None:
-                    # No cache and request failed completely
-                    raise last_error or HTTPException(status_code=502, detail="Viewer unavailable")
-
-            # Build response headers, excluding hop-by-hop headers
-            response_headers = {k: v for k, v in response.headers.items()
-                               if k.lower() not in ['content-encoding', 'transfer-encoding', 'content-length', 'connection']}
-
-            content = response.content
-            content_type = response.headers.get('content-type', '')
-
-            # Cache successful API responses for use when DB is locked
-            if is_api_request and response.status_code == 200:
-                viewer_api_cache[cache_key] = (content, content_type, response.status_code)
-
-            # Rewrite asset paths in HTML to use the proxy path
-            if 'text/html' in content_type:
-                html = content.decode('utf-8')
-                base_path = f"/viewer/{user_id}"
-
-                # JSON encode for safe JavaScript injection (prevents XSS)
-                safe_base_path = json.dumps(base_path)
-
-                # Inject script to handle SPA routing through proxy
-                # 1. Strip base path so React Router sees correct route (e.g., /evals not /viewer/anna/evals)
-                # 2. Restore full URL after React init (before paint) so refresh works
-                # 3. Patch history/fetch/XHR to add base path to future navigations
-                patch_script = f'''<script>
-(function() {{
-var bp = {safe_base_path};
-var path = window.location.pathname;
-var search = window.location.search;
-var hash = window.location.hash;
-var origPush = history.pushState.bind(history);
-var origReplace = history.replaceState.bind(history);
-
-// Set apiBaseUrl in localStorage for Zustand persist store
-// This tells the promptfoo UI to prefix all API calls with the viewer base path
-// Must run before React/Zustand hydrates to avoid race conditions
-try {{
-  var storageKey = 'api-config-storage';
-  var stored = localStorage.getItem(storageKey);
-  var state = stored ? JSON.parse(stored) : {{}};
-  state.state = state.state || {{}};
-  state.state.apiBaseUrl = bp;
-  localStorage.setItem(storageKey, JSON.stringify(state));
-  console.log('[VIEWER PROXY] Set apiBaseUrl to: ' + bp);
-}} catch (e) {{
-  console.warn('[VIEWER PROXY] Failed to set apiBaseUrl in localStorage:', e);
-}}
-
-// Strip base path so React Router sees /evals instead of /viewer/anna/evals
-console.log('[VIEWER PROXY] path=' + path + ', bp=' + bp);
-if (path.startsWith(bp)) {{
-  var stripped = path.substring(bp.length) || '/';
-  console.log('[VIEWER PROXY] stripping to: ' + stripped);
-  origReplace(history.state, '', stripped + search + hash);
-  // Restore full URL after page fully loads (after React module scripts execute)
-  window.addEventListener('load', function() {{
-    console.log('[VIEWER PROXY] restoring to: ' + path);
-    origReplace(history.state, '', path + search + hash);
-  }});
-}} else {{
-  console.log('[VIEWER PROXY] path does not start with bp, no stripping');
-}}
-
-// Patch history methods to add base path to future navigations
-history.pushState = function(s, t, u) {{
-  if (typeof u === 'string' && u.startsWith('/') && !u.startsWith(bp)) u = bp + u;
-  return origPush(s, t, u);
-}};
-history.replaceState = function(s, t, u) {{
-  if (typeof u === 'string' && u.startsWith('/') && !u.startsWith(bp)) u = bp + u;
-  return origReplace(s, t, u);
-}};
-
-// Handle back/forward navigation - strip base path so React Router can match
-window.addEventListener('popstate', function() {{
-  var p = window.location.pathname;
-  if (p.startsWith(bp)) {{
-    var stripped = p.substring(bp.length) || '/';
-    console.log('[VIEWER PROXY] popstate: stripping ' + p + ' to ' + stripped);
-    origReplace(history.state, '', stripped + window.location.search + window.location.hash);
-    // Restore after React Router processes the navigation
-    setTimeout(function() {{
-      origReplace(history.state, '', p + window.location.search + window.location.hash);
-    }}, 50);
-  }}
-}});
-
-// Patch fetch and XHR to add base path to API calls (fallback for any direct fetch usage)
-var origFetch = window.fetch;
-window.fetch = function(u, o) {{
-  if (typeof u === 'string' && u.startsWith('/') && !u.startsWith(bp)) u = bp + u;
-  return origFetch.call(this, u, o);
-}};
-var origOpen = XMLHttpRequest.prototype.open;
-XMLHttpRequest.prototype.open = function(m, u) {{
-  if (typeof u === 'string' && u.startsWith('/') && !u.startsWith(bp)) u = bp + u;
-  return origOpen.apply(this, arguments);
-}};
-}})();
-</script>'''
-
-                # Inject at start of <head>
-                if '<head>' in html:
-                    html = html.replace('<head>', f'<head>{patch_script}')
-                elif '<HEAD>' in html:
-                    html = html.replace('<HEAD>', f'<HEAD>{patch_script}')
-
-                # Also rewrite static href/src attributes
-                html = html.replace('href="/', f'href="{base_path}/')
-                html = html.replace('src="/', f'src="{base_path}/')
-                html = html.replace("href='/", f"href='{base_path}/")
-                html = html.replace("src='/", f"src='{base_path}/")
-                content = html.encode('utf-8')
-
-            # Success - reset circuit breaker
-            viewer_circuit_breaker.record_success(user_id)
-
-            # Return proxied response
-            return Response(
-                content=content,
-                status_code=response.status_code,
-                headers=response_headers,
-                media_type=content_type,
-            )
-    except httpx.RequestError as e:
-        logger.error(f"Proxy error for user {user_id}: {e}")
-        if is_api_call:
-            viewer_circuit_breaker.record_failure(user_id)
-        raise HTTPException(status_code=502, detail="Viewer unavailable")
-    finally:
-        # Release slot only for API calls
-        if is_api_call:
-            await viewer_circuit_breaker.release(user_id)
+# Serve the Inspect SPA static files at /inspect/
+_dist_dir = resolve_dist_directory()
+app.mount("/inspect", _InspectStaticFiles(directory=_dist_dir.as_posix(), html=True), name="inspect-viewer")
 
 
 if __name__ == "__main__":

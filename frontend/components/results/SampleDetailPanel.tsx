@@ -1,0 +1,199 @@
+"use client";
+
+import type { Sample } from "./ComparisonView";
+
+function formatModel(model: string): string {
+  const parts = model.split("/");
+  return parts[parts.length - 1];
+}
+
+interface SampleDetailPanelProps {
+  sample: Sample;
+  model: string;
+  onClose: () => void;
+}
+
+export default function SampleDetailPanel({
+  sample,
+  model,
+  onClose,
+}: SampleDetailPanelProps) {
+  const result = sample.results[model];
+  if (!result) return null;
+
+  const criteriaResults = result.criteriaResults || [];
+  const explanation = result.explanation || "";
+
+  // Parse judge details from explanation text
+  const judgeLines = explanation
+    .split("\n")
+    .filter((l) => l.startsWith("  ") && l.includes(":"))
+    .filter((l) => !l.startsWith("  Errors"));
+
+  // Split explanation into sections
+  const sections = parseExplanation(explanation);
+
+  return (
+    <div className="w-96 flex-shrink-0 overflow-y-auto border-l border-claude-border bg-claude-surface">
+      {/* Header */}
+      <div className="sticky top-0 z-10 flex items-center justify-between border-b border-claude-border bg-claude-surface px-4 py-3">
+        <div>
+          <h3 className="text-sm font-medium text-claude-text">
+            Sample #{sample.id}
+          </h3>
+          <p className="text-xs text-claude-muted">{formatModel(model)}</p>
+        </div>
+        <button
+          onClick={onClose}
+          className="rounded p-1 text-claude-muted hover:bg-claude-bg hover:text-claude-text"
+        >
+          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </button>
+      </div>
+
+      <div className="p-4 space-y-4">
+        {/* Overall verdict */}
+        <div className={`rounded-lg p-3 ${result.passed ? "bg-green-950/30 border border-green-800/50" : "bg-red-950/30 border border-red-800/50"}`}>
+          <div className="flex items-center gap-2">
+            <span className={`text-lg ${result.passed ? "text-green-400" : "text-red-400"}`}>
+              {result.passed ? "✓" : "✗"}
+            </span>
+            <span className={`font-medium ${result.passed ? "text-green-300" : "text-red-300"}`}>
+              {result.passed ? "PASS" : "FAIL"}
+            </span>
+            <span className="text-sm text-claude-muted">
+              ({(result.score * 100).toFixed(0)}% criteria passed)
+            </span>
+          </div>
+        </div>
+
+        {/* Criteria breakdown */}
+        {criteriaResults.length > 0 && (
+          <div>
+            <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-claude-muted">
+              Criteria Votes
+            </h4>
+            <div className="space-y-2">
+              {criteriaResults.map((cr) => (
+                <div
+                  key={cr.name}
+                  className="flex items-center justify-between rounded bg-claude-bg px-3 py-2"
+                >
+                  <span className="text-sm capitalize text-claude-text">
+                    {cr.name}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <span
+                      className={`text-xs font-medium ${
+                        cr.passed ? "text-green-400" : "text-red-400"
+                      }`}
+                    >
+                      {cr.passed ? "PASS" : "FAIL"}
+                    </span>
+                    <span className="text-xs text-claude-muted">
+                      ({cr.votes_for}/{cr.total} judges)
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Judge details */}
+        {sections.judges.length > 0 && (
+          <div>
+            <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-claude-muted">
+              Individual Judges
+            </h4>
+            <div className="space-y-2">
+              {sections.judges.map((judge, i) => (
+                <div
+                  key={i}
+                  className="rounded bg-claude-bg px-3 py-2 text-xs text-claude-muted"
+                >
+                  <pre className="whitespace-pre-wrap font-mono">{judge}</pre>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Question */}
+        <div>
+          <h4 className="mb-1 text-xs font-medium uppercase tracking-wider text-claude-muted">
+            Question
+          </h4>
+          <p className="rounded bg-claude-bg p-3 text-sm text-claude-text">
+            {sample.input}
+          </p>
+        </div>
+
+        {/* Expected answer */}
+        <div>
+          <h4 className="mb-1 text-xs font-medium uppercase tracking-wider text-claude-muted">
+            Expected Answer
+          </h4>
+          <p className="rounded bg-claude-bg p-3 text-sm text-claude-text">
+            {sample.target}
+          </p>
+        </div>
+
+        {/* Model response */}
+        <div>
+          <h4 className="mb-1 text-xs font-medium uppercase tracking-wider text-claude-muted">
+            Model Response
+          </h4>
+          <p className="rounded bg-claude-bg p-3 text-sm text-claude-text whitespace-pre-wrap">
+            {result.output}
+          </p>
+        </div>
+
+        {/* Open in Inspect */}
+        <div className="pt-2 border-t border-claude-border">
+          <a
+            href="/inspect/"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-xs text-claude-accent hover:text-claude-hover"
+          >
+            Open in Inspect Viewer &rarr;
+          </a>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function parseExplanation(explanation: string): { judges: string[] } {
+  const lines = explanation.split("\n");
+  const judges: string[] = [];
+  let inJudges = false;
+  let current = "";
+
+  for (const line of lines) {
+    if (line.trim() === "Judges:") {
+      inJudges = true;
+      continue;
+    }
+    if (line.trim() === "Errors:" || line.trim() === "") {
+      if (inJudges && current) {
+        judges.push(current.trim());
+        current = "";
+      }
+      if (line.trim() === "Errors:") break;
+      continue;
+    }
+    if (inJudges && line.startsWith("  ")) {
+      if (current) judges.push(current.trim());
+      current = line.trim();
+    } else if (inJudges) {
+      current += " " + line.trim();
+    }
+  }
+  if (current) judges.push(current.trim());
+
+  return { judges };
+}

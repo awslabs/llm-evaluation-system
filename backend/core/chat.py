@@ -6,7 +6,7 @@ from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
 from rich.markdown import Markdown
 
-from .mcp_client import PromptfooMCPClient
+from .mcp_client import MultiMCPClient
 from .bedrock_client import BedrockClient
 from .agent import Agent
 
@@ -14,9 +14,9 @@ console = Console()
 
 
 class ChatInterface:
-    """Interactive chat interface for promptfoo MCP."""
+    """Interactive chat interface for eval MCP."""
 
-    def __init__(self, mcp_client: PromptfooMCPClient, debug: bool = False, region: str = "us-west-2") -> None:
+    def __init__(self, mcp_client: MultiMCPClient, debug: bool = False, region: str = "us-west-2") -> None:
         """Initialize chat interface."""
         self.mcp_client = mcp_client
         self.debug = debug

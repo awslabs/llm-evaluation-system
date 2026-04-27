@@ -7,7 +7,7 @@ from typing import Any, Dict, List
 from rich.console import Console
 
 from .bedrock_client import BedrockClient
-from .mcp_client import PromptfooMCPClient
+from .mcp_client import MultiMCPClient
 
 console = Console()
 
@@ -21,7 +21,7 @@ class Agent:
     def __init__(
         self,
         bedrock_client: BedrockClient,
-        mcp_client: PromptfooMCPClient,
+        mcp_client: MultiMCPClient,
         debug: bool = False,
     ) -> None:
         """Initialize agent."""
@@ -33,7 +33,7 @@ class Agent:
         self.cancel_info: Dict[str, Any] = {}  # Set by cancel handler with eval info
 
         # System prompt for Claude
-        self.system_prompt = """You are a helpful assistant that helps users evaluate and test LLMs using AWS Bedrock.
+        self.system_prompt = """You are a helpful assistant that helps users evaluate and compare LLM models.
 
 You have access to tools to run evaluations, generate test datasets, and analyze results. You MUST actively USE these tools when users request actions.
 
@@ -83,18 +83,30 @@ Available Tools:
 - run_evaluation: ACTUALLY RUN the evaluation (REQUIRED - don't skip this!)
 - list_evaluations: List completed evaluations
 - get_evaluation_details: Get detailed results for a specific eval
-- list_bedrock_models: Discover available AWS Bedrock models
+- list_available_models: Discover all available models (Bedrock + external providers)
+- list_bedrock_models: Discover available AWS Bedrock models only
 - get_viewer_url: Get URL to view evaluation results
 - test_provider: Test if a model is accessible (connectivity check only)
 
-AWS BEDROCK MODELS:
-- This system ONLY works with AWS Bedrock models
-- ALWAYS call list_bedrock_models() to discover models before creating configs
-- Model ID format: "bedrock:us.anthropic.claude-sonnet-4-6"
-- Common models:
-  * Claude Sonnet 4.6: bedrock:us.anthropic.claude-sonnet-4-6
-  * Claude Opus 4.6: bedrock:us.anthropic.claude-opus-4-6
-  * Claude Haiku 4.5: bedrock:us.anthropic.claude-haiku-4-5-20251001-v1:0
+MODEL PROVIDERS:
+This system supports multiple model providers for evaluation:
+
+1. AWS Bedrock (always available):
+   - Model ID format: "bedrock/us.anthropic.claude-sonnet-4-6"
+   - Common models:
+     * Claude Sonnet 4.6: bedrock/us.anthropic.claude-sonnet-4-6
+     * Claude Opus 4.6: bedrock/us.anthropic.claude-opus-4-6
+     * Claude Haiku 4.5: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
+
+2. External providers (available when API keys are configured):
+   - OpenAI: "openai/gpt-4o", "openai/gpt-4.1", "openai/o3"
+   - Anthropic direct API: "anthropic/claude-sonnet-4-6"
+   - Google Gemini: "google/gemini-2.5-pro", "google/gemini-2.5-flash"
+   - Configure API keys via: make keys (local) or deploy.sh --keys (AWS)
+
+- ALWAYS call list_available_models() to discover which providers and models are available
+- Users can compare models ACROSS providers (e.g., Bedrock Claude vs OpenAI GPT-4o)
+- Cost and latency are tracked per provider automatically
 
 RULES:
 1. USE TOOLS for actions - don't just describe what you would do
@@ -103,12 +115,13 @@ RULES:
 4. After successful eval, provide viewer URL from get_viewer_url
 5. WAIT for explicit user requests before processing uploads - don't be proactive
 
-Example - "compare sonnet 4 and haiku on healthcare":
-1. generate_qa_pairs(prompt="healthcare questions", numSamples=10) → get dataset="healthcare_10"
-2. generate_judge(dataset="healthcare_10", domain="healthcare") → get name="healthcare_criteria"
-3. create_eval_config(dataset="healthcare_10", providers=[...], judge="healthcare_criteria") → get configName
-4. run_evaluation(configName=...) → runs eval
-5. get_viewer_url() → provide URL to user
+Example - "compare Claude vs GPT-4o on healthcare":
+1. list_available_models() → discover available models
+2. generate_qa_pairs(prompt="healthcare questions", numSamples=10) → get dataset="healthcare_10"
+3. generate_judge(dataset="healthcare_10", domain="healthcare") → get name="healthcare_criteria"
+4. create_eval_config(dataset="healthcare_10", providers=["bedrock/us.anthropic.claude-sonnet-4-6", "openai/gpt-4o"], judge="healthcare_criteria") → get configName
+5. run_evaluation(configName=...) → runs eval
+6. get_viewer_url() → provide URL to user
 
 Example - user uploads documents:
 User: [Uploaded 1 document. Document paths for generate_qa_pairs: ["folder/manual.pdf"]]
@@ -127,7 +140,7 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
     async def _load_tool_descriptions(self) -> None:
         """Load tool descriptions from MCP resource."""
         try:
-            result = await self.mcp.read_resource("promptfoo://docs/tools")
+            result = await self.mcp.read_resource("eval://docs/tools")
 
             # Extract text from result
             if hasattr(result, "contents") and result.contents:
@@ -217,7 +230,7 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
         # Get available MCP tools from all servers
         mcp_tools = await self.mcp.list_tools()
 
-        # Filter out broken promptfoo generation tools (we have our own)
+        # Filter out legacy generation tools (we have our own)
         # Also filter out developer debugging tools that confuse the agent workflow
         HIDDEN_TOOLS = ["generate_dataset", "generate_test_cases", "compare_providers", "run_assertion"]
         mcp_tools = [tool for tool in mcp_tools if tool["name"] not in HIDDEN_TOOLS]
@@ -265,7 +278,7 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
         # Get available MCP tools from all servers
         mcp_tools = await self.mcp.list_tools()
 
-        # Filter out broken promptfoo generation tools (we have our own)
+        # Filter out legacy generation tools (we have our own)
         # Also filter out developer debugging tools that confuse the agent workflow
         HIDDEN_TOOLS = ["generate_dataset", "generate_test_cases", "compare_providers", "run_assertion"]
         mcp_tools = [tool for tool in mcp_tools if tool["name"] not in HIDDEN_TOOLS]

@@ -1,7 +1,7 @@
 [project]
-name = "promptfoo-mcp-cli"
+name = "eval-platform"
 version = "0.1.0"
-description = "CLI tool to interact with Promptfoo MCP server for LLM evaluation and testing"
+description = "CLI tool for LLM evaluation and testing using Inspect AI"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -16,7 +16,8 @@ dependencies = [
     "fastapi>=0.104.1",
     "uvicorn[standard]>=0.24.0",
     "httpx>=0.27.0",
-    "pypdf>=6.10.2",
+    "pypdf>=4.0.0",
+    "inspect-ai>=0.3.0",
     # Agent frameworks for evaluation (ARM compatible)
     "strands-agents[bedrock]>=1.22.0",
     "langgraph>=1.0.6",
@@ -36,7 +37,7 @@ dev = [
 ]
 
 [project.scripts]
-promptfoo-chat = "backend.core.main:main"
+eval-chat = "backend.core.main:main"
 
 [build-system]
 requires = ["setuptools>=68.0.0", "wheel"]

@@ -8,7 +8,9 @@ A web-based LLM evaluation platform deployed on AWS. Access it through a browser
 - **Jury system** — Multiple judges from different model families (e.g. Claude Sonnet, Nova Pro, Llama) each evaluate distinct aspects of every response — correctness, reasoning, completeness. Combining diverse judge families reduces self-preference bias, and aggregating weak signals from diverse judges and criteria produces stronger results than any single judge ([Verma et al., 2025](https://arxiv.org/abs/2502.20379), [Frick et al., 2025](https://arxiv.org/abs/2506.18203)).
 - **Adaptable binary scoring** — Binary pass/fail per criteria rather than subjective numeric scales, shown to produce more reliable results across judges ([Chiang et al., 2025](https://arxiv.org/abs/2503.23339v2)). Criteria are tailored by the agent to what you're evaluating.
 - **Document-grounded synthetic data** — Upload PDFs, knowledge bases, or product docs and generate QA pairs grounded in your actual content, reflecting real customer scenarios.
-- **Multi-tenant isolation** — Each user gets isolated data directories and viewer instances.
+- **Agentic eval support** — Evaluate agent systems via Inspect AI's `sandbox_agent_bridge` (Strands, LangChain, any OpenAI-compatible framework).
+- **Multi-tenant isolation** — Each user gets isolated data directories. Eval results stored as immutable `.eval` log files.
+- **Integrated viewer** — Inspect AI's evaluation viewer embedded directly in the platform.
 
 ## Prerequisites
 
@@ -20,7 +22,7 @@ That's it. The deploy script auto-installs Terraform, kubectl, and Helm locally.
 ## Deploy
 
 ```bash
-git clone git@ssh.gitlab.aws.dev:andgg/managed_eval.git && cd managed_eval
+git clone https://github.com/awslabs/llm-evaluation-system.git && cd llm-evaluation-system
 ./deploy.sh
 ```
 
@@ -86,7 +88,7 @@ AWS_PROFILE=my-profile make dev
 AWS_BEARER_TOKEN_BEDROCK=your-key make dev
 ```
 
-Other commands: `make run` (production mode), `make stop`, `make logs`, `make build`.
+Other commands: `make stop`, `make logs`, `make logs s=backend`, `make restart s=backend`, `make build`.
 
 Opens at **http://localhost:4001**. See [local/README.md](local/README.md) for details.
 
@@ -96,7 +98,7 @@ For architecture details, infrastructure reference, OIDC identity provider confi
 
 ## Acknowledgments
 
-This platform is built on [promptfoo](https://github.com/promptfoo/promptfoo), an open-source LLM evaluation framework. We're grateful to the promptfoo team and community for their work.
+This platform is built on [Inspect AI](https://github.com/UKGovernmentBEIS/inspect_ai) by the UK AI Security Institute, an open-source framework for large language model evaluations.
 
 ## Legal Disclaimer
 

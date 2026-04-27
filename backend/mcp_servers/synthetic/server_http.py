@@ -126,7 +126,7 @@ async def generate_qa_pairs(
     Generate question-answer pairs with golden answers for LLM-as-judge evaluation.
 
     Supports three modes:
-    1. Agent mode: Provide .py file to analyze agent code, generate QA pairs, and create promptfoo wrapper
+    1. Agent mode: Provide .py file to analyze agent code, generate QA pairs, and create eval wrapper
     2. Document mode: Provide 'documents' list to generate QA from uploaded files (PDFs, images, text)
     3. Persona mode: Provide 'prompt' to generate synthetic QA from diverse personas
 
@@ -226,20 +226,25 @@ async def create_eval_config(
     judge_models: list = None,
 ) -> str:
     """
-    Create a promptfoo evaluation configuration with multi-judge support.
+    Create an Inspect AI evaluation configuration with multi-judge support.
 
     Generates config with LLM judges that evaluate using binary scores encoded
-    as integer format (e.g., 10101). Results are aggregated by Jury (simple mean).
+    as integer format (e.g., 10101). Results are aggregated by Jury scoring.
 
     Args:
         dataset: Name of dataset from list_datasets
-        providers: List of target models to evaluate (e.g., ["bedrock:us.anthropic.claude-sonnet-4-6"])
+        providers: List of target models to evaluate. Supports multiple provider formats:
+            - Bedrock: "bedrock/us.anthropic.claude-sonnet-4-6"
+            - OpenAI: "openai/gpt-4o" (requires OPENAI_API_KEY)
+            - Anthropic direct: "anthropic/claude-sonnet-4-6" (requires ANTHROPIC_API_KEY)
+            - Google: "google/gemini-2.5-pro" (requires GOOGLE_API_KEY)
+            Use list_available_models() to discover available providers and models.
         judge: Name of judge from list_judges (REQUIRED - criteria adapted to QA pairs)
         prompts: Single prompt string OR list of prompts (default: "{{question}}")
         configName: Name for this evaluation (default: "evaluation")
         description: Optional description of the evaluation
         judge_models: Optional list of Bedrock model IDs to use as judges
-            (e.g., ["bedrock:us.anthropic.claude-sonnet-4-6", "bedrock:deepseek.r1-v1:0"])
+            (e.g., ["bedrock/us.anthropic.claude-sonnet-4-6", "bedrock/deepseek.r1-v1:0"])
             Default: Claude, Nova, and Llama
 
     Returns:
@@ -314,27 +319,6 @@ async def list_judges(
     return result[0].text
 
 
-# DISABLED: run_evaluation_legacy (replaced by Jury multi-judge - see run_evaluation below)
-# To re-enable legacy single-judge evaluation, uncomment this block:
-# @mcp.tool()
-# async def run_evaluation_legacy(
-#     configPath: str,
-#     user_id: str = None,
-#     maxConcurrency: int = 4,
-#     write: bool = True,
-# ) -> str:
-#     """
-#     [LEGACY] Run a single-judge promptfoo evaluation.
-#     Consider using run_evaluation (Jury multi-judge) instead for better accuracy.
-#     """
-#     args = {
-#         "configPath": configPath,
-#         "user_id": user_id,
-#         "maxConcurrency": maxConcurrency,
-#         "write": write,
-#     }
-#     result = await handle_run_evaluation(args)
-#     return result[0].text
 
 
 @mcp.tool()
@@ -392,44 +376,30 @@ async def run_evaluation(
     configName: str,
     user_id: str = None,
     maxConcurrency: int = 4,
-    resumeEvalId: str = None,
 ) -> str:
     """
     Run an evaluation with automatic jury multi-judge scoring.
 
-    Configs created by create_eval_config include assertScoringFunction that
-    automatically computes jury scores from 3 LLM judges (Claude, Nova, Llama).
+    Configs created by create_eval_config include scoring logic that
+    automatically computes jury scores from multiple LLM judges.
 
     Flow:
-    1. Runs target model(s) via promptfoo
-    2. Each response evaluated by 3 judges (llm-rubric assertions)
-    3. Jury score computed as mean of all binary votes (via jury_scoring.py)
-    4. Results written to promptfoo database for viewing
+    1. Runs target model(s) via Inspect AI
+    2. Each response evaluated by judges
+    3. Results written to .eval log files for viewing
 
     Args:
         configName: Name of the evaluation config from create_eval_config
         maxConcurrency: Maximum concurrent model requests (default: 4)
-        resumeEvalId: Optional eval ID to resume an incomplete evaluation.
-            When provided, promptfoo skips already-completed test cases and
-            continues from where the previous run left off. Results are
-            appended to the same eval record. Use this after a timeout or
-            cancellation to finish the remaining test cases.
 
     Returns:
-        JSON with evaluation results including pass rate
-
-    Note:
-        - Config must be created with create_eval_config (jury scoring is mandatory)
-        - Pass threshold: jury_score > 0.5 (strict majority required)
-        - Results viewable in promptfoo viewer after completion
+        JSON with evaluation results including scores
     """
     args = {
         "configName": configName,
         "user_id": user_id,
         "maxConcurrency": maxConcurrency,
     }
-    if resumeEvalId:
-        args["resumeEvalId"] = resumeEvalId
     result = await handle_run_evaluation(args)
     return result[0].text
 
@@ -459,17 +429,8 @@ async def get_viewer_url(
             "error": "user_id is required",
         })
 
-    # Return the backend's viewer proxy URL
-    # The backend handles starting per-user viewers and proxying requests
-    # Use APP_URL (public URL) if available, otherwise VIEWER_BASE_URL
-    base_url = os.environ.get("APP_URL") or os.environ.get("VIEWER_BASE_URL")
-    if not base_url:
-        raise RuntimeError("APP_URL or VIEWER_BASE_URL environment variable is required")
-
-    if eval_id:
-        viewer_url = f"{base_url}/viewer/{user_id}/eval/{eval_id}"
-    else:
-        viewer_url = f"{base_url}/viewer/{user_id}/eval"
+    base_url = os.environ.get("APP_URL", "http://localhost:4001")
+    viewer_url = f"{base_url}/results"
 
     return json.dumps({
         "success": True,

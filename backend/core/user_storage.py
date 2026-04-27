@@ -5,13 +5,12 @@ Local dev: backend/users/{user_id}/
 EKS prod: /data/users/{user_id}/ (EBS volume, backed up periodically to S3)
 AWS S3: When DOCUMENTS_BUCKET is set, documents are stored in S3.
 
-SQLite storage: Judges, eval configs, and datasets are stored in the user's
-promptfoo.db database (backed up periodically to S3).
+JSON file storage: Judges, eval configs, and datasets are stored as JSON files
+in per-user directories (backed up periodically to S3).
 """
 
 import json
 import os
-import sqlite3
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -76,15 +75,6 @@ def get_user_configs_dir(user_id: str) -> Path:
     configs_dir = get_user_dir(user_id) / "configs"
     configs_dir.mkdir(parents=True, exist_ok=True)
     return configs_dir
-
-
-def get_user_promptfoo_dir(user_id: str) -> Path:
-    """Get the promptfoo config directory for a user.
-
-    This is where promptfoo.db will be stored for this user.
-    Set PROMPTFOO_CONFIG_DIR to this path before running evaluations.
-    """
-    return get_user_dir(user_id)
 
 
 def save_dataset(user_id: str, filename: str, content: str) -> Path:
@@ -167,22 +157,16 @@ def list_user_files(user_id: str, folder: str, pattern: str = "*") -> list:
     return list(folder_path.glob(pattern))
 
 
-# ============== SQLite Storage ==============
-# Judges, eval configs, and datasets are stored in the user's promptfoo.db
-# This ensures they're backed up periodically to S3.
+# ============== JSON File Storage ==============
+# Judges, eval configs, and datasets are stored as JSON files
+# in per-user directories (backed up periodically to S3).
 
 
-def get_user_db_path(user_id: str) -> Path:
-    """Get the path to a user's promptfoo.db database."""
-    return get_user_dir(user_id) / "promptfoo.db"
-
-
-def _get_db_connection(user_id: str) -> sqlite3.Connection:
-    """Get a connection to the user's promptfoo.db database."""
-    db_path = get_user_db_path(user_id)
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    return conn
+def _get_json_store_dir(user_id: str, store_type: str) -> Path:
+    """Get the JSON store directory for a given type."""
+    store_dir = get_user_dir(user_id) / "store" / store_type
+    store_dir.mkdir(parents=True, exist_ok=True)
+    return store_dir
 
 
 def _generate_id(prefix: str) -> str:
@@ -190,11 +174,38 @@ def _generate_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
 
-# ============== Judges (stored in configs table with type='judge') ==============
+def _load_json_file(path: Path) -> Optional[dict[str, Any]]:
+    """Load a JSON file, returning None if it doesn't exist."""
+    if not path.exists():
+        return None
+    return json.loads(path.read_text())
+
+
+def _save_json_file(path: Path, data: dict[str, Any]) -> None:
+    """Save data as a JSON file."""
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _list_json_files(directory: Path) -> list[dict[str, Any]]:
+    """List all JSON entries in a directory, sorted by created_at descending."""
+    entries = []
+    if not directory.exists():
+        return entries
+    for f in directory.glob("*.json"):
+        try:
+            data = json.loads(f.read_text())
+            entries.append(data)
+        except (json.JSONDecodeError, OSError):
+            continue
+    entries.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return entries
+
+
+# ============== Judges ==============
 
 
 def save_judge_to_db(user_id: str, name: str, config: dict[str, Any]) -> str:
-    """Save a judge to the user's database.
+    """Save a judge to the user's JSON store.
 
     Args:
         user_id: The user's ID
@@ -204,76 +215,61 @@ def save_judge_to_db(user_id: str, name: str, config: dict[str, Any]) -> str:
     Returns:
         The judge ID
     """
-    conn = _get_db_connection(user_id)
-    try:
-        judge_id = _generate_id("judge")
-        now = int(datetime.now().timestamp() * 1000)
+    store_dir = _get_json_store_dir(user_id, "judges")
+    judge_id = _generate_id("judge")
+    now = int(datetime.now().timestamp() * 1000)
 
-        conn.execute(
-            """
-            INSERT INTO configs (id, created_at, updated_at, name, type, config)
-            VALUES (?, ?, ?, ?, 'judge', ?)
-            """,
-            (judge_id, now, now, name, json.dumps(config)),
-        )
-        conn.commit()
-        return judge_id
-    finally:
-        conn.close()
+    data = {
+        "id": judge_id,
+        "name": name,
+        "type": "judge",
+        "config": config,
+        "created_at": now,
+        "updated_at": now,
+    }
+    _save_json_file(store_dir / f"{judge_id}.json", data)
+    return judge_id
 
 
 def get_judge_from_db(user_id: str, judge_id: str) -> Optional[dict[str, Any]]:
-    """Get a judge by ID from the user's database.
+    """Get a judge by ID from the user's JSON store.
 
     Returns:
         Dict with id, name, config, created_at, or None if not found
     """
-    conn = _get_db_connection(user_id)
-    try:
-        row = conn.execute(
-            "SELECT id, name, config, created_at FROM configs WHERE id = ? AND type = 'judge'",
-            (judge_id,),
-        ).fetchone()
-
-        if row:
-            return {
-                "id": row["id"],
-                "name": row["name"],
-                "config": json.loads(row["config"]),
-                "created_at": row["created_at"],
-            }
-        return None
-    finally:
-        conn.close()
+    store_dir = _get_json_store_dir(user_id, "judges")
+    data = _load_json_file(store_dir / f"{judge_id}.json")
+    if data and data.get("type") == "judge":
+        return {
+            "id": data["id"],
+            "name": data["name"],
+            "config": data["config"],
+            "created_at": data["created_at"],
+        }
+    return None
 
 
 def get_judge_by_name(user_id: str, name: str) -> Optional[dict[str, Any]]:
-    """Get a judge by name from the user's database.
+    """Get a judge by name from the user's JSON store.
 
     Returns:
         Dict with id, name, config, created_at, or None if not found
     """
-    conn = _get_db_connection(user_id)
-    try:
-        row = conn.execute(
-            "SELECT id, name, config, created_at FROM configs WHERE name = ? AND type = 'judge' ORDER BY created_at DESC LIMIT 1",
-            (name,),
-        ).fetchone()
-
-        if row:
+    store_dir = _get_json_store_dir(user_id, "judges")
+    entries = _list_json_files(store_dir)
+    for entry in entries:
+        if entry.get("name") == name and entry.get("type") == "judge":
             return {
-                "id": row["id"],
-                "name": row["name"],
-                "config": json.loads(row["config"]),
-                "created_at": row["created_at"],
+                "id": entry["id"],
+                "name": entry["name"],
+                "config": entry["config"],
+                "created_at": entry["created_at"],
             }
-        return None
-    finally:
-        conn.close()
+    return None
 
 
 def list_judges_from_db(user_id: str, search_term: str = "") -> list[dict[str, Any]]:
-    """List all judges from the user's database.
+    """List all judges from the user's JSON store.
 
     Args:
         user_id: The user's ID
@@ -282,54 +278,42 @@ def list_judges_from_db(user_id: str, search_term: str = "") -> list[dict[str, A
     Returns:
         List of dicts with id, name, config, created_at
     """
-    conn = _get_db_connection(user_id)
-    try:
-        if search_term:
-            rows = conn.execute(
-                "SELECT id, name, config, created_at FROM configs WHERE type = 'judge' AND name LIKE ? ORDER BY created_at DESC",
-                (f"%{search_term}%",),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, name, config, created_at FROM configs WHERE type = 'judge' ORDER BY created_at DESC"
-            ).fetchall()
-
-        return [
-            {
-                "id": row["id"],
-                "name": row["name"],
-                "config": json.loads(row["config"]),
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
-    finally:
-        conn.close()
+    store_dir = _get_json_store_dir(user_id, "judges")
+    entries = _list_json_files(store_dir)
+    results = []
+    for entry in entries:
+        if entry.get("type") != "judge":
+            continue
+        if search_term and search_term.lower() not in entry.get("name", "").lower():
+            continue
+        results.append({
+            "id": entry["id"],
+            "name": entry["name"],
+            "config": entry["config"],
+            "created_at": entry["created_at"],
+        })
+    return results
 
 
 def delete_judge_from_db(user_id: str, judge_id: str) -> bool:
-    """Delete a judge from the user's database.
+    """Delete a judge from the user's JSON store.
 
     Returns:
         True if deleted, False if not found
     """
-    conn = _get_db_connection(user_id)
-    try:
-        cursor = conn.execute(
-            "DELETE FROM configs WHERE id = ? AND type = 'judge'",
-            (judge_id,),
-        )
-        conn.commit()
-        return cursor.rowcount > 0
-    finally:
-        conn.close()
+    store_dir = _get_json_store_dir(user_id, "judges")
+    path = store_dir / f"{judge_id}.json"
+    if path.exists():
+        path.unlink()
+        return True
+    return False
 
 
-# ============== Eval Configs (stored in configs table with type='eval') ==============
+# ============== Eval Configs ==============
 
 
 def save_eval_config_to_db(user_id: str, name: str, config: dict[str, Any]) -> str:
-    """Save an eval config to the user's database.
+    """Save an eval config to the user's JSON store.
 
     Args:
         user_id: The user's ID
@@ -339,51 +323,42 @@ def save_eval_config_to_db(user_id: str, name: str, config: dict[str, Any]) -> s
     Returns:
         The config ID
     """
-    conn = _get_db_connection(user_id)
-    try:
-        config_id = _generate_id("eval")
-        now = int(datetime.now().timestamp() * 1000)
+    store_dir = _get_json_store_dir(user_id, "eval_configs")
+    config_id = _generate_id("eval")
+    now = int(datetime.now().timestamp() * 1000)
 
-        conn.execute(
-            """
-            INSERT INTO configs (id, created_at, updated_at, name, type, config)
-            VALUES (?, ?, ?, ?, 'eval', ?)
-            """,
-            (config_id, now, now, name, json.dumps(config)),
-        )
-        conn.commit()
-        return config_id
-    finally:
-        conn.close()
+    data = {
+        "id": config_id,
+        "name": name,
+        "type": "eval",
+        "config": config,
+        "created_at": now,
+        "updated_at": now,
+    }
+    _save_json_file(store_dir / f"{config_id}.json", data)
+    return config_id
 
 
 def get_eval_config_from_db(user_id: str, config_id: str) -> Optional[dict[str, Any]]:
-    """Get an eval config by ID from the user's database.
+    """Get an eval config by ID from the user's JSON store.
 
     Returns:
         Dict with id, name, config, created_at, or None if not found
     """
-    conn = _get_db_connection(user_id)
-    try:
-        row = conn.execute(
-            "SELECT id, name, config, created_at FROM configs WHERE id = ? AND type = 'eval'",
-            (config_id,),
-        ).fetchone()
-
-        if row:
-            return {
-                "id": row["id"],
-                "name": row["name"],
-                "config": json.loads(row["config"]),
-                "created_at": row["created_at"],
-            }
-        return None
-    finally:
-        conn.close()
+    store_dir = _get_json_store_dir(user_id, "eval_configs")
+    data = _load_json_file(store_dir / f"{config_id}.json")
+    if data and data.get("type") == "eval":
+        return {
+            "id": data["id"],
+            "name": data["name"],
+            "config": data["config"],
+            "created_at": data["created_at"],
+        }
+    return None
 
 
 def list_eval_configs_from_db(user_id: str, search_term: str = "") -> list[dict[str, Any]]:
-    """List all eval configs from the user's database.
+    """List all eval configs from the user's JSON store.
 
     Args:
         user_id: The user's ID
@@ -392,206 +367,119 @@ def list_eval_configs_from_db(user_id: str, search_term: str = "") -> list[dict[
     Returns:
         List of dicts with id, name, config, created_at
     """
-    conn = _get_db_connection(user_id)
-    try:
-        if search_term:
-            rows = conn.execute(
-                "SELECT id, name, config, created_at FROM configs WHERE type = 'eval' AND name LIKE ? ORDER BY created_at DESC",
-                (f"%{search_term}%",),
-            ).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, name, config, created_at FROM configs WHERE type = 'eval' ORDER BY created_at DESC"
-            ).fetchall()
-
-        return [
-            {
-                "id": row["id"],
-                "name": row["name"],
-                "config": json.loads(row["config"]),
-                "created_at": row["created_at"],
-            }
-            for row in rows
-        ]
-    finally:
-        conn.close()
+    store_dir = _get_json_store_dir(user_id, "eval_configs")
+    entries = _list_json_files(store_dir)
+    results = []
+    for entry in entries:
+        if entry.get("type") != "eval":
+            continue
+        if search_term and search_term.lower() not in entry.get("name", "").lower():
+            continue
+        results.append({
+            "id": entry["id"],
+            "name": entry["name"],
+            "config": entry["config"],
+            "created_at": entry["created_at"],
+        })
+    return results
 
 
-# ============== Datasets (stored in datasets table) ==============
+# ============== Datasets ==============
 
 
 def save_dataset_to_db(user_id: str, name: str, tests: list[dict[str, Any]]) -> str:
-    """Save a dataset to the user's database.
+    """Save a dataset to the user's JSON store.
 
     Args:
         user_id: The user's ID
         name: Name of the dataset (e.g., "healthcare_10")
-        tests: List of test cases in promptfoo format
+        tests: List of test cases
 
     Returns:
         The dataset ID (hash of tests)
     """
     import hashlib
 
-    conn = _get_db_connection(user_id)
-    try:
-        # Generate ID as hash of tests (sort_keys=True for consistent hashing)
-        hash_json = json.dumps(tests, sort_keys=True)
-        dataset_id = hashlib.sha256(hash_json.encode()).hexdigest()
-        now = int(datetime.now().timestamp() * 1000)
+    store_dir = _get_json_store_dir(user_id, "datasets")
 
-        # Store with original key order (question before golden_answer)
-        tests_json = json.dumps(tests)
+    # Generate ID as hash of tests (sort_keys=True for consistent hashing)
+    hash_json = json.dumps(tests, sort_keys=True)
+    dataset_id = hashlib.sha256(hash_json.encode()).hexdigest()
+    now = int(datetime.now().timestamp() * 1000)
 
-        # Use INSERT OR REPLACE to handle duplicates
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO datasets (id, created_at, tests)
-            VALUES (?, ?, ?)
-            """,
-            (dataset_id, now, tests_json),
-        )
-
-        # Also store the name mapping in configs table for easy lookup
-        # Check if name mapping already exists
-        existing = conn.execute(
-            "SELECT id FROM configs WHERE name = ? AND type = 'dataset_name'",
-            (name,),
-        ).fetchone()
-
-        if existing:
-            conn.execute(
-                "UPDATE configs SET config = ?, updated_at = ? WHERE name = ? AND type = 'dataset_name'",
-                (json.dumps({"dataset_id": dataset_id}), now, name),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT INTO configs (id, created_at, updated_at, name, type, config)
-                VALUES (?, ?, ?, ?, 'dataset_name', ?)
-                """,
-                (_generate_id("dsname"), now, now, name, json.dumps({"dataset_id": dataset_id})),
-            )
-
-        conn.commit()
-        return dataset_id
-    finally:
-        conn.close()
+    data = {
+        "id": dataset_id,
+        "name": name,
+        "type": "dataset",
+        "tests": tests,
+        "created_at": now,
+    }
+    _save_json_file(store_dir / f"{dataset_id}.json", data)
+    return dataset_id
 
 
 def get_dataset_from_db(user_id: str, dataset_id: str) -> Optional[dict[str, Any]]:
-    """Get a dataset by ID from the user's database.
+    """Get a dataset by ID from the user's JSON store.
 
     Returns:
         Dict with id, tests, created_at, or None if not found
     """
-    conn = _get_db_connection(user_id)
-    try:
-        row = conn.execute(
-            "SELECT id, tests, created_at FROM datasets WHERE id = ?",
-            (dataset_id,),
-        ).fetchone()
-
-        if row:
-            return {
-                "id": row["id"],
-                "tests": json.loads(row["tests"]),
-                "created_at": row["created_at"],
-            }
-        return None
-    finally:
-        conn.close()
+    store_dir = _get_json_store_dir(user_id, "datasets")
+    data = _load_json_file(store_dir / f"{dataset_id}.json")
+    if data:
+        return {
+            "id": data["id"],
+            "tests": data["tests"],
+            "created_at": data["created_at"],
+        }
+    return None
 
 
 def get_dataset_by_name(user_id: str, name: str) -> Optional[dict[str, Any]]:
-    """Get a dataset by name from the user's database.
+    """Get a dataset by name from the user's JSON store.
 
     Returns:
         Dict with id, name, tests, created_at, or None if not found
     """
-    conn = _get_db_connection(user_id)
-    try:
-        # Look up dataset_id from name mapping
-        name_row = conn.execute(
-            "SELECT config FROM configs WHERE name = ? AND type = 'dataset_name'",
-            (name,),
-        ).fetchone()
-
-        if not name_row:
-            return None
-
-        name_config = json.loads(name_row["config"])
-        dataset_id = name_config.get("dataset_id")
-
-        if not dataset_id:
-            return None
-
-        # Get the actual dataset
-        row = conn.execute(
-            "SELECT id, tests, created_at FROM datasets WHERE id = ?",
-            (dataset_id,),
-        ).fetchone()
-
-        if row:
+    store_dir = _get_json_store_dir(user_id, "datasets")
+    entries = _list_json_files(store_dir)
+    for entry in entries:
+        if entry.get("name") == name:
             return {
-                "id": row["id"],
-                "name": name,
-                "tests": json.loads(row["tests"]),
-                "created_at": row["created_at"],
+                "id": entry["id"],
+                "name": entry["name"],
+                "tests": entry["tests"],
+                "created_at": entry["created_at"],
             }
-        return None
-    finally:
-        conn.close()
+    return None
 
 
 def list_datasets_from_db(user_id: str, search_term: str = "") -> list[dict[str, Any]]:
-    """List all named datasets from the user's database.
+    """List all named datasets from the user's JSON store.
 
     Args:
         user_id: The user's ID
         search_term: Optional search term to filter by name
 
     Returns:
-        List of dicts with id, name, tests, created_at
+        List of dicts with id, name, tests, num_samples, created_at
     """
-    conn = _get_db_connection(user_id)
-    try:
-        # Get all dataset name mappings
-        if search_term:
-            name_rows = conn.execute(
-                "SELECT name, config FROM configs WHERE type = 'dataset_name' AND name LIKE ? ORDER BY created_at DESC",
-                (f"%{search_term}%",),
-            ).fetchall()
-        else:
-            name_rows = conn.execute(
-                "SELECT name, config FROM configs WHERE type = 'dataset_name' ORDER BY created_at DESC"
-            ).fetchall()
-
-        results = []
-        for name_row in name_rows:
-            name = name_row["name"]
-            name_config = json.loads(name_row["config"])
-            dataset_id = name_config.get("dataset_id")
-
-            if dataset_id:
-                row = conn.execute(
-                    "SELECT id, tests, created_at FROM datasets WHERE id = ?",
-                    (dataset_id,),
-                ).fetchone()
-
-                if row:
-                    tests = json.loads(row["tests"])
-                    results.append({
-                        "id": row["id"],
-                        "name": name,
-                        "tests": tests,
-                        "num_samples": len(tests) if isinstance(tests, list) else 0,
-                        "created_at": row["created_at"],
-                    })
-
-        return results
-    finally:
-        conn.close()
+    store_dir = _get_json_store_dir(user_id, "datasets")
+    entries = _list_json_files(store_dir)
+    results = []
+    for entry in entries:
+        name = entry.get("name", "")
+        if search_term and search_term.lower() not in name.lower():
+            continue
+        tests = entry.get("tests", [])
+        results.append({
+            "id": entry["id"],
+            "name": name,
+            "tests": tests,
+            "num_samples": len(tests) if isinstance(tests, list) else 0,
+            "created_at": entry["created_at"],
+        })
+    return results
 
 
 # ============== Document Storage ==============

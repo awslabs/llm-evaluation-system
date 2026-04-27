@@ -39,8 +39,8 @@ spec:
         fsGroup: 1000
       terminationGracePeriodSeconds: 30
       initContainers:
-        # S3 restore - downloads SQLite databases from S3 backup on startup
-        # Simple: list S3 objects, download each .db file if not already present locally
+        # S3 restore - downloads user data from S3 backup on startup
+        # Simple: list S3 objects, download each .json file if not already present locally
         - name: s3-restore
           image: {{ include "eval.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -59,18 +59,17 @@ spec:
               bucket = os.environ['BACKUP_BUCKET']
               region = os.environ['AWS_REGION']
 
-              print(f"Restoring databases from s3://{bucket}/...")
+              print(f"Restoring user data from s3://{bucket}/...")
               s3 = boto3.client('s3', region_name=region)
 
-              # List all .db files in backup bucket
+              # List all .json files in backup bucket
               paginator = s3.get_paginator('list_objects_v2')
               for page in paginator.paginate(Bucket=bucket, Prefix='users/'):
                   for obj in page.get('Contents', []):
                       key = obj['Key']
-                      if not key.endswith('.db'):
+                      if not key.endswith('.json'):
                           continue
 
-                      # key is like 'users/{user_id}/promptfoo.db'
                       local_path = f"/data/{key}"
 
                       if os.path.exists(local_path):
@@ -137,6 +136,9 @@ spec:
                 name: app-config
             - secretRef:
                 name: db-credentials
+            - secretRef:
+                name: llm-provider-keys
+                optional: true
           volumeMounts:
             - name: user-data
               mountPath: /data
@@ -191,8 +193,7 @@ spec:
               mountPath: /data
           resources:
             {{- toYaml .Values.mcp.dataset.resources | nindent 12 }}
-        # S3 backup sidecar - periodically backs up SQLite databases to S3
-        # Uses native sqlite3 .backup for consistent snapshots (safe during writes)
+        # S3 backup sidecar - periodically backs up user JSON data to S3
         - name: s3-backup
           restartPolicy: Always
           image: {{ include "eval.backendImage" . }}
@@ -200,7 +201,7 @@ spec:
           command: ["/sbin/tini", "--", "python", "-c"]
           args:
             - |
-              import boto3, os, time, sqlite3, tempfile, subprocess
+              import boto3, os, time
               from pathlib import Path
               from datetime import datetime
 
@@ -216,30 +217,19 @@ spec:
                   start = datetime.now()
                   backed_up = 0
 
-                  for db_path in users_dir.glob('*/promptfoo.db'):
-                      user_id = db_path.parent.name
-                      s3_key = f"users/{user_id}/promptfoo.db"
+                  # Back up all JSON files in store directories
+                  for json_path in users_dir.glob('*/store/**/*.json'):
+                      rel_path = json_path.relative_to(Path('/data'))
+                      s3_key = str(rel_path)
 
                       try:
-                          # Use sqlite3 .backup for consistent snapshot
-                          with tempfile.NamedTemporaryFile(delete=False, suffix='.db') as tmp:
-                              tmp_path = tmp.name
-
-                          conn = sqlite3.connect(str(db_path))
-                          backup_conn = sqlite3.connect(tmp_path)
-                          conn.backup(backup_conn)
-                          backup_conn.close()
-                          conn.close()
-
-                          # Upload to S3
-                          s3.upload_file(tmp_path, bucket, s3_key)
-                          os.unlink(tmp_path)
+                          s3.upload_file(str(json_path), bucket, s3_key)
                           backed_up += 1
                       except Exception as e:
-                          print(f"Error backing up {user_id}: {e}")
+                          print(f"Error backing up {s3_key}: {e}")
 
                   elapsed = (datetime.now() - start).total_seconds()
-                  print(f"Backed up {backed_up} databases in {elapsed:.1f}s")
+                  print(f"Backed up {backed_up} files in {elapsed:.1f}s")
 
                   # Sleep until next interval
                   sleep_time = max(0, interval - elapsed)

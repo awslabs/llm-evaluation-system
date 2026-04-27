@@ -1,6 +1,5 @@
-"""Jury scoring function for promptfoo assertScoringFunction.
+"""Jury scoring function for multi-judge evaluation.
 
-Called by promptfoo after all judge assertions complete.
 Uses hierarchical voting (two-stage majority):
   1. For each criterion, majority vote across judges
   2. Pass overall if majority of criteria pass
@@ -8,10 +7,6 @@ Uses hierarchical voting (two-stage majority):
 This addresses the issue with flat MAV where dissenting votes on failed
 criteria could push a response over the threshold. Hierarchical voting
 ensures each criterion is treated as an independent pass/fail test.
-
-Usage in promptfoo config:
-  defaultTest:
-    assertScoringFunction: file://backend/core/jury_scoring.py:compute_jury_score
 """
 
 from typing import Any, Dict, List
@@ -82,8 +77,6 @@ def compute_jury_score(
     Two-stage majority voting:
       1. For each criterion, majority vote across judges (pass if > 50% of judges agree)
       2. Pass overall if majority of criteria pass
-
-    This is the assertScoringFunction called by promptfoo.
 
     Args:
         named_scores: Dict of named scores (contains judge_xxx metrics)
@@ -178,7 +171,7 @@ def compute_jury_score(
     # Criteria breakdown
     criteria_breakdown = []
     for c in criteria_results:
-        emoji = "✓" if c["passed"] else "✗"
+        emoji = "+" if c["passed"] else "-"
         criteria_breakdown.append(
             f"  {emoji} {c['name']}: {c['votes_for']}/{n_judges} judges ({c['avg']:.2f})"
         )
@@ -204,5 +197,4 @@ def compute_jury_score(
         "score": jury_score,
         "reason": reason,
         "namedScores": named_scores,
-        "assertScoringFunctionUsed": True,  # Signal UI to show only final pass/fail
     }

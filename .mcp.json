@@ -1,9 +1,11 @@
 {
   "mcpServers": {
-    "promptfoo": {
-      "command": "npx",
-      "args": ["promptfoo@0.119.0", "mcp", "--transport", "stdio"],
-      "description": "Promptfoo MCP server for LLM evaluation and testing"
+    "synthetic-eval": {
+      "command": "python",
+      "args": ["-m", "backend.mcp_servers.synthetic.server_http"],
+      "env": {
+        "PYTHONPATH": "."
+      }
     }
   }
 }

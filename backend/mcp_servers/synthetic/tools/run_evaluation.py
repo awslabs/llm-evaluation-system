@@ -1,4 +1,4 @@
-"""Run promptfoo evaluation via CLI subprocess."""
+"""Run Inspect AI evaluation via CLI subprocess."""
 
 import asyncio
 import json
@@ -11,11 +11,10 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 import httpx
-import yaml
 from botocore.config import Config
 from mcp.types import TextContent
 
-from backend.core.user_storage import get_user_promptfoo_dir
+from backend.core.user_storage import get_user_dir
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,7 @@ import re
 # Pattern for valid config names: alphanumeric, underscore, dash only
 _VALID_CONFIG_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
 
-# Pattern for valid promptfoo eval IDs: alphanumeric, underscore, dash, colon only
+# Pattern for valid eval IDs: alphanumeric, underscore, dash, colon only
 _VALID_EVAL_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_:-]+$')
 
 
@@ -57,37 +56,21 @@ def _validate_config_name(config_name: str) -> str:
     return config_name
 
 
-async def _validate_providers(config_path: str) -> Dict[str, Any]:
-    """Validate all providers in a config file can be invoked.
+async def _validate_providers(providers: List[str]) -> Dict[str, Any]:
+    """Validate all Bedrock providers can be invoked.
 
-    Reads the config, extracts providers, and tests each one with a minimal request.
+    Tests each Bedrock provider with a minimal request.
 
     Returns:
         Dict with 'valid': True if all pass, or 'valid': False with 'failed_providers' list
     """
-    # Read config file
-    try:
-        with open(config_path) as f:
-            config = yaml.safe_load(f)
-    except Exception as e:
-        return {"valid": False, "error": f"Failed to read config: {e}"}
-
-    providers = config.get("providers", [])
     if not providers:
         return {"valid": True, "providers": []}
 
-    # Extract model IDs from providers (handle both string and dict formats)
-    model_ids = []
-    for p in providers:
-        if isinstance(p, str):
-            model_ids.append(p)
-        elif isinstance(p, dict) and "id" in p:
-            model_ids.append(p["id"])
-
     # Filter to only bedrock providers
-    bedrock_models = [m for m in model_ids if m.startswith("bedrock:")]
+    bedrock_models = [m for m in providers if m.startswith("bedrock/")]
     if not bedrock_models:
-        return {"valid": True, "providers": model_ids, "note": "No Bedrock providers to validate"}
+        return {"valid": True, "providers": providers, "note": "No Bedrock providers to validate"}
 
     # Validate each bedrock model
     failed = []
@@ -102,13 +85,8 @@ async def _validate_providers(config_path: str) -> Dict[str, Any]:
     runtime_client = boto3.client("bedrock-runtime", config=config)
 
     for model_id in bedrock_models:
-        # Strip bedrock: or bedrock:converse: prefix to get actual model ID
-        if model_id.startswith("bedrock:converse:"):
-            actual_model_id = model_id[17:]  # len("bedrock:converse:") = 17
-        elif model_id.startswith("bedrock:"):
-            actual_model_id = model_id[8:]
-        else:
-            actual_model_id = model_id
+        # Strip bedrock/ prefix to get actual model ID
+        actual_model_id = model_id.replace("bedrock/", "", 1)
 
         try:
             # Use Converse API - provider-agnostic
@@ -171,67 +149,7 @@ async def cancel_user_evaluation(user_id: str) -> Dict[str, Any]:
         _running_evaluations.pop(user_id, None)
         logger.info(f"Cancelled evaluation {eval_id} for user {user_id}")
 
-    # Always export partial results from SQLite on cancel
-    user_dir = get_user_promptfoo_dir(user_id)
-    await _export_partial_eval(user_dir, reason="cancelled")
-
     return {"cancelled": True, "evalId": eval_id, "configName": config_name}
-
-
-async def _export_partial_eval(user_dir, reason: str = "cancelled") -> Optional[str]:
-    """Export partial eval results from SQLite to JSON after cancellation/timeout.
-
-    Returns the path to the exported file, or None if export failed.
-    """
-    import sqlite3
-    from pathlib import Path
-
-    db_path = Path(user_dir) / "promptfoo.db"
-    if not db_path.exists():
-        logger.warning(f"No SQLite database found at {db_path}")
-        return None
-
-    try:
-        # Get the latest eval ID from SQLite
-        conn = sqlite3.connect(str(db_path))
-        cursor = conn.cursor()
-        cursor.execute("SELECT id FROM evals ORDER BY created_at DESC LIMIT 1")
-        row = cursor.fetchone()
-        conn.close()
-
-        if not row:
-            logger.warning("No evals found in database")
-            return None
-
-        eval_id = row[0]
-
-        # Create results directory
-        results_dir = Path(user_dir) / "results"
-        results_dir.mkdir(exist_ok=True)
-
-        # Export using promptfoo CLI
-        partial_file = results_dir / f"eval_{int(time.time() * 1000)}_partial.json"
-        env = os.environ.copy()
-        env["PROMPTFOO_CONFIG_DIR"] = str(user_dir)
-
-        export_process = await asyncio.create_subprocess_exec(
-            "promptfoo", "export", "eval", eval_id, "-o", str(partial_file),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-        )
-        await asyncio.wait_for(export_process.communicate(), timeout=30)
-
-        if partial_file.exists():
-            logger.info(f"Exported partial eval to {partial_file} (reason: {reason})")
-            return str(partial_file)
-        else:
-            logger.warning(f"Export command completed but file not created: {partial_file}")
-            return None
-
-    except Exception as e:
-        logger.warning(f"Failed to export partial eval: {e}")
-        return None
 
 
 async def _terminate_process_gracefully(
@@ -272,9 +190,9 @@ async def _terminate_process_gracefully(
 
 
 async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
-    """Run a promptfoo evaluation.
+    """Run an Inspect AI evaluation.
 
-    Executes `promptfoo eval` via subprocess with the user's PROMPTFOO_CONFIG_DIR
+    Executes `inspect eval` via subprocess with the user's directory
     set for data isolation. Supports cancellation via asyncio task cancellation.
 
     Args:
@@ -282,20 +200,17 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             - configName: Name of the evaluation config (created by create_eval_config)
             - user_id: User ID for data isolation
             - maxConcurrency: Optional max concurrent requests (default: 4)
-            - write: Whether to write results to database (default: True)
-            - resumeEvalId: Optional eval ID to resume an incomplete evaluation
 
     Returns:
         MCP TextContent response with evaluation results
     """
     process: Optional[asyncio.subprocess.Process] = None
+    eval_id = f"eval_{int(time.time() * 1000)}"
 
     try:
         config_name = args.get("configName")
         user_id = args.get("user_id")
-        max_concurrency = args.get("maxConcurrency", 4)
-        write = args.get("write", True)
-        resume_eval_id = args.get("resumeEvalId")
+        max_concurrency = args.get("maxConcurrency", 16)
 
         # Validate required args
         if not user_id:
@@ -337,26 +252,15 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
-        # Validate resumeEvalId format if provided
-        if resume_eval_id is not None:
-            resume_eval_id = str(resume_eval_id)
-            if not _VALID_EVAL_ID_PATTERN.match(resume_eval_id) or len(resume_eval_id) > 128:
-                return [
-                    TextContent(
-                        type="text",
-                        text=json.dumps({"success": False, "error": "Invalid resumeEvalId format"}),
-                    )
-                ]
-
-        # Get user's promptfoo directory for data isolation
-        user_dir = get_user_promptfoo_dir(user_id)
+        # Get user's directory for data isolation
+        user_dir = get_user_dir(user_id)
         os.makedirs(user_dir, exist_ok=True)
 
-        # Construct config path from validated name - path is fully server-controlled
-        config_path = str(user_dir / "configs" / f"{config_name}.yaml")
+        # Construct task file path from validated name
+        task_file = str(user_dir / "configs" / f"{config_name}.py")
 
-        # Verify config file exists
-        if not Path(config_path).exists():
+        # Verify task file exists
+        if not Path(task_file).exists():
             return [
                 TextContent(
                     type="text",
@@ -364,91 +268,92 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
-        # Validate providers before running eval
-        validation = await _validate_providers(config_path)
-        if not validation.get("valid", False):
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "error": "Provider validation failed",
-                        "validation": validation,
-                        "hint": "Some models are not accessible. Check if they are enabled in your AWS account.",
-                    }, indent=2),
-                )
-            ]
+        # Read the task file to extract provider list for validation
+        try:
+            task_content = Path(task_file).read_text()
+            # Extract providers from the task file for validation
+            providers = []
+            for line in task_content.split("\n"):
+                if "bedrock/" in line and '"' in line:
+                    # Extract model IDs from lines like: "bedrock/us.anthropic.claude-..."
+                    import re as _re
+                    matches = _re.findall(r'"(bedrock/[^"]+)"', line)
+                    providers.extend(matches)
 
-        logger.info(f"Provider validation passed for {len(validation.get('providers', []))} models")
+            if providers:
+                validation = await _validate_providers(providers)
+                if not validation.get("valid", False):
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": False,
+                                "error": "Provider validation failed",
+                                "validation": validation,
+                                "hint": "Some models are not accessible. Check if they are enabled in your AWS account.",
+                            }, indent=2),
+                        )
+                    ]
+                logger.info(f"Provider validation passed for {len(validation.get('providers', []))} models")
+        except Exception as e:
+            logger.warning(f"Could not validate providers: {e}")
 
         # Create results directory for durable storage of each eval
-        results_dir = user_dir / "results"
-        results_dir.mkdir(exist_ok=True)
+        log_dir = user_dir / "logs"
+        log_dir.mkdir(exist_ok=True)
 
-        # Generate unique eval ID based on timestamp
-        eval_id = f"eval_{int(time.time() * 1000)}"
-        results_file = results_dir / f"{eval_id}.json"
-
-        # Build promptfoo eval command
-        # Note: promptfoo writes to database by default, use --no-write to disable
-        # Each eval is saved to a unique JSON file for durability
-        # All paths are constructed from validated inputs (config_name validated above)
-        config_path_str = str(config_path)
-        results_file_str = str(results_file)
-
-        # Set up environment with user's config directory
+        # Set up environment
         env = os.environ.copy()
-        env["PROMPTFOO_CONFIG_DIR"] = str(user_dir)
-        # Pass AWS_REGION as AWS_BEDROCK_REGION for promptfoo (it doesn't read AWS_REGION)
-        if "AWS_REGION" in env and "AWS_BEDROCK_REGION" not in env:
-            env["AWS_BEDROCK_REGION"] = env["AWS_REGION"]
+        env["INSPECT_LOG_DIR"] = str(log_dir)
+        # Ensure AWS region is set for Bedrock
+        region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))
+        env["AWS_REGION"] = region
+        env["AWS_DEFAULT_REGION"] = region
 
-        # Build command arguments - all values are validated above
+        # Build inspect eval command with relative path (Inspect requires non-absolute paths)
+        relative_task = f"configs/{config_name}.py"
+
+        # Extract model providers from the JSON config file
+        models = []
+        config_json_path = user_dir / "configs" / f"{config_name}.json"
+        if config_json_path.exists():
+            config_data = json.loads(config_json_path.read_text())
+            models = config_data.get("providers", [])
+        else:
+            # Fallback: scan task file for provider strings
+            for line in task_content.split("\n"):
+                if '"bedrock/' in line or '"openai/' in line or '"anthropic/' in line or '"google/' in line:
+                    import re as _re
+                    matches = _re.findall(r'"([^"]+/[^"]+)"', line)
+                    models.extend(matches)
+
         cmd: List[str] = [
-            "promptfoo", "eval",
-            "-c", config_path_str,
-            "--max-concurrency", str(max_concurrency),
-            "--no-progress-bar",
-            "--no-cache",
-            "-o", results_file_str,
+            "inspect", "eval",
+            relative_task,
+            "--max-connections", str(max_concurrency),
+            "--no-log-images",
         ]
 
-        # Resume requires database persistence (--no-write is incompatible)
-        if resume_eval_id:
-            cmd.extend(["--resume", str(resume_eval_id)])
-            logger.info(f"Resuming evaluation {resume_eval_id} for user {user_id}")
-        elif not write:
-            cmd.append("--no-write")
+        # Pass models to inspect eval (comma-separated for multiple)
+        if models:
+            cmd.extend(["--model", ",".join(models)])
 
-        # Run the evaluation using create_subprocess_exec (no shell interpretation).
-        # All cmd elements are validated: config_path from _validate_config_name,
-        # max_concurrency bounded to 1-64, resume_eval_id matched against alphanumeric pattern.
-        process = await asyncio.create_subprocess_exec(  # nosemgrep: dangerous-asyncio-create-exec-audit
+        # Run the evaluation from the user's directory
+        process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
+            cwd=str(user_dir),
             start_new_session=True,
         )
 
         logger.info(f"Started evaluation process {process.pid} for user {user_id}")
 
-        # Capture the eval ID from promptfoo's first stdout line (printed before tests run)
-        promptfoo_eval_id = None
-        try:
-            first_line = await asyncio.wait_for(process.stdout.readline(), timeout=60)
-            if first_line:
-                decoded = first_line.decode("utf-8").strip()
-                if decoded.startswith("EVAL_ID:"):
-                    promptfoo_eval_id = decoded.split(":", 1)[1]
-                    logger.info(f"Captured eval ID: {promptfoo_eval_id}")
-        except asyncio.TimeoutError:
-            logger.warning("Timed out waiting for eval ID from promptfoo")
-
-        # Register for cancellation (with eval ID so cancel can return it to the agent)
+        # Register for cancellation
         _running_evaluations[user_id] = {
             "process": process,
-            "eval_id": promptfoo_eval_id,
+            "eval_id": eval_id,
             "config_name": config_name,
         }
 
@@ -456,33 +361,28 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         EVAL_TIMEOUT_SECONDS = 24 * 60 * 60  # 24 hours
 
         try:
-            # Use wait() instead of communicate() — communicate() hangs when
-            # child processes inherit pipe file descriptors and outlive the parent.
-            # We already captured the eval ID from stdout; results go to the database.
             await asyncio.wait_for(process.wait(), timeout=EVAL_TIMEOUT_SECONDS)
         except asyncio.TimeoutError:
             logger.warning(f"Evaluation timed out after {EVAL_TIMEOUT_SECONDS}s for user {user_id}")
             await _terminate_process_gracefully(process)
             _running_evaluations.pop(user_id, None)
-            partial_file = await _export_partial_eval(user_dir, reason="timeout")
             return [
                 TextContent(
                     type="text",
                     text=json.dumps({
                         "success": False,
-                        "evalId": promptfoo_eval_id,
+                        "evalId": eval_id,
                         "configName": config_name,
-                        "error": "Evaluation timed out after 24 hours. Partial results are saved in the database. Resume with resumeEvalId to continue from where it left off.",
-                        "partial_results": partial_file,
+                        "error": "Evaluation timed out after 24 hours.",
                     }),
                 )
             ]
         finally:
             _running_evaluations.pop(user_id, None)
 
-        # Read stderr only on failure (with timeout to avoid hanging on orphan pipes)
+        # Read stderr only on failure
         stderr_str = ""
-        if process.returncode not in (0, 100) and process.stderr:
+        if process.returncode != 0 and process.stderr:
             try:
                 stderr_bytes = await asyncio.wait_for(process.stderr.read(), timeout=5)
                 stderr_str = stderr_bytes.decode("utf-8") if stderr_bytes else ""
@@ -495,18 +395,15 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             async with httpx.AsyncClient() as client:
                 await client.post(f"{backend_url}/api/internal/invalidate-cache/{user_id}", timeout=5.0)
         except Exception:
-            # Don't fail the eval if cache invalidation fails
             pass
 
-        # Exit code 0 = all tests passed, 100 = some tests failed (not an error)
-        # Only treat other exit codes (like 1) as actual errors
-        if process.returncode not in (0, 100):
+        if process.returncode != 0:
             return [
                 TextContent(
                     type="text",
                     text=json.dumps({
                         "success": False,
-                        "evalId": promptfoo_eval_id,
+                        "evalId": eval_id,
                         "configName": config_name,
                         "error": f"Evaluation failed with exit code {process.returncode}",
                         "stderr": stderr_str[:2000],
@@ -514,28 +411,37 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
-        # Try to read the results file (uses results_file defined earlier)
+        # Read results from the latest .eval log file in a subprocess
+        # (read_eval_log can't run inside an async event loop due to uvloop)
         results_summary = None
-        if results_file.exists():
-            try:
-                with open(results_file, encoding="utf-8") as f:
-                    results_data = json.load(f)
-                    # Extract summary statistics
-                    results = results_data.get("results", [])
-                    stats = results_data.get("stats", {})
-                    results_summary = {
-                        "totalTests": len(results),
-                        "successes": stats.get("successes", 0),
-                        "failures": stats.get("failures", 0),
-                        "passRate": f"{(stats.get('successes', 0) / max(len(results), 1) * 100):.1f}%",
-                        "results": results[:10],  # First 10 results for preview
-                    }
-            except Exception as e:
-                results_summary = {"error": f"Could not parse results: {str(e)}"}
+        try:
+            log_files = sorted(log_dir.glob("*.eval"), key=lambda f: f.stat().st_mtime, reverse=True)
+            if log_files:
+                latest_log = log_files[0]
+                read_proc = await asyncio.create_subprocess_exec(
+                    "python3", "-c",
+                    f"""
+import json, sys
+from inspect_ai.log import read_eval_log
+log = read_eval_log("{latest_log}", header_only=True)
+scores = []
+if log.results and log.results.scores:
+    for s in log.results.scores:
+        scores.append({{"scorer": s.name, "metrics": {{n: m.value for n, m in s.metrics.items()}}}})
+print(json.dumps({{"totalTests": log.eval.dataset.samples if log.eval.dataset else 0, "scores": scores, "logFile": "{latest_log}"}}))
+""",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await read_proc.communicate()
+                if read_proc.returncode == 0 and stdout:
+                    results_summary = json.loads(stdout.decode().strip())
+        except Exception as e:
+            results_summary = {"error": f"Could not parse results: {str(e)}"}
 
         result = {
             "success": True,
-            "evalId": promptfoo_eval_id,
+            "evalId": eval_id,
             "configName": config_name,
             "userDir": str(user_dir),
             "message": "Evaluation completed successfully",
@@ -545,7 +451,6 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     except asyncio.CancelledError:
-        # Handle cancellation - terminate subprocess gracefully, return eval ID so agent can resume
         logger.info(f"Evaluation cancelled for user {args.get('user_id')}")
         if process is not None:
             await _terminate_process_gracefully(process)
@@ -555,9 +460,9 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 type="text",
                 text=json.dumps({
                     "success": False,
-                    "evalId": promptfoo_eval_id,
+                    "evalId": eval_id,
                     "configName": args.get("configName"),
-                    "error": "Evaluation was cancelled. Partial results are saved in the database. Resume with resumeEvalId to continue from where it left off.",
+                    "error": "Evaluation was cancelled.",
                 }),
             )
         ]

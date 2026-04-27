@@ -1,16 +1,10 @@
 # Synthetic Eval MCP Server
 FROM public.ecr.aws/docker/library/python:3.12-slim
 
-# Install system dependencies and Node.js (for promptfoo CLI)
-SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+# Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
-    && apt-get install -y nodejs \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-# Install promptfoo globally (for run_evaluation tool)
-RUN npm install -g promptfoo@0.119.0
 
 WORKDIR /app
 

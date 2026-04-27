@@ -197,7 +197,7 @@ def generate_agent_wrapper(
     framework: str,
     entry_call_pattern: str,
 ) -> str:
-    """Generate a promptfoo-compatible wrapper file for the agent."""
+    """Generate a wrapper file for the agent to use in evaluations."""
     from pathlib import Path
     docs_dir = get_user_documents_dir(user_id)
     stem = Path(original_filename).stem
@@ -212,7 +212,7 @@ def generate_agent_wrapper(
         module_name = stem
         import_line = "sys.path.insert(0, str(Path(__file__).parent))"
 
-    wrapper_code = f'''"""Promptfoo wrapper for {original_filename}. Auto-generated."""
+    wrapper_code = f'''"""Eval wrapper for {original_filename}. Auto-generated."""
 import sys
 from pathlib import Path
 
@@ -222,8 +222,8 @@ from pathlib import Path
 # Import everything from the agent module
 from {module_name} import *
 
-def call_api(prompt, options, context):
-    """Promptfoo provider interface."""
+def call_api(prompt, options=None, context=None):
+    """Evaluation provider interface."""
     try:
         result = {entry_call_pattern}
         if isinstance(result, str):
@@ -938,7 +938,7 @@ async def handle_generate_qa_pairs(bedrock: BedrockClient, args: Dict[str, Any])
                 )
             ]
 
-        # Format as promptfoo test cases
+        # Format as test cases
         test_cases = []
         for qa in all_qa_pairs:
             if "question" in qa and "golden_answer" in qa:

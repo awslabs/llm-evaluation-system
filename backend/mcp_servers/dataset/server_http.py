@@ -81,7 +81,7 @@ async def save_dataset(
     user_id: str = None,
 ) -> str:
     """
-    Save a CSV dataset as YAML in promptfoo format.
+    Save a CSV dataset for evaluation.
 
     Converts the CSV to the required format with vars.question and vars.golden_answer.
     Saves to the user's datasets directory.

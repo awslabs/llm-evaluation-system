@@ -1,4 +1,4 @@
-"""Save QA dataset (CSV, JSON, JSONL) to the database in promptfoo format."""
+"""Save QA dataset (CSV, JSON, JSONL) to the database."""
 
 import csv
 import io
@@ -48,12 +48,12 @@ def parse_content_to_rows(content: str, filename: str) -> List[Dict[str, Any]]:
         return list(reader)
 
 
-def rows_to_promptfoo_yaml(
+def rows_to_test_cases(
     rows: List[Dict[str, Any]],
     question_col: str,
     answer_col: str,
 ) -> List[Dict[str, Any]]:
-    """Convert rows to promptfoo test case format.
+    """Convert rows to test case format.
 
     Returns:
         List of test cases with vars.question and vars.golden_answer
@@ -130,9 +130,9 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
         )]
 
     try:
-        # Parse content and convert to promptfoo format
+        # Parse content and convert to test case format
         rows = parse_content_to_rows(file_content, filename)
-        test_cases = rows_to_promptfoo_yaml(rows, question_col, answer_col)
+        test_cases = rows_to_test_cases(rows, question_col, answer_col)
 
         if not test_cases:
             return [TextContent(

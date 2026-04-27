@@ -43,11 +43,8 @@ resource "kubernetes_config_map" "app_config" {
     CLOUDFRONT_DOMAIN = aws_cloudfront_distribution.main.domain_name
     APP_URL           = "https://${aws_cloudfront_distribution.main.domain_name}"
 
-    # Promptfoo - disable ALL external communications
-    PROMPTFOO_DISABLE_TELEMETRY          = "true" # Analytics to a.promptfoo.app, r.promptfoo.app
-    PROMPTFOO_DISABLE_UPDATE             = "true" # Version checks to api.promptfoo.dev
-    PROMPTFOO_DISABLE_REMOTE_GENERATION  = "true" # Test case generation via Promptfoo servers (sends prompts!)
-    PROMPTFOO_DISABLE_SHARING            = "true" # Sharing evals to Promptfoo cloud (sends all data!)
+    # Inspect AI configuration
+    INSPECT_LOG_LEVEL = "info"
   }
 }
 
@@ -83,6 +80,10 @@ resource "helm_release" "external_secrets_config" {
   set {
     name  = "oauth2ProxySecretName"
     value = aws_secretsmanager_secret.oauth2_proxy.name
+  }
+  set {
+    name  = "llmProviderKeysSecretName"
+    value = "${local.name}/llm-provider-keys"
   }
 }
 
@@ -178,7 +179,7 @@ resource "aws_iam_policy" "backend" {
         Resource = [var.documents_bucket_arn, "${var.documents_bucket_arn}/*"]
       },
       {
-        # SQLite backup bucket - periodic backup/restore
+        # JSON data backup bucket - periodic backup/restore
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation"]
         Resource = [var.backup_bucket_arn, "${var.backup_bucket_arn}/*"]

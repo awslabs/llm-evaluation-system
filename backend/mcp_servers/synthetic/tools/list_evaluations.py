@@ -1,16 +1,18 @@
-"""List evaluations from user's promptfoo database."""
+"""List evaluations from user's .eval log files using Inspect AI's API."""
 
 import json
-import sqlite3
+from pathlib import Path
 from typing import Any, Dict, List
 
 from mcp.types import TextContent
 
-from backend.core.user_storage import get_user_promptfoo_dir
+from inspect_ai.log import read_eval_log
+
+from backend.core.user_storage import get_user_dir
 
 
 async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
-    """List evaluations with summary stats from eval_results table."""
+    """List evaluations by reading .eval log files from the user's logs directory."""
     try:
         user_id = args.get("user_id")
         limit = args.get("limit", 20)
@@ -23,10 +25,10 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
-        user_dir = get_user_promptfoo_dir(user_id)
-        db_path = user_dir / "promptfoo.db"
+        user_dir = get_user_dir(user_id)
+        log_dir = user_dir / "logs"
 
-        if not db_path.exists():
+        if not log_dir.exists():
             return [
                 TextContent(
                     type="text",
@@ -38,70 +40,53 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
-        conn = sqlite3.connect(str(db_path))
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
+        log_files = sorted(log_dir.glob("*.eval"), key=lambda f: f.stat().st_mtime, reverse=True)
 
-        try:
-            cursor.execute("""
-                SELECT
-                    e.id,
-                    e.created_at,
-                    e.description,
-                    e.config,
-                    COUNT(er.id) as total_results,
-                    SUM(CASE WHEN er.success = 1 THEN 1 ELSE 0 END) as pass_count,
-                    SUM(CASE WHEN er.success = 0 THEN 1 ELSE 0 END) as fail_count,
-                    SUM(er.cost) as total_cost
-                FROM evals e
-                LEFT JOIN eval_results er ON e.id = er.eval_id
-                GROUP BY e.id
-                ORDER BY e.created_at DESC
-                LIMIT ?
-            """, (limit,))
-            rows = cursor.fetchall()
-        except sqlite3.OperationalError:
-            conn.close()
+        if not log_files:
             return [
                 TextContent(
                     type="text",
                     text=json.dumps({
                         "success": True,
                         "evaluations": [],
-                        "message": "No evaluations found or database schema not recognized.",
+                        "message": "No evaluations found. Run an evaluation first.",
                     }),
                 )
             ]
 
         evaluations = []
-        for row in rows:
-            total = row["total_results"]
-            pass_count = row["pass_count"] or 0
-            eval_data = {
-                "id": row["id"],
-                "createdAt": row["created_at"],
-                "description": row["description"],
-                "totalResults": total,
-                "passCount": pass_count,
-                "failCount": (row["fail_count"] or 0),
-                "passRate": f"{pass_count / total * 100:.0f}%" if total > 0 else "N/A",
-                "totalCost": round(row["total_cost"], 4) if row["total_cost"] else 0,
-            }
+        for log_file in log_files[:limit]:
+            try:
+                log = read_eval_log(str(log_file), header_only=True)
 
-            if row["config"]:
-                try:
-                    config = json.loads(row["config"])
-                    providers = config.get("providers", [])
-                    eval_data["providers"] = [
-                        p.get("id", p) if isinstance(p, dict) else p
-                        for p in providers
-                    ]
-                except json.JSONDecodeError:
-                    pass
+                scores_summary = []
+                if log.results and log.results.scores:
+                    for s in log.results.scores:
+                        metrics = {}
+                        for name, m in s.metrics.items():
+                            metrics[name] = m.value
+                        scores_summary.append({"scorer": s.name, "metrics": metrics})
 
-            evaluations.append(eval_data)
+                eval_data = {
+                    "id": log.eval.run_id,
+                    "createdAt": str(log.eval.created),
+                    "task": log.eval.task,
+                    "model": log.eval.model,
+                    "totalSamples": log.eval.dataset.samples if log.eval.dataset else 0,
+                    "scores": scores_summary,
+                    "status": log.status,
+                    "logFile": log_file.name,
+                }
 
-        conn.close()
+                if log.stats and log.stats.model_usage:
+                    total_tokens = {}
+                    for model, usage in log.stats.model_usage.items():
+                        total_tokens[model] = usage.total_tokens
+                    eval_data["totalTokens"] = total_tokens
+
+                evaluations.append(eval_data)
+            except Exception:
+                continue
 
         return [TextContent(type="text", text=json.dumps({
             "success": True,

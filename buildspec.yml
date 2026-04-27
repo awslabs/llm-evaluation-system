@@ -19,7 +19,7 @@ phases:
   build:
     commands:
       - echo Building Docker images for ARM64...
-      # Backend (FastAPI + MCP servers + promptfoo)
+      # Backend (FastAPI + MCP servers + Inspect AI)
       - docker build --platform linux/arm64 -f docker/backend.Dockerfile -t $REPOSITORY_URI:backend-$IMAGE_TAG .
       # Frontend (Next.js)
       - docker build --platform linux/arm64 -f docker/frontend.Dockerfile -t $REPOSITORY_URI:frontend-$IMAGE_TAG .

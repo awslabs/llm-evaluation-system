@@ -1,10 +1,11 @@
-"""Create promptfoo evaluation configuration with multi-judge jury scoring.
+"""Create Inspect AI evaluation task files with multi-judge jury scoring.
 
-Generates configs that use multiple LLM judges via llm-rubric assertions.
-Each judge outputs binary scores encoded in the score field (integer format (e.g., 10101)).
-Results aggregated by jury_scoring.py (MAV simple mean) via assertScoringFunction.
+Generates:
+- A Python task file that uses Inspect AI's eval framework
+- A JSON config file with rubric, criteria, judge models, and dataset path
 
-All evaluations use jury scoring - this is mandatory.
+Each judge is forced to call a scoring tool with per-criterion binary scores.
+Results aggregated via hierarchical majority voting.
 """
 
 import json
@@ -12,7 +13,6 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import yaml
 from mcp.types import TextContent
 
 from backend.core.judge_config import JudgeConfig
@@ -22,314 +22,289 @@ from backend.core.user_storage import (
     get_user_dir,
 )
 
-# Path to jury scoring function (computed at module load)
-_JURY_SCORING_PATH = Path(__file__).parent.parent.parent.parent / "core" / "jury_scoring.py"
 
-
-def build_judge_rubric_prompt(criteria: List[Dict[str, str]]) -> str:
-    """Build the judge rubric prompt from criteria.
-
-    Args:
-        criteria: List of criteria dicts with 'name' and 'description'
-
-    Returns:
-        Rubric prompt string for llm-rubric
-    """
-    # Build criteria descriptions
+def build_judge_system_prompt(criteria: List[Dict[str, str]]) -> str:
+    """Build the judge system prompt from criteria."""
     criteria_lines = "\n".join([
-        f"{i+1}. {c['name']}: {c['description']}"
-        for i, c in enumerate(criteria)
+        f"- {c['name']}: {c['description']}"
+        for c in criteria
     ])
 
-    # Build encoding example based on criteria count
-    num_criteria = len(criteria)
-    example_encoding = "1" * num_criteria  # e.g., "11111" for 5 criteria
-    zero_example = "0" * num_criteria  # e.g., "00000" for all fail
-
-    return f"""You are a judge evaluating an AI answer against a reference answer. Score each criterion as BINARY (0 or 1).
-
-<criteria>
-{criteria_lines}
-</criteria>
-
-<question>
-{{{{question}}}}
-</question>
-
-<ai_answer>
-{{{{output}}}}
-</ai_answer>
-
-<reference_answer>
-{{{{golden_answer}}}}
-</reference_answer>
-
-<scoring_instructions>
-Encode scores as an integer where each digit represents one criterion (in order):
-- Digit 1 = criterion 1, Digit 2 = criterion 2, etc.
-- All pass: score = {example_encoding}
-- All fail: score = {zero_example}
-- Mixed example: scores [1,0,1,0] -> score = 1010
-</scoring_instructions>
-
-<output_format>
-{{
-  "pass": true,
-  "score": {example_encoding},
-  "reason": "Brief explanation of scores"
-}}
-</output_format>
-
-Your response must be ONLY the JSON object above. Do not include any other text, explanation, or commentary outside the JSON.
-Do not use LaTeX notation (like \\(x\\) or $x$) in your reason - use plain text only."""
+    return (
+        "You are a judge evaluating an AI answer against a reference answer.\n"
+        "Score each criterion as 1 (pass) or 0 (fail), "
+        "then call the submit_scores tool with your scores.\n\n"
+        f"Criteria:\n{criteria_lines}"
+    )
 
 
-def create_promptfoo_config(
+def build_config_json(
     dataset_path: str,
     providers: List[str],
-    prompts: str | List[str],
+    judge_config: JudgeConfig,
+    description: Optional[str] = None,
+) -> dict:
+    """Build the JSON config that the task file will load."""
+    return {
+        "dataset_path": dataset_path,
+        "providers": providers,
+        "judge_models": dict(judge_config.judges),
+        "criteria": judge_config.criteria,
+        "system_prompt": build_judge_system_prompt(judge_config.criteria),
+        "description": description or "",
+    }
+
+
+TASK_FILE_TEMPLATE = '''"""Inspect AI evaluation task: {config_name}
+
+Auto-generated. Uses multi-judge jury scoring with tool-forced structured output.
+"""
+
+import json
+from pathlib import Path
+
+from inspect_ai import Task, task
+from inspect_ai.dataset import json_dataset, FieldSpec
+from inspect_ai.model import ChatMessageUser, ChatMessageSystem, get_model
+from inspect_ai.scorer import Score, accuracy, scorer, stderr
+from inspect_ai.solver import generate
+
+from inspect_ai.tool._tool_info import ToolInfo
+from inspect_ai.tool._tool_params import ToolParams
+
+_config_path = Path(__file__).with_suffix(".json")
+CONFIG = json.loads(_config_path.read_text())
+
+DATASET_PATH = CONFIG["dataset_path"]
+PROVIDERS = CONFIG["providers"]
+JUDGE_MODELS = CONFIG["judge_models"]
+CRITERIA = CONFIG["criteria"]
+SYSTEM_PROMPT = CONFIG["system_prompt"]
+
+
+def _build_scoring_tool():
+    properties = {{}}
+    required = []
+    for c in CRITERIA:
+        properties[c["name"]] = {{
+            "type": "integer",
+            "description": f"Score for {{c['name']}}: 1 if pass, 0 if fail",
+            "enum": [0, 1],
+        }}
+        required.append(c["name"])
+    properties["reason"] = {{
+        "type": "string",
+        "description": "Brief explanation of the scoring decision",
+    }}
+    required.append("reason")
+
+    return ToolInfo(
+        name="submit_scores",
+        description="Submit binary scores for each evaluation criterion",
+        parameters=ToolParams(type="object", properties=properties, required=required),
+    )
+
+
+def _extract_scores(output, criteria_names):
+    if not output or not output.message or not output.message.tool_calls:
+        text = output.completion[:200] if output and output.completion else "(empty)"
+        return None, None, f"No tool call. Response: {{text}}"
+
+    # Merge all submit_scores tool calls (some models split across multiple calls)
+    args = {{}}
+    for tc in output.message.tool_calls:
+        if tc.function == "submit_scores":
+            args.update(tc.arguments)
+
+    if not args:
+        return None, None, f"No submit_scores tool call found"
+
+    missing = [n for n in criteria_names if n not in args]
+    if missing:
+        return None, None, f"Missing criteria: {{missing}}. Got: {{list(args.keys())}}"
+
+    scores = {{n: int(bool(args[n])) for n in criteria_names}}
+    return scores, args.get("reason", ""), None
+
+
+@scorer(metrics=[accuracy(), stderr()])
+def jury_scorer():
+    async def score(state, target):
+        output = state.output.completion if state.output else ""
+        if not output:
+            return Score(value="I", answer="", explanation="No output generated")
+
+        question = str(state.input)
+        golden = target.text if target else ""
+        criteria_names = [c["name"] for c in CRITERIA]
+        tool = _build_scoring_tool()
+
+        votes = {{n: [] for n in criteria_names}}
+        details = []
+        errors = []
+
+        for label, model_id in JUDGE_MODELS.items():
+            try:
+                judge = get_model(model_id)
+                result = await judge.generate(
+                    [
+                        ChatMessageSystem(content=SYSTEM_PROMPT),
+                        ChatMessageUser(
+                            content=f"Question:\\n{{question}}\\n\\nAI Answer:\\n{{output}}\\n\\nReference Answer:\\n{{golden}}"
+                        ),
+                    ],
+                    tools=[tool],
+                    tool_choice="auto",
+                )
+
+                scores, reason, err = _extract_scores(result, criteria_names)
+                if scores is not None:
+                    for n in criteria_names:
+                        votes[n].append(scores[n])
+                    details.append(f"  {{label}}: {{scores}} - {{reason}}")
+                else:
+                    errors.append(f"  {{label}}: {{err}}")
+                    details.append(f"  {{label}}: EXCLUDED ({{err[:80]}})")
+            except Exception as e:
+                errors.append(f"  {{label}}: {{str(e)[:200]}}")
+                details.append(f"  {{label}}: ERROR ({{str(e)[:80]}})")
+
+        # Per-criterion majority vote
+        results = []
+        for n in criteria_names:
+            v = votes[n]
+            if not v:
+                results.append({{"name": n, "votes_for": 0, "total": 0, "passed": False, "note": "no valid responses"}})
+            else:
+                vf = sum(v)
+                results.append({{"name": n, "votes_for": vf, "total": len(v), "passed": vf > len(v) / 2}})
+
+        # Overall pass if >50% criteria pass
+        n_passed = sum(1 for r in results if r["passed"])
+        n_total = len(criteria_names)
+        jury_score = n_passed / max(n_total, 1)
+        passed = jury_score > 0.5
+
+        lines = [f"Jury: {{'PASS' if passed else 'FAIL'}} ({{n_passed}}/{{n_total}} criteria)", ""]
+        for r in results:
+            s = "PASS" if r["passed"] else "FAIL"
+            extra = f" - {{r['note']}}" if "note" in r else ""
+            lines.append(f"  {{r['name']}}: {{s}} ({{r['votes_for']}}/{{r['total']}}){{extra}}")
+        lines += ["", "Judges:"] + details
+        if errors:
+            lines += ["", "Errors:"] + errors
+
+        return Score(
+            value="C" if passed else "I",
+            answer=output[:200],
+            explanation="\\n".join(lines),
+            metadata={{"jury_score": jury_score, "criteria_passed": n_passed, "criteria_total": n_total, "criteria_results": results}},
+        )
+
+    return score
+
+
+@task
+def eval_task():
+    return Task(
+        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
+        solver=[generate()],
+        scorer=jury_scorer(),
+    )
+'''
+
+
+def create_inspect_task_file(
+    dataset_path: str,
+    providers: List[str],
     config_name: str,
     config_dir: str,
     judge_config: JudgeConfig,
     description: Optional[str] = None,
-) -> Dict[str, Any]:
-    """Create a promptfoo configuration with multi-judge jury evaluation.
-
-    All evaluations use jury scoring via assertScoringFunction.
-    Each judge is an llm-rubric assertion with a metric tag.
-    The jury_scoring.py function computes the final score from all judges.
-
-    Args:
-        dataset_path: Absolute path to dataset file
-        providers: List of provider strings (target models to evaluate)
-        prompts: Single prompt string or list of prompts
-        config_name: Name for this evaluation
-        config_dir: Directory where config will be saved
-        judge_config: JudgeConfig with criteria and judges (required)
-        description: Optional description
+) -> tuple[str, dict]:
+    """Create task file code and config JSON.
 
     Returns:
-        Promptfoo config dict with multi-judge llm-rubric assertions and jury scoring
+        (task_code, config_dict) — caller writes both to disk.
     """
-    # Calculate relative path from config dir to dataset
-    config_dir_path = Path(config_dir)
-    dataset_path_obj = Path(dataset_path)
-    relative_dataset = os.path.relpath(dataset_path_obj, config_dir_path)
-
-    # Normalize prompts to list
-    prompts_list = [prompts] if isinstance(prompts, str) else prompts
-
-    # Build rubric prompt from criteria
-    rubric_prompt = build_judge_rubric_prompt(judge_config.criteria)
-
-    # Helper to convert provider to Converse API format with temperature=0
-    def to_converse_provider(provider: str) -> dict:
-        # Convert bedrock:model to bedrock:converse:model for unified API
-        if provider.startswith("bedrock:") and not provider.startswith("bedrock:converse:"):
-            provider = provider.replace("bedrock:", "bedrock:converse:", 1)
-        # Don't set maxTokens - let each model use its default limit
-        # (Llama models have 2048 limit, Claude has 8192+, etc.)
-        return {"id": provider, "config": {"temperature": 0}}
-
-    # Create llm-rubric assertion for each judge with metric tag
-    # Include criteria info in config so scoring function can use names
-    # Use temperature=0 for deterministic, reproducible judge outputs
-    num_criteria = len(judge_config.criteria)
-    criteria_names = [c["name"] for c in judge_config.criteria]
-    assertions = [
-        {
-            "type": "llm-rubric",
-            "provider": to_converse_provider(model_id),
-            "metric": f"judge_{label}",
-            "config": {"num_criteria": num_criteria, "criteria_names": criteria_names},
-        }
-        for label, model_id in judge_config.judges.items()
-    ]
-
-    # Get absolute path to jury scoring function
-    jury_scoring_path = _JURY_SCORING_PATH.resolve()
-
-    # Convert provider strings to use Converse API (reuse helper from above)
-    providers_with_config = [to_converse_provider(p) for p in providers]
-
-    config = {
-        "description": description or f"Evaluation: {config_name}",
-        "providers": providers_with_config,
-        "prompts": prompts_list,
-        "tests": f"file://{relative_dataset}",
-        "defaultTest": {
-            "options": {
-                "rubricPrompt": rubric_prompt,
-            },
-            "assert": assertions,
-            "assertScoringFunction": f"file://{jury_scoring_path}:compute_jury_score",
-        },
-    }
-
-    return config
+    config_data = build_config_json(dataset_path, providers, judge_config, description)
+    task_code = TASK_FILE_TEMPLATE.format(config_name=config_name)
+    return task_code, config_data
 
 
 async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
-    """Handle create_eval_config tool call.
-
-    Args:
-        args: Tool arguments containing:
-            - dataset: Name of dataset (from list_datasets)
-            - judge: Name of judge (from list_judges)
-            - providers: List of model providers to evaluate
-            - prompts: Prompt template(s) (default: "{{question}}")
-            - configName: Name for this config (default: "evaluation")
-            - description: Optional description
-            - user_id: User ID
-
-    Returns:
-        MCP TextContent response with configName
-    """
+    """Handle create_eval_config tool call."""
     try:
-        # Extract arguments
         dataset_name = args.get("dataset")
         judge_name = args.get("judge")
         providers = args.get("providers")
-        prompts = args.get("prompts", "{{question}}")
         config_name = args.get("configName", "evaluation")
         description = args.get("description")
         user_id = args.get("user_id")
 
-        # Validate required args
         if not user_id:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"success": False, "error": "user_id is required"}),
-                )
-            ]
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": "user_id is required"}))]
         if not dataset_name:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"success": False, "error": "dataset is required - use list_datasets to see available datasets"}),
-                )
-            ]
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": "dataset is required"}))]
         if not judge_name:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "error": "judge is required - use list_judges to see available judges, or generate_judge to create one",
-                    }),
-                )
-            ]
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": "judge is required"}))]
         if not providers:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "error": "At least one provider is required",
-                    }),
-                )
-            ]
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": "At least one provider is required"}))]
 
-        # Validate prompt count (prevent massive eval costs)
-        MAX_PROMPTS = 50
-        prompts_list = [prompts] if isinstance(prompts, str) else prompts
-        if len(prompts_list) > MAX_PROMPTS:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "error": f"Maximum {MAX_PROMPTS} prompts allowed per evaluation, got {len(prompts_list)}",
-                    }),
-                )
-            ]
-
-        # Load judge from database
         judge_data = get_judge_by_name(user_id, judge_name)
         if not judge_data:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "error": f"Judge '{judge_name}' not found. Use list_judges to see available judges.",
-                    }),
-                )
-            ]
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": f"Judge '{judge_name}' not found"}))]
 
         criteria = judge_data["config"].get("criteria")
         if not criteria:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "error": f"Judge '{judge_name}' has no criteria",
-                    }),
-                )
-            ]
-        # Build judge config with optional custom judge models
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": f"Judge '{judge_name}' has no criteria"}))]
+
         judge_models_arg = args.get("judge_models")
-        custom_judges = None
-        if judge_models_arg:
-            custom_judges = {m: m for m in judge_models_arg}
+        custom_judges = {m: m for m in judge_models_arg} if judge_models_arg else None
         judge_config = JudgeConfig(criteria=criteria, judges=custom_judges)
 
-        # Load dataset from database
         dataset_data = get_dataset_by_name(user_id, dataset_name)
         if not dataset_data:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "error": f"Dataset '{dataset_name}' not found. Use list_datasets to see available datasets.",
-                    }),
-                )
-            ]
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": f"Dataset '{dataset_name}' not found"}))]
 
         tests = dataset_data.get("tests", [])
         if not tests:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "error": f"Dataset '{dataset_name}' is empty",
-                    }),
-                )
-            ]
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": f"Dataset '{dataset_name}' is empty"}))]
 
-        # Write dataset to temp file (promptfoo needs a file path)
+        # Write dataset JSON
         user_dir = get_user_dir(user_id)
         temp_dir = user_dir / "temp"
         temp_dir.mkdir(parents=True, exist_ok=True)
-        dataset_file = temp_dir / f"{dataset_name}.yaml"
-        with open(dataset_file, "w") as f:
-            yaml.dump(tests, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        dataset_file = temp_dir / f"{dataset_name}.json"
 
-        # Config saved to configs/ directory (run_evaluation constructs path from name)
+        inspect_samples = []
+        for test in tests:
+            v = test.get("vars", test)
+            inspect_samples.append({
+                "question": v.get("question", ""),
+                "golden_answer": v.get("golden_answer", ""),
+            })
+
+        with open(dataset_file, "w") as f:
+            json.dump(inspect_samples, f, indent=2)
+
+        # Generate task file + config JSON
         config_dir = user_dir / "configs"
         config_dir.mkdir(parents=True, exist_ok=True)
-        output_path = config_dir / f"{config_name}.yaml"
 
-        # Create config
-        config = create_promptfoo_config(
+        task_code, config_data = create_inspect_task_file(
             dataset_path=str(dataset_file),
             providers=providers,
-            prompts=prompts,
             config_name=config_name,
             config_dir=str(config_dir),
             description=description,
             judge_config=judge_config,
         )
 
-        # Save config to file
-        with open(output_path, "w") as f:
-            yaml.dump(config, f, default_flow_style=False, sort_keys=False)
+        # Write both files
+        (config_dir / f"{config_name}.py").write_text(task_code)
+        (config_dir / f"{config_name}.json").write_text(json.dumps(config_data, indent=2))
 
-        # Prepare summary - return configName (not path) for security
         result = {
             "success": True,
             "configName": config_name,
@@ -337,8 +312,9 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
                 "dataset": dataset_name,
                 "judge": judge_name,
                 "providers": len(providers),
-                "prompts": len(prompts_list),
                 "testCases": len(tests),
+                "judges": list(judge_config.judges.keys()),
+                "criteria": [c["name"] for c in criteria],
                 "description": description or f"Evaluation: {config_name}",
             },
             "nextStep": f"Run evaluation: run_evaluation(configName='{config_name}')",
@@ -347,12 +323,4 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
     except Exception as e:
-        return [
-            TextContent(
-                type="text",
-                text=json.dumps({
-                    "success": False,
-                    "error": f"Failed to create config: {str(e)}",
-                }),
-            )
-        ]
+        return [TextContent(type="text", text=json.dumps({"success": False, "error": f"Failed to create config: {str(e)}"}))]

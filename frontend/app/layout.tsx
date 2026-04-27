@@ -3,8 +3,8 @@ import "./globals.css";
 import { Providers } from "./providers";
 
 export const metadata: Metadata = {
-  title: "Promptfoo Chat",
-  description: "Chat interface for promptfoo evaluations",
+  title: "Eval Chat",
+  description: "Chat interface for LLM evaluations",
 };
 
 export default function RootLayout({

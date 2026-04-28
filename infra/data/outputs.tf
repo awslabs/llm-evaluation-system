@@ -71,11 +71,11 @@ output "documents_bucket_arn" {
 }
 
 output "backup_bucket" {
-  description = "S3 backup bucket name"
-  value       = module.litestream_bucket.s3_bucket_id
+  description = "S3 data bucket name (eval logs, judges, datasets, configs)"
+  value       = module.data_bucket.s3_bucket_id
 }
 
 output "backup_bucket_arn" {
-  description = "S3 backup bucket ARN"
-  value       = module.litestream_bucket.s3_bucket_arn
+  description = "S3 data bucket ARN"
+  value       = module.data_bucket.s3_bucket_arn
 }

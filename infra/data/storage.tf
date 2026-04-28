@@ -33,16 +33,14 @@ module "documents_bucket" {
 }
 
 #------------------------------------------------------------------------------
-# SQLite Backup Bucket (periodic backup to S3)
-# NOTE: Module named "litestream_bucket" for terraform state compatibility
-# Bucket name kept as "-litestream-" to avoid recreating existing bucket
+# Data Bucket — primary store for eval logs, judges, datasets, configs
 #------------------------------------------------------------------------------
 
-module "litestream_bucket" {
+module "data_bucket" {
   source  = "terraform-aws-modules/s3-bucket/aws"
   version = "~> 4.0"
 
-  bucket        = "${local.name}-litestream-${local.account_id}"
+  bucket        = "${local.name}-data-${local.account_id}"
   force_destroy = true
 
   block_public_acls       = true

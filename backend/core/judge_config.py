@@ -13,7 +13,7 @@ from typing import Dict, List
 JUDGE_MODELS: Dict[str, str] = {
     "claude": "bedrock/us.anthropic.claude-sonnet-4-6",
     "nova": "bedrock/us.amazon.nova-pro-v1:0",
-    "llama": "bedrock/us.meta.llama3-3-70b-instruct-v1:0",
+    "nemotron": "bedrock/nvidia.nemotron-super-3-120b",
 }
 
 # Default criteria for evaluation - binary (0 or 1)

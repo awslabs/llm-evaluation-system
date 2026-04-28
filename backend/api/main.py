@@ -588,6 +588,14 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
         return await chat_non_stream(request, user_id)
 
 
+@app.get("/api/chat/status/{session_id}")
+async def chat_status(session_id: str, user_id: str = Depends(get_current_user_id)):
+    """Check if a chat session is currently processing."""
+    if session_id in active_tasks and not active_tasks[session_id].done():
+        return {"running": True}
+    return {"running": False}
+
+
 @app.post("/api/chat/cancel/{session_id}")
 async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_id)):
     """Cancel an ongoing chat request and any running evaluation."""

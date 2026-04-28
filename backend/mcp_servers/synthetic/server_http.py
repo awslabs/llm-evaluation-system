@@ -429,8 +429,7 @@ async def get_viewer_url(
             "error": "user_id is required",
         })
 
-    base_url = os.environ.get("APP_URL", "http://localhost:4001")
-    viewer_url = f"{base_url}/results"
+    viewer_url = "/results"
 
     return json.dumps({
         "success": True,

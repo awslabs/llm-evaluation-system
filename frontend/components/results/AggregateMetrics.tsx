@@ -72,7 +72,7 @@ export default function AggregateMetrics({
               <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-claude-muted">
                 {stats[model]?.cost != null && (
                   <>
-                    <span>Cost</span>
+                    <span>Total cost</span>
                     <span className="text-claude-text font-medium">
                       ${Number(stats[model].cost).toFixed(4)}
                     </span>

@@ -154,7 +154,7 @@ def jury_scorer():
                         ),
                     ],
                     tools=[tool],
-                    tool_choice="auto",
+                    tool_choice="any",
                 )
 
                 scores, reason, err = _extract_scores(result, criteria_names)

@@ -71,6 +71,15 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     }
   }, [authLoading, user?.name]);
 
+
+  const loadChat = useCallback((sessionId: string) => {
+    const session = chatSessions.find((s) => s.id === sessionId);
+    if (session) {
+      setCurrentSessionId(sessionId);
+      setMessages(session.messages);
+    }
+  }, [chatSessions]);
+
   const createNewChat = useCallback(() => {
     const newSession: ChatSession = {
       id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
@@ -84,13 +93,6 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     setMessages([]);
   }, []);
 
-  const loadChat = useCallback((sessionId: string) => {
-    const session = chatSessions.find((s) => s.id === sessionId);
-    if (session) {
-      setCurrentSessionId(sessionId);
-      setMessages(session.messages);
-    }
-  }, [chatSessions]);
 
   const cancelRequest = useCallback(async () => {
     if (!currentSessionId || !isLoading) return;

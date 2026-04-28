@@ -4,7 +4,6 @@ import { useAuth, login } from "@/contexts/AuthContext";
 import { useEffect } from "react";
 import ChatInterface from "@/components/ChatInterface";
 import Sidebar from "@/components/Sidebar";
-import { ChatProvider } from "@/contexts/ChatContext";
 
 export default function ChatPage() {
   const { user, isLoading } = useAuth();
@@ -28,11 +27,9 @@ export default function ChatPage() {
   }
 
   return (
-    <ChatProvider>
-      <div className="flex h-screen bg-claude-bg">
-        <Sidebar />
-        <ChatInterface />
-      </div>
-    </ChatProvider>
+    <div className="flex h-screen bg-claude-bg">
+      <Sidebar />
+      <ChatInterface />
+    </div>
   );
 }

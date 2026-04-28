@@ -2,11 +2,13 @@
 
 import { useChat } from "@/contexts/ChatContext";
 import { useEffect, useRef } from "react";
+import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 export default function MessageList() {
   const { messages, isLoading } = useChat();
+  const router = useRouter();
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -44,9 +46,24 @@ export default function MessageList() {
                     <ReactMarkdown
                       remarkPlugins={[remarkGfm]}
                       components={{
-                        a: ({ node, ...props }) => (
-                          <a {...props} target="_blank" rel="noopener noreferrer" />
-                        ),
+                        a: ({ node, ...props }) => {
+                          const href = props.href || "";
+                          const isResults = href.includes("/results");
+                          if (isResults) {
+                            const path = href.replace(/^https?:\/\/[^/]+/, "");
+                            return (
+                              <a
+                                {...props}
+                                href={path}
+                                onClick={(e) => {
+                                  e.preventDefault();
+                                  router.push(path);
+                                }}
+                              />
+                            );
+                          }
+                          return <a {...props} target="_blank" rel="noopener noreferrer" />;
+                        },
                         p: ({ children }) => <p style={{ margin: '0 0 8px 0', lineHeight: '1.5' }}>{children}</p>,
                         ul: ({ children }) => <ul style={{ margin: '0 0 8px 0', paddingLeft: '1.5rem', lineHeight: '1.5' }}>{children}</ul>,
                         ol: ({ children }) => <ol style={{ margin: '0 0 8px 0', paddingLeft: '1.5rem', lineHeight: '1.5' }}>{children}</ol>,

@@ -12,9 +12,10 @@ from typing import Any, Dict, List, Optional
 import boto3
 import httpx
 from botocore.config import Config
+from inspect_ai.log import read_eval_log_async
 from mcp.types import TextContent
 
-from backend.core.user_storage import get_user_dir
+from backend.core.user_storage import get_user_dir, get_user_log_dir
 
 logger = logging.getLogger(__name__)
 
@@ -298,13 +299,16 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         except Exception as e:
             logger.warning(f"Could not validate providers: {e}")
 
-        # Create results directory for durable storage of each eval
-        log_dir = user_dir / "logs"
-        log_dir.mkdir(exist_ok=True)
+        # Log directory — S3 in production, local in dev
+        log_dir_str = get_user_log_dir(user_id)
+
+        # For local filesystem, ensure the directory exists
+        if not log_dir_str.startswith("s3://"):
+            Path(log_dir_str).mkdir(parents=True, exist_ok=True)
 
         # Set up environment
         env = os.environ.copy()
-        env["INSPECT_LOG_DIR"] = str(log_dir)
+        env["INSPECT_LOG_DIR"] = log_dir_str
         # Ensure AWS region is set for Bedrock
         region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))
         env["AWS_REGION"] = region
@@ -411,50 +415,27 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
-        # Read results from the latest .eval log file in a subprocess
-        # (read_eval_log can't run inside an async event loop due to uvloop)
+        # Read results from the latest .eval log file
         results_summary = None
-        try:
-            log_files = sorted(log_dir.glob("*.eval"), key=lambda f: f.stat().st_mtime, reverse=True)
-            if log_files:
-                latest_log = log_files[0]
-                read_proc = await asyncio.create_subprocess_exec(
-                    "python3", "-c",
-                    f"""
-import json, sys
-from inspect_ai.log import read_eval_log
-log = read_eval_log("{latest_log}", header_only=True)
-scores = []
-if log.results and log.results.scores:
-    for s in log.results.scores:
-        scores.append({{"scorer": s.name, "metrics": {{n: m.value for n, m in s.metrics.items()}}}})
-print(json.dumps({{"totalTests": log.eval.dataset.samples if log.eval.dataset else 0, "scores": scores, "logFile": "{latest_log}"}}))
-""",
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, _ = await read_proc.communicate()
-                if read_proc.returncode == 0 and stdout:
-                    results_summary = json.loads(stdout.decode().strip())
-        except Exception as e:
-            results_summary = {"error": f"Could not parse results: {str(e)}"}
-
-        # Get run_id from newest .eval file for deep-linking to results
         run_id = None
         try:
-            log_dir = user_dir / "logs"
-            eval_files = sorted(log_dir.glob("*.eval"), key=lambda f: f.stat().st_mtime, reverse=True)
-            if eval_files:
-                proc = await asyncio.create_subprocess_exec(
-                    "python3", "-c",
-                    f"from inspect_ai.log import read_eval_log; log = read_eval_log('{eval_files[0]}', header_only=True); print(log.eval.run_id)",
-                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                )
-                out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-                if proc.returncode == 0:
-                    run_id = out.decode().strip()
-        except Exception:
-            pass
+            from inspect_ai._view.common import list_eval_logs_async
+            eval_logs = await list_eval_logs_async(log_dir_str)
+            if eval_logs:
+                latest_log = eval_logs[0]
+                log = await read_eval_log_async(latest_log.name, header_only=True)
+                scores = []
+                if log.results and log.results.scores:
+                    for s in log.results.scores:
+                        scores.append({"scorer": s.name, "metrics": {n: m.value for n, m in s.metrics.items()}})
+                results_summary = {
+                    "totalTests": log.eval.dataset.samples if log.eval.dataset else 0,
+                    "scores": scores,
+                    "logFile": latest_log.name,
+                }
+                run_id = log.eval.run_id
+        except Exception as e:
+            results_summary = {"error": f"Could not parse results: {str(e)}"}
 
         result = {
             "success": True,

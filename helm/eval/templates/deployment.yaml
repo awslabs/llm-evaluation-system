@@ -18,7 +18,7 @@ metadata:
 spec:
   replicas: {{ .Values.backend.replicas }}
   strategy:
-    type: Recreate  # Single pod with RWO storage - can't have two pods mounting same volume
+    type: RollingUpdate
   selector:
     matchLabels:
       app: backend
@@ -27,8 +27,6 @@ spec:
       labels:
         app: backend
       annotations:
-        # Disable CloudWatch OTEL Python auto-injection - has bugs with Bedrock streaming
-        # See: https://github.com/open-telemetry/opentelemetry-python-contrib/issues/3827
         instrumentation.opentelemetry.io/inject-python: "false"
     spec:
       serviceAccountName: backend-sa
@@ -39,77 +37,6 @@ spec:
         fsGroup: 1000
       terminationGracePeriodSeconds: 30
       initContainers:
-        # S3 restore - downloads user data from S3 backup on startup
-        # Simple: list S3 objects, download each .json file if not already present locally
-        - name: s3-restore
-          image: {{ include "eval.backendImage" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["python", "-c"]
-          args:
-            - |
-              import boto3, os
-              from pathlib import Path
-
-              # Sentinel file to skip restore if already done (shared storage)
-              sentinel = Path("/data/.restore-complete")
-              if sentinel.exists():
-                  print("Restore sentinel exists, skipping restore")
-                  exit(0)
-
-              bucket = os.environ['BACKUP_BUCKET']
-              region = os.environ['AWS_REGION']
-
-              print(f"Restoring user data from s3://{bucket}/...")
-              s3 = boto3.client('s3', region_name=region)
-
-              # List all .json files in backup bucket
-              paginator = s3.get_paginator('list_objects_v2')
-              for page in paginator.paginate(Bucket=bucket, Prefix='users/'):
-                  for obj in page.get('Contents', []):
-                      key = obj['Key']
-                      if not key.endswith('.json'):
-                          continue
-
-                      local_path = f"/data/{key}"
-
-                      if os.path.exists(local_path):
-                          print(f"Skipping {key} (exists)")
-                          continue
-
-                      os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                      print(f"Downloading {key}...")
-                      s3.download_file(bucket, key, local_path)
-
-              sentinel.touch()
-              print("Restore complete")
-          env:
-            - name: BACKUP_BUCKET
-              valueFrom:
-                configMapKeyRef:
-                  name: app-config
-                  key: BACKUP_BUCKET
-            - name: AWS_REGION
-              valueFrom:
-                configMapKeyRef:
-                  name: app-config
-                  key: AWS_REGION
-          securityContext:
-            runAsUser: 1000
-            runAsGroup: 1000
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-          volumeMounts:
-            - name: user-data
-              mountPath: /data
-          resources:
-            requests:
-              memory: "128Mi"
-              cpu: "100m"
-            limits:
-              memory: "512Mi"
-              cpu: "500m"
         # Native sidecar containers (K8s 1.28+) - start before main container
         - name: synthetic-eval-mcp
           restartPolicy: Always
@@ -129,8 +56,6 @@ spec:
               value: "0.0.0.0"
             - name: USER_STORAGE_BASE
               value: "/data/users"
-            - name: VIEWER_BASE_URL
-              value: "https://$(CLOUDFRONT_DOMAIN)"
           envFrom:
             - configMapRef:
                 name: app-config
@@ -140,7 +65,7 @@ spec:
                 name: llm-provider-keys
                 optional: true
           volumeMounts:
-            - name: user-data
+            - name: ephemeral-data
               mountPath: /data
           resources:
             {{- toYaml .Values.mcp.syntheticEval.resources | nindent 12 }}
@@ -163,6 +88,9 @@ spec:
           envFrom:
             - configMapRef:
                 name: app-config
+            - secretRef:
+                name: llm-provider-keys
+                optional: true
           resources:
             {{- toYaml .Values.mcp.providers.resources | nindent 12 }}
         - name: dataset-mcp
@@ -189,76 +117,10 @@ spec:
             - secretRef:
                 name: db-credentials
           volumeMounts:
-            - name: user-data
+            - name: ephemeral-data
               mountPath: /data
           resources:
             {{- toYaml .Values.mcp.dataset.resources | nindent 12 }}
-        # S3 backup sidecar - periodically backs up user JSON data to S3
-        - name: s3-backup
-          restartPolicy: Always
-          image: {{ include "eval.backendImage" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["/sbin/tini", "--", "python", "-c"]
-          args:
-            - |
-              import boto3, os, time
-              from pathlib import Path
-              from datetime import datetime
-
-              bucket = os.environ['BACKUP_BUCKET']
-              region = os.environ['AWS_REGION']
-              interval = int(os.environ.get('BACKUP_INTERVAL_SECONDS', '900'))  # 15 min default
-              users_dir = Path('/data/users')
-
-              s3 = boto3.client('s3', region_name=region)
-              print(f"S3 backup sidecar started (interval={interval}s)")
-
-              while True:
-                  start = datetime.now()
-                  backed_up = 0
-
-                  # Back up all JSON files in store directories
-                  for json_path in users_dir.glob('*/store/**/*.json'):
-                      rel_path = json_path.relative_to(Path('/data'))
-                      s3_key = str(rel_path)
-
-                      try:
-                          s3.upload_file(str(json_path), bucket, s3_key)
-                          backed_up += 1
-                      except Exception as e:
-                          print(f"Error backing up {s3_key}: {e}")
-
-                  elapsed = (datetime.now() - start).total_seconds()
-                  print(f"Backed up {backed_up} files in {elapsed:.1f}s")
-
-                  # Sleep until next interval
-                  sleep_time = max(0, interval - elapsed)
-                  time.sleep(sleep_time)
-          env:
-            - name: BACKUP_BUCKET
-              valueFrom:
-                configMapKeyRef:
-                  name: app-config
-                  key: BACKUP_BUCKET
-            - name: AWS_REGION
-              valueFrom:
-                configMapKeyRef:
-                  name: app-config
-                  key: AWS_REGION
-            - name: BACKUP_INTERVAL_SECONDS
-              value: "{{ .Values.backup.intervalSeconds }}"
-          securityContext:
-            runAsUser: 1000
-            runAsGroup: 1000
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
-          volumeMounts:
-            - name: user-data
-              mountPath: /data
-          resources:
-            {{- toYaml .Values.backup.resources | nindent 12 }}
       containers:
         - name: backend
           image: {{ include "eval.backendImage" . }}
@@ -277,6 +139,9 @@ spec:
                 name: app-config
             - secretRef:
                 name: db-credentials
+            - secretRef:
+                name: llm-provider-keys
+                optional: true
           env:
             - name: USER_STORAGE_BASE
               value: "/data/users"
@@ -289,7 +154,7 @@ spec:
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
           volumeMounts:
-            - name: user-data
+            - name: ephemeral-data
               mountPath: /data
           livenessProbe:
             httpGet:
@@ -297,20 +162,19 @@ spec:
               port: 8080
             initialDelaySeconds: 30
             periodSeconds: 10
-            timeoutSeconds: 5       # Allow for event loop delays (default: 1s)
-            failureThreshold: 6     # 60s before restart (default: 3)
+            timeoutSeconds: 5
+            failureThreshold: 6
           readinessProbe:
             httpGet:
               path: /health
               port: 8080
             initialDelaySeconds: 5
             periodSeconds: 5
-            timeoutSeconds: 3       # Slightly more lenient (default: 1s)
+            timeoutSeconds: 3
             failureThreshold: 3
       volumes:
-        - name: user-data
-          persistentVolumeClaim:
-            claimName: backend-data
+        - name: ephemeral-data
+          emptyDir: {}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -361,7 +225,6 @@ spec:
               value: "http://backend:8080"
             - name: OIDC_PROVIDER_NAME
               value: "SSO"
-            # Logout requires these to construct Cognito logout URL
             - name: NEXT_PUBLIC_COGNITO_DOMAIN
               valueFrom:
                 configMapKeyRef:

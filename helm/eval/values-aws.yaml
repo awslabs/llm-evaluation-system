@@ -2,7 +2,7 @@
 
 # Feature flags
 hpa:
-  enabled: false  # Single pod, no horizontal autoscaling
+  enabled: false
 
 # AWS Configuration (REQUIRED: override with --set)
 aws:
@@ -15,25 +15,17 @@ image:
   frontendTag: "frontend-latest"
   pullPolicy: Always
 
-# Storage - EBS gp3 with periodic S3 backup
-# 200Gi is cheap (~$16/month) and avoids auto-scaling complexity
-storage:
-  className: "ebs-gp3"
-  size: "200Gi"
-
-# Single pod architecture - simple and reliable
-# s3-backup sidecar provides periodic S3 backup (every 15 min) for data safety
-# Brief downtime (~30s) on deploys is acceptable trade-off for simplicity
-# Over-provisioned to t4g.large (~$48/month) for ~50-100 concurrent users
+# Stateless backend — all persistent data in S3
+# t4g.medium is sufficient (~$25/month) since no local storage pressure
 backend:
   replicas: 1
   resources:
     requests:
-      cpu: "1000m"      # Gets t4g.large (2 vCPU, 8GB)
-      memory: "4Gi"
+      cpu: "500m"
+      memory: "2Gi"
     limits:
-      cpu: "1800m"      # Within allocatable (~1930m), throttles gracefully
-      memory: "6Gi"     # Safe headroom (allocatable ~7Gi), avoids OOM
+      cpu: "1500m"
+      memory: "4Gi"
   autoscaling:
     minReplicas: 1
     maxReplicas: 1
@@ -47,10 +39,6 @@ frontend:
     maxReplicas: 10
     targetCPUUtilization: 70
     targetMemoryUtilization: 80
-
-# OIDC Auth - configured via External Secrets from AWS SSM/Secrets Manager
-# OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, NEXTAUTH_SECRET, NEXTAUTH_URL
-# all come from external-secrets.yaml automatically
 
 # oauth2-proxy subchart - handles all authentication at the edge
 oauth2-proxy:
@@ -80,11 +68,9 @@ oauth2-proxy:
       silence_ping_logging = true
       reverse_proxy = true
       upstream_timeout = "120s"
-      # Public routes (/, /_next/*, /favicon.ico) bypassed at ALB level for better UX
-      # Only /health and /ping need skip here (for health checks that reach oauth2-proxy)
       api_routes = ["/api/"]
       skip_auth_routes = ["^/health$", "^/ping$"]
-      upstreams = ["http://backend:8080/api/", "http://backend:8080/viewer/", "http://frontend:3000/"]
+      upstreams = ["http://backend:8080/api/", "http://frontend:3000/"]
 
   extraEnv:
     - name: OAUTH2_PROXY_OIDC_ISSUER_URL
@@ -92,7 +78,6 @@ oauth2-proxy:
         configMapKeyRef:
           name: app-config
           key: OIDC_ISSUER
-    # CLOUDFRONT_DOMAIN comes from envFrom below, $(VAR) syntax expands it
     - name: OAUTH2_PROXY_REDIRECT_URL
       value: "https://$(CLOUDFRONT_DOMAIN)/oauth2/callback"
 

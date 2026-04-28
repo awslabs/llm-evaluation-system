@@ -21,11 +21,6 @@ image:
   frontendTag: "latest"
   pullPolicy: Always
 
-# Storage
-storage:
-  className: ""  # ebs-gp3 for EKS
-  size: "10Gi"
-
 # Backend Configuration
 backend:
   replicas: 1
@@ -57,17 +52,6 @@ frontend:
     maxReplicas: 10
     targetCPUUtilization: 70
     targetMemoryUtilization: 80
-
-# SQLite Backup Sidecar (periodic backup to S3)
-backup:
-  intervalSeconds: 900  # 15 minutes
-  resources:
-    requests:
-      memory: "64Mi"
-      cpu: "50m"
-    limits:
-      memory: "256Mi"
-      cpu: "250m"
 
 # MCP Sidecar Resources
 mcp:

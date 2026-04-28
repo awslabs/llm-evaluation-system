@@ -1,12 +1,12 @@
 """User storage helper for per-user file isolation.
 
-Provides a simple interface for storing files in user-specific directories.
-Local dev: backend/users/{user_id}/
-EKS prod: /data/users/{user_id}/ (EBS volume, backed up periodically to S3)
-AWS S3: When DOCUMENTS_BUCKET is set, documents are stored in S3.
+Two storage backends:
+- S3 (production): DATA_BUCKET env var set. JSON store lives in S3, eval logs
+  written directly by Inspect AI to s3://{bucket}/users/{id}/logs/.
+- Local filesystem (development): No DATA_BUCKET. Everything under USER_STORAGE_BASE.
 
-JSON file storage: Judges, eval configs, and datasets are stored as JSON files
-in per-user directories (backed up periodically to S3).
+Ephemeral files (task .py, temp dataset .json) always use local filesystem
+via get_user_dir() — these are disposable and only needed during eval execution.
 """
 
 import json
@@ -16,6 +16,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+import boto3
+from botocore.exceptions import ClientError
+
 from backend.core.s3_client import (
     is_s3_enabled,
     get_document_content_from_s3,
@@ -23,31 +26,39 @@ from backend.core.s3_client import (
 )
 
 
-def get_user_base_dir() -> Path:
-    """Get the base directory for all user storage.
+# S3 data bucket for persistent user data (judges, datasets, configs, logs)
+DATA_BUCKET = os.environ.get("DATA_BUCKET", "")
 
-    Returns:
-        Path to user storage base (e.g., backend/users or /data/users)
-    """
-    # Allow override via environment variable for EKS deployment
+# AWS region
+_AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
+
+
+def _get_s3_client():
+    return boto3.client("s3", region_name=_AWS_REGION)
+
+
+def _s3_enabled() -> bool:
+    return bool(DATA_BUCKET)
+
+
+# ============== User Directory (ephemeral local files) ==============
+
+
+def get_user_base_dir() -> Path:
+    """Get the base directory for ephemeral user storage."""
     base = os.environ.get("USER_STORAGE_BASE", "backend/users")
     return Path(base)
 
 
 def get_user_dir(user_id: str) -> Path:
-    """Get the directory for a specific user, creating it if needed.
+    """Get the local directory for a specific user's ephemeral files.
 
-    Args:
-        user_id: The user's ID
-
-    Returns:
-        Path to user's directory (e.g., backend/users/user_123/)
+    In production, this is an emptyDir volume for temporary task files.
+    In local dev, this is also where the JSON store and logs live.
     """
     if not user_id:
         raise ValueError("user_id is required")
 
-    # Prevent path traversal attacks - user_id should be an email address
-    # and must not contain path separators or parent directory references
     if '..' in user_id or '/' in user_id or '\\' in user_id:
         raise ValueError(f"Invalid user_id: contains path traversal characters")
 
@@ -57,38 +68,39 @@ def get_user_dir(user_id: str) -> Path:
 
 
 def get_user_datasets_dir(user_id: str) -> Path:
-    """Get the datasets directory for a user."""
     datasets_dir = get_user_dir(user_id) / "datasets"
     datasets_dir.mkdir(parents=True, exist_ok=True)
     return datasets_dir
 
 
 def get_user_judges_dir(user_id: str) -> Path:
-    """Get the judges directory for a user."""
     judges_dir = get_user_dir(user_id) / "judges"
     judges_dir.mkdir(parents=True, exist_ok=True)
     return judges_dir
 
 
 def get_user_configs_dir(user_id: str) -> Path:
-    """Get the configs directory for a user."""
     configs_dir = get_user_dir(user_id) / "configs"
     configs_dir.mkdir(parents=True, exist_ok=True)
     return configs_dir
 
 
-def save_dataset(user_id: str, filename: str, content: str) -> Path:
-    """Save a dataset file for a user.
+def get_user_log_dir(user_id: str) -> str:
+    """Get the log directory for a user's eval results.
 
-    Args:
-        user_id: The user's ID
-        filename: Name of the file (e.g., "healthcare_10.yaml")
-        content: File content
-
-    Returns:
-        Path to saved file
+    Returns an S3 URI in production, local path in development.
     """
-    # Sanitize filename to prevent path traversal
+    if _s3_enabled():
+        return f"s3://{DATA_BUCKET}/users/{user_id}/logs"
+    log_dir = get_user_dir(user_id) / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    return str(log_dir)
+
+
+# ============== File save helpers (ephemeral, local only) ==============
+
+
+def save_dataset(user_id: str, filename: str, content: str) -> Path:
     safe_filename = os.path.basename(filename)
     if not safe_filename:
         raise ValueError("Invalid filename: empty after sanitization")
@@ -98,17 +110,6 @@ def save_dataset(user_id: str, filename: str, content: str) -> Path:
 
 
 def save_judge(user_id: str, filename: str, content: str) -> Path:
-    """Save a judge file for a user.
-
-    Args:
-        user_id: The user's ID
-        filename: Name of the file (e.g., "healthcare_judge.md")
-        content: File content
-
-    Returns:
-        Path to saved file
-    """
-    # Sanitize filename to prevent path traversal
     safe_filename = os.path.basename(filename)
     if not safe_filename:
         raise ValueError("Invalid filename: empty after sanitization")
@@ -118,17 +119,6 @@ def save_judge(user_id: str, filename: str, content: str) -> Path:
 
 
 def save_config(user_id: str, filename: str, content: str) -> Path:
-    """Save a config file for a user.
-
-    Args:
-        user_id: The user's ID
-        filename: Name of the file (e.g., "evaluation.yaml")
-        content: File content
-
-    Returns:
-        Path to saved file
-    """
-    # Sanitize filename to prevent path traversal
     safe_filename = os.path.basename(filename)
     if not safe_filename:
         raise ValueError("Invalid filename: empty after sanitization")
@@ -138,56 +128,42 @@ def save_config(user_id: str, filename: str, content: str) -> Path:
 
 
 def list_user_files(user_id: str, folder: str, pattern: str = "*") -> list:
-    """List files in a user's folder.
-
-    Args:
-        user_id: The user's ID
-        folder: Folder name (datasets, judges, configs)
-        pattern: Glob pattern (default: all files)
-
-    Returns:
-        List of Path objects
-    """
     user_dir = get_user_dir(user_id)
     folder_path = user_dir / folder
-
     if not folder_path.exists():
         return []
-
     return list(folder_path.glob(pattern))
 
 
-# ============== JSON File Storage ==============
-# Judges, eval configs, and datasets are stored as JSON files
-# in per-user directories (backed up periodically to S3).
+# ============== JSON Store (S3 in production, local in dev) ==============
+
+
+def _s3_store_prefix(user_id: str, store_type: str) -> str:
+    return f"users/{user_id}/store/{store_type}/"
 
 
 def _get_json_store_dir(user_id: str, store_type: str) -> Path:
-    """Get the JSON store directory for a given type."""
+    """Get local JSON store directory (used only when S3 is not configured)."""
     store_dir = get_user_dir(user_id) / "store" / store_type
     store_dir.mkdir(parents=True, exist_ok=True)
     return store_dir
 
 
 def _generate_id(prefix: str) -> str:
-    """Generate a unique ID with a prefix."""
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
 
 def _load_json_file(path: Path) -> Optional[dict[str, Any]]:
-    """Load a JSON file, returning None if it doesn't exist."""
     if not path.exists():
         return None
     return json.loads(path.read_text())
 
 
 def _save_json_file(path: Path, data: dict[str, Any]) -> None:
-    """Save data as a JSON file."""
     path.write_text(json.dumps(data, indent=2))
 
 
 def _list_json_files(directory: Path) -> list[dict[str, Any]]:
-    """List all JSON entries in a directory, sorted by created_at descending."""
     entries = []
     if not directory.exists():
         return entries
@@ -201,21 +177,64 @@ def _list_json_files(directory: Path) -> list[dict[str, Any]]:
     return entries
 
 
+# --- S3 JSON store operations ---
+
+
+def _s3_save_json(user_id: str, store_type: str, filename: str, data: dict[str, Any]) -> None:
+    key = f"{_s3_store_prefix(user_id, store_type)}{filename}"
+    _get_s3_client().put_object(
+        Bucket=DATA_BUCKET,
+        Key=key,
+        Body=json.dumps(data, indent=2).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _s3_load_json(user_id: str, store_type: str, filename: str) -> Optional[dict[str, Any]]:
+    key = f"{_s3_store_prefix(user_id, store_type)}{filename}"
+    try:
+        response = _get_s3_client().get_object(Bucket=DATA_BUCKET, Key=key)
+        return json.loads(response["Body"].read().decode("utf-8"))
+    except ClientError as e:
+        if e.response["Error"]["Code"] == "NoSuchKey":
+            return None
+        raise
+
+
+def _s3_list_json(user_id: str, store_type: str) -> list[dict[str, Any]]:
+    prefix = _s3_store_prefix(user_id, store_type)
+    s3 = _get_s3_client()
+    entries = []
+
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=DATA_BUCKET, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            if not obj["Key"].endswith(".json"):
+                continue
+            try:
+                response = s3.get_object(Bucket=DATA_BUCKET, Key=obj["Key"])
+                data = json.loads(response["Body"].read().decode("utf-8"))
+                entries.append(data)
+            except (json.JSONDecodeError, ClientError):
+                continue
+
+    entries.sort(key=lambda x: x.get("created_at", 0), reverse=True)
+    return entries
+
+
+def _s3_delete_json(user_id: str, store_type: str, filename: str) -> bool:
+    key = f"{_s3_store_prefix(user_id, store_type)}{filename}"
+    try:
+        _get_s3_client().delete_object(Bucket=DATA_BUCKET, Key=key)
+        return True
+    except ClientError:
+        return False
+
+
 # ============== Judges ==============
 
 
 def save_judge_to_db(user_id: str, name: str, config: dict[str, Any]) -> str:
-    """Save a judge to the user's JSON store.
-
-    Args:
-        user_id: The user's ID
-        name: Name of the judge (e.g., "healthcare_criteria")
-        config: Judge config dict with domain, criteria, etc.
-
-    Returns:
-        The judge ID
-    """
-    store_dir = _get_json_store_dir(user_id, "judges")
     judge_id = _generate_id("judge")
     now = int(datetime.now().timestamp() * 1000)
 
@@ -227,18 +246,23 @@ def save_judge_to_db(user_id: str, name: str, config: dict[str, Any]) -> str:
         "created_at": now,
         "updated_at": now,
     }
-    _save_json_file(store_dir / f"{judge_id}.json", data)
+
+    if _s3_enabled():
+        _s3_save_json(user_id, "judges", f"{judge_id}.json", data)
+    else:
+        store_dir = _get_json_store_dir(user_id, "judges")
+        _save_json_file(store_dir / f"{judge_id}.json", data)
+
     return judge_id
 
 
 def get_judge_from_db(user_id: str, judge_id: str) -> Optional[dict[str, Any]]:
-    """Get a judge by ID from the user's JSON store.
+    if _s3_enabled():
+        data = _s3_load_json(user_id, "judges", f"{judge_id}.json")
+    else:
+        store_dir = _get_json_store_dir(user_id, "judges")
+        data = _load_json_file(store_dir / f"{judge_id}.json")
 
-    Returns:
-        Dict with id, name, config, created_at, or None if not found
-    """
-    store_dir = _get_json_store_dir(user_id, "judges")
-    data = _load_json_file(store_dir / f"{judge_id}.json")
     if data and data.get("type") == "judge":
         return {
             "id": data["id"],
@@ -250,13 +274,12 @@ def get_judge_from_db(user_id: str, judge_id: str) -> Optional[dict[str, Any]]:
 
 
 def get_judge_by_name(user_id: str, name: str) -> Optional[dict[str, Any]]:
-    """Get a judge by name from the user's JSON store.
+    if _s3_enabled():
+        entries = _s3_list_json(user_id, "judges")
+    else:
+        store_dir = _get_json_store_dir(user_id, "judges")
+        entries = _list_json_files(store_dir)
 
-    Returns:
-        Dict with id, name, config, created_at, or None if not found
-    """
-    store_dir = _get_json_store_dir(user_id, "judges")
-    entries = _list_json_files(store_dir)
     for entry in entries:
         if entry.get("name") == name and entry.get("type") == "judge":
             return {
@@ -269,17 +292,12 @@ def get_judge_by_name(user_id: str, name: str) -> Optional[dict[str, Any]]:
 
 
 def list_judges_from_db(user_id: str, search_term: str = "") -> list[dict[str, Any]]:
-    """List all judges from the user's JSON store.
+    if _s3_enabled():
+        entries = _s3_list_json(user_id, "judges")
+    else:
+        store_dir = _get_json_store_dir(user_id, "judges")
+        entries = _list_json_files(store_dir)
 
-    Args:
-        user_id: The user's ID
-        search_term: Optional search term to filter by name
-
-    Returns:
-        List of dicts with id, name, config, created_at
-    """
-    store_dir = _get_json_store_dir(user_id, "judges")
-    entries = _list_json_files(store_dir)
     results = []
     for entry in entries:
         if entry.get("type") != "judge":
@@ -296,11 +314,8 @@ def list_judges_from_db(user_id: str, search_term: str = "") -> list[dict[str, A
 
 
 def delete_judge_from_db(user_id: str, judge_id: str) -> bool:
-    """Delete a judge from the user's JSON store.
-
-    Returns:
-        True if deleted, False if not found
-    """
+    if _s3_enabled():
+        return _s3_delete_json(user_id, "judges", f"{judge_id}.json")
     store_dir = _get_json_store_dir(user_id, "judges")
     path = store_dir / f"{judge_id}.json"
     if path.exists():
@@ -313,17 +328,6 @@ def delete_judge_from_db(user_id: str, judge_id: str) -> bool:
 
 
 def save_eval_config_to_db(user_id: str, name: str, config: dict[str, Any]) -> str:
-    """Save an eval config to the user's JSON store.
-
-    Args:
-        user_id: The user's ID
-        name: Name of the config (e.g., "healthcare_eval")
-        config: Eval config dict with providers, prompts, dataset_id, judge_id, etc.
-
-    Returns:
-        The config ID
-    """
-    store_dir = _get_json_store_dir(user_id, "eval_configs")
     config_id = _generate_id("eval")
     now = int(datetime.now().timestamp() * 1000)
 
@@ -335,18 +339,23 @@ def save_eval_config_to_db(user_id: str, name: str, config: dict[str, Any]) -> s
         "created_at": now,
         "updated_at": now,
     }
-    _save_json_file(store_dir / f"{config_id}.json", data)
+
+    if _s3_enabled():
+        _s3_save_json(user_id, "eval_configs", f"{config_id}.json", data)
+    else:
+        store_dir = _get_json_store_dir(user_id, "eval_configs")
+        _save_json_file(store_dir / f"{config_id}.json", data)
+
     return config_id
 
 
 def get_eval_config_from_db(user_id: str, config_id: str) -> Optional[dict[str, Any]]:
-    """Get an eval config by ID from the user's JSON store.
+    if _s3_enabled():
+        data = _s3_load_json(user_id, "eval_configs", f"{config_id}.json")
+    else:
+        store_dir = _get_json_store_dir(user_id, "eval_configs")
+        data = _load_json_file(store_dir / f"{config_id}.json")
 
-    Returns:
-        Dict with id, name, config, created_at, or None if not found
-    """
-    store_dir = _get_json_store_dir(user_id, "eval_configs")
-    data = _load_json_file(store_dir / f"{config_id}.json")
     if data and data.get("type") == "eval":
         return {
             "id": data["id"],
@@ -358,17 +367,12 @@ def get_eval_config_from_db(user_id: str, config_id: str) -> Optional[dict[str, 
 
 
 def list_eval_configs_from_db(user_id: str, search_term: str = "") -> list[dict[str, Any]]:
-    """List all eval configs from the user's JSON store.
+    if _s3_enabled():
+        entries = _s3_list_json(user_id, "eval_configs")
+    else:
+        store_dir = _get_json_store_dir(user_id, "eval_configs")
+        entries = _list_json_files(store_dir)
 
-    Args:
-        user_id: The user's ID
-        search_term: Optional search term to filter by name
-
-    Returns:
-        List of dicts with id, name, config, created_at
-    """
-    store_dir = _get_json_store_dir(user_id, "eval_configs")
-    entries = _list_json_files(store_dir)
     results = []
     for entry in entries:
         if entry.get("type") != "eval":
@@ -388,21 +392,8 @@ def list_eval_configs_from_db(user_id: str, search_term: str = "") -> list[dict[
 
 
 def save_dataset_to_db(user_id: str, name: str, tests: list[dict[str, Any]]) -> str:
-    """Save a dataset to the user's JSON store.
-
-    Args:
-        user_id: The user's ID
-        name: Name of the dataset (e.g., "healthcare_10")
-        tests: List of test cases
-
-    Returns:
-        The dataset ID (hash of tests)
-    """
     import hashlib
 
-    store_dir = _get_json_store_dir(user_id, "datasets")
-
-    # Generate ID as hash of tests (sort_keys=True for consistent hashing)
     hash_json = json.dumps(tests, sort_keys=True)
     dataset_id = hashlib.sha256(hash_json.encode()).hexdigest()
     now = int(datetime.now().timestamp() * 1000)
@@ -414,18 +405,23 @@ def save_dataset_to_db(user_id: str, name: str, tests: list[dict[str, Any]]) -> 
         "tests": tests,
         "created_at": now,
     }
-    _save_json_file(store_dir / f"{dataset_id}.json", data)
+
+    if _s3_enabled():
+        _s3_save_json(user_id, "datasets", f"{dataset_id}.json", data)
+    else:
+        store_dir = _get_json_store_dir(user_id, "datasets")
+        _save_json_file(store_dir / f"{dataset_id}.json", data)
+
     return dataset_id
 
 
 def get_dataset_from_db(user_id: str, dataset_id: str) -> Optional[dict[str, Any]]:
-    """Get a dataset by ID from the user's JSON store.
+    if _s3_enabled():
+        data = _s3_load_json(user_id, "datasets", f"{dataset_id}.json")
+    else:
+        store_dir = _get_json_store_dir(user_id, "datasets")
+        data = _load_json_file(store_dir / f"{dataset_id}.json")
 
-    Returns:
-        Dict with id, tests, created_at, or None if not found
-    """
-    store_dir = _get_json_store_dir(user_id, "datasets")
-    data = _load_json_file(store_dir / f"{dataset_id}.json")
     if data:
         return {
             "id": data["id"],
@@ -436,13 +432,12 @@ def get_dataset_from_db(user_id: str, dataset_id: str) -> Optional[dict[str, Any
 
 
 def get_dataset_by_name(user_id: str, name: str) -> Optional[dict[str, Any]]:
-    """Get a dataset by name from the user's JSON store.
+    if _s3_enabled():
+        entries = _s3_list_json(user_id, "datasets")
+    else:
+        store_dir = _get_json_store_dir(user_id, "datasets")
+        entries = _list_json_files(store_dir)
 
-    Returns:
-        Dict with id, name, tests, created_at, or None if not found
-    """
-    store_dir = _get_json_store_dir(user_id, "datasets")
-    entries = _list_json_files(store_dir)
     for entry in entries:
         if entry.get("name") == name:
             return {
@@ -455,17 +450,12 @@ def get_dataset_by_name(user_id: str, name: str) -> Optional[dict[str, Any]]:
 
 
 def list_datasets_from_db(user_id: str, search_term: str = "") -> list[dict[str, Any]]:
-    """List all named datasets from the user's JSON store.
+    if _s3_enabled():
+        entries = _s3_list_json(user_id, "datasets")
+    else:
+        store_dir = _get_json_store_dir(user_id, "datasets")
+        entries = _list_json_files(store_dir)
 
-    Args:
-        user_id: The user's ID
-        search_term: Optional search term to filter by name
-
-    Returns:
-        List of dicts with id, name, tests, num_samples, created_at
-    """
-    store_dir = _get_json_store_dir(user_id, "datasets")
-    entries = _list_json_files(store_dir)
     results = []
     for entry in entries:
         name = entry.get("name", "")
@@ -485,31 +475,16 @@ def list_datasets_from_db(user_id: str, search_term: str = "") -> list[dict[str,
 # ============== Document Storage ==============
 
 def get_user_documents_dir(user_id: str) -> Path:
-    """Get the documents directory for a user."""
     documents_dir = get_user_dir(user_id) / "documents"
     documents_dir.mkdir(parents=True, exist_ok=True)
     return documents_dir
 
 
 def save_document(user_id: str, filename: str, content: bytes, folder: Optional[str] = None) -> Path:
-    """Save a document file for a user.
-
-    Args:
-        user_id: The user's ID
-        filename: Name of the file (e.g., "manual.pdf")
-        content: File content as bytes
-        folder: Optional subfolder name (e.g., "product_manual_20240107_1430")
-
-    Returns:
-        Path to saved file
-    """
-    # Sanitize filename - strip path components to prevent directory traversal
-    # e.g., "../../etc/passwd" becomes "passwd"
     safe_filename = os.path.basename(filename)
     if not safe_filename:
         raise ValueError("Invalid filename: empty after sanitization")
 
-    # Sanitize folder if provided (defense-in-depth, caller already sanitizes)
     safe_folder = os.path.basename(folder) if folder else None
 
     if safe_folder:
@@ -520,7 +495,6 @@ def save_document(user_id: str, filename: str, content: bytes, folder: Optional[
 
     filepath = target_dir / safe_filename
 
-    # Handle filename collision - append _2, _3, etc.
     if filepath.exists():
         stem = filepath.stem
         suffix = filepath.suffix
@@ -534,13 +508,6 @@ def save_document(user_id: str, filename: str, content: bytes, folder: Optional[
 
 
 def list_user_documents(user_id: str) -> dict:
-    """List all documents for a user.
-
-    Returns:
-        Dict with:
-        - files: list of files in root documents/
-        - folders: dict of folder_name -> list of files
-    """
     documents_dir = get_user_documents_dir(user_id)
 
     result = {
@@ -568,84 +535,55 @@ MEDIA_TYPES = {
     ".gif": "image/gif",
     ".webp": "image/webp",
     ".csv": "text/csv",
-    ".py": "text/x-python",  # Python agent files for evaluation
+    ".py": "text/x-python",
 }
 
-# Limits for document processing
 MAX_DOCUMENTS = 100
 MAX_DOCUMENT_SIZE_MB = 50
 
 
 def get_document_content(user_id: str, doc_path: str) -> tuple[bytes, str]:
-    """Load document content and detect media type.
-
-    Args:
-        user_id: User ID
-        doc_path: Path relative to documents/, e.g., "AT&T.pdf" or "my_folder/doc.pdf"
-
-    Returns:
-        (content_bytes, media_type)
-
-    Raises:
-        FileNotFoundError: If document doesn't exist
-        ValueError: If file type not supported or exceeds size limit
-    """
-    # Check file extension first (works for both S3 and local)
+    """Load document content and detect media type."""
     ext = Path(doc_path).suffix.lower()
     if ext not in MEDIA_TYPES:
         raise ValueError(f"Unsupported file type: {ext}")
 
     media_type = MEDIA_TYPES[ext]
 
-    # Use S3 if enabled, otherwise local filesystem
     if is_s3_enabled():
         content = get_document_content_from_s3(user_id, doc_path)
-        # Check size
         size_mb = len(content) / (1024 * 1024)
         if size_mb > MAX_DOCUMENT_SIZE_MB:
             raise ValueError(f"Document '{doc_path}' is {size_mb:.1f}MB. Max is {MAX_DOCUMENT_SIZE_MB}MB.")
         return content, media_type
 
-    # Local filesystem
     documents_dir = get_user_documents_dir(user_id)
     filepath = (documents_dir / doc_path).resolve()
 
-    # Prevent path traversal - ensure resolved path is within documents directory
     if not filepath.is_relative_to(documents_dir.resolve()):
         raise ValueError(f"Invalid document path: {doc_path}")
 
     if not filepath.exists():
         raise FileNotFoundError(f"Document '{doc_path}' not found")
 
-    # Check file size
     size_mb = filepath.stat().st_size / (1024 * 1024)
     if size_mb > MAX_DOCUMENT_SIZE_MB:
         raise ValueError(f"Document '{doc_path}' is {size_mb:.1f}MB. Max is {MAX_DOCUMENT_SIZE_MB}MB.")
 
     content = filepath.read_bytes()
-
     return content, media_type
 
 
 def list_user_document_paths(user_id: str) -> list[str]:
-    """List all document paths for a user (flat list).
-
-    Returns:
-        List of paths like ["doc.pdf", "folder/other.txt"]
-    """
-    # Use S3 if enabled
+    """List all document paths for a user (flat list)."""
     if is_s3_enabled():
         docs = list_user_s3_documents(user_id)
-        # Extract just the filenames (strip timestamp prefix)
         paths = []
         for doc in docs:
             rel_path = doc.get("path", "")
             if rel_path:
-                # Path format: {timestamp}_{filename} or {folder}/{timestamp}_{filename}
-                # Extract the original filename by removing timestamp prefix
                 if "/" in rel_path:
                     folder, timestamped_name = rel_path.rsplit("/", 1)
-                    # Remove timestamp prefix (YYYYMMDD_HHMMSS_)
                     parts = timestamped_name.split("_", 2)
                     if len(parts) >= 3:
                         filename = parts[2]
@@ -660,7 +598,6 @@ def list_user_document_paths(user_id: str) -> list[str]:
                         paths.append(rel_path)
         return paths
 
-    # Local filesystem
     documents_dir = get_user_documents_dir(user_id)
     paths = []
 

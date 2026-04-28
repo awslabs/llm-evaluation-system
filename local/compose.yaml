@@ -30,7 +30,7 @@ services:
         while ! python3 -c \"import socket; socket.create_connection(('127.0.0.1',8004),1)\" 2>/dev/null; do sleep 1; done &&
         while ! python3 -c \"import socket; socket.create_connection(('127.0.0.1',8005),1)\" 2>/dev/null; do sleep 1; done &&
         echo 'MCP servers ready, starting backend...' &&
-        uvicorn local.entrypoint:app --host 0.0.0.0 --port 8080 --log-level info --loop asyncio
+        uvicorn local.entrypoint:app --host 0.0.0.0 --port 8080 --log-level info
           --reload --reload-dir /app/backend/api --reload-dir /app/backend/core --reload-dir /app/local
       "
     volumes:

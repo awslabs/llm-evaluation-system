@@ -3,6 +3,7 @@ region: us-west-2
 namespace: eval-managed
 
 # Secret references (set by Terraform)
-dbSecretArn: ""            # module.rds.db_instance_master_user_secret_arn
-cognitoSecretName: ""      # aws_secretsmanager_secret.cognito_client.name
-oauth2ProxySecretName: ""  # aws_secretsmanager_secret.oauth2_proxy.name
+dbSecretArn: ""                  # module.rds.db_instance_master_user_secret_arn
+cognitoSecretName: ""            # aws_secretsmanager_secret.cognito_client.name
+oauth2ProxySecretName: ""        # aws_secretsmanager_secret.oauth2_proxy.name
+llmProviderKeysSecretName: ""    # aws_secretsmanager_secret.llm_provider_keys.name

@@ -32,8 +32,9 @@ resource "kubernetes_config_map" "app_config" {
     OIDC_ISSUER          = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.main.id}"
     OIDC_CLIENT_ID       = aws_cognito_user_pool_client.main.id
 
-    # Storage
+    # Storage — S3 is primary store for all persistent data
     S3_BUCKET     = var.documents_bucket
+    DATA_BUCKET   = var.backup_bucket
     BACKUP_BUCKET = var.backup_bucket
 
     # AWS
@@ -88,24 +89,26 @@ resource "helm_release" "external_secrets_config" {
 }
 
 #------------------------------------------------------------------------------
-# EBS gp3 StorageClass - High-performance persistent storage
+# LLM Provider Keys Secret (optional — users populate via AWS console/CLI)
+# Holds OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY for external providers
 #------------------------------------------------------------------------------
 
-resource "kubectl_manifest" "ebs_storage_class" {
-  yaml_body = <<-YAML
-    apiVersion: storage.k8s.io/v1
-    kind: StorageClass
-    metadata:
-      name: ebs-gp3
-    provisioner: ebs.csi.aws.com
-    parameters:
-      type: gp3
-      encrypted: "true"
-    volumeBindingMode: WaitForFirstConsumer
-    allowVolumeExpansion: true
-    reclaimPolicy: Delete
-  YAML
-  depends_on = [null_resource.wait_for_cluster, module.eks]
+resource "aws_secretsmanager_secret" "llm_provider_keys" {
+  name                    = "${local.name}/llm-provider-keys"
+  recovery_window_in_days = 0
+}
+
+resource "aws_secretsmanager_secret_version" "llm_provider_keys" {
+  secret_id = aws_secretsmanager_secret.llm_provider_keys.id
+  secret_string = jsonencode({
+    OPENAI_API_KEY    = ""
+    ANTHROPIC_API_KEY = ""
+    GOOGLE_API_KEY    = ""
+  })
+
+  lifecycle {
+    ignore_changes = [secret_string]
+  }
 }
 
 #------------------------------------------------------------------------------
@@ -138,7 +141,7 @@ module "external_secrets_pod_identity" {
 
   attach_external_secrets_policy        = true
   external_secrets_ssm_parameter_arns   = ["arn:aws:ssm:${var.region}:${local.account_id}:parameter/${local.name}/*"]
-  external_secrets_secrets_manager_arns = [var.rds_secret_arn, aws_secretsmanager_secret.cognito_client.arn, aws_secretsmanager_secret.oauth2_proxy.arn]
+  external_secrets_secrets_manager_arns = [var.rds_secret_arn, aws_secretsmanager_secret.cognito_client.arn, aws_secretsmanager_secret.oauth2_proxy.arn, aws_secretsmanager_secret.llm_provider_keys.arn]
 
   # Pod Identity for the External Secrets Operator controller (runs in external-secrets namespace)
   associations = {
@@ -179,7 +182,7 @@ resource "aws_iam_policy" "backend" {
         Resource = [var.documents_bucket_arn, "${var.documents_bucket_arn}/*"]
       },
       {
-        # JSON data backup bucket - periodic backup/restore
+        # Primary data bucket — eval logs, judges, datasets, configs
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation"]
         Resource = [var.backup_bucket_arn, "${var.backup_bucket_arn}/*"]

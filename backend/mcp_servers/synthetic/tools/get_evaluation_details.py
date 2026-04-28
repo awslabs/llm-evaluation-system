@@ -6,9 +6,10 @@ from typing import Any, Dict, List
 
 from mcp.types import TextContent
 
-from inspect_ai.log import read_eval_log
+from inspect_ai._view.common import list_eval_logs_async
+from inspect_ai.log import read_eval_log_async
 
-from backend.core.user_storage import get_user_dir
+from backend.core.user_storage import get_user_log_dir
 
 
 async def handle_get_evaluation_details(args: Dict[str, Any]) -> List[TextContent]:
@@ -32,10 +33,10 @@ async def handle_get_evaluation_details(args: Dict[str, Any]) -> List[TextConten
                 )
             ]
 
-        user_dir = get_user_dir(user_id)
-        log_dir = user_dir / "logs"
+        log_dir = get_user_log_dir(user_id)
+        eval_log_infos = await list_eval_logs_async(log_dir)
 
-        if not log_dir.exists():
+        if not eval_log_infos:
             return [
                 TextContent(
                     type="text",
@@ -43,16 +44,16 @@ async def handle_get_evaluation_details(args: Dict[str, Any]) -> List[TextConten
                 )
             ]
 
-        # Find the matching log file by filename stem or run_id
+        # Find the matching log file by filename or run_id
         target_log = None
-        for log_file in log_dir.glob("*.eval"):
-            if log_file.stem == eval_id or eval_id in log_file.stem:
-                target_log = log_file
+        for info in eval_log_infos:
+            if eval_id in info.name:
+                target_log = info.name
                 break
             try:
-                log = read_eval_log(str(log_file), header_only=True)
+                log = await read_eval_log_async(info.name, header_only=True)
                 if log.eval.run_id == eval_id:
-                    target_log = log_file
+                    target_log = info.name
                     break
             except Exception:
                 continue
@@ -68,7 +69,7 @@ async def handle_get_evaluation_details(args: Dict[str, Any]) -> List[TextConten
                 )
             ]
 
-        log = read_eval_log(str(target_log))
+        log = await read_eval_log_async(target_log)
 
         scores_summary = []
         if log.results and log.results.scores:

@@ -4,6 +4,7 @@ Uses read_eval_log_async() directly since FastAPI endpoints are already
 in an async context — no subprocess or nest_asyncio needed.
 """
 
+import asyncio
 import json
 import logging
 from collections import defaultdict
@@ -11,10 +12,11 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from inspect_ai._view.common import list_eval_logs_async
 from inspect_ai.log import read_eval_log_async
 
 from backend.core.pricing import calculate_cost
-from backend.core.user_storage import get_user_dir
+from backend.core.user_storage import get_user_dir, get_user_log_dir
 
 logger = logging.getLogger(__name__)
 
@@ -28,15 +30,15 @@ async def _get_user_id(request: Request) -> str:
     return user_id
 
 
-async def _read_log_headers(log_dir: Path) -> list[dict]:
-    """Read .eval log headers (no samples) from a directory."""
-    eval_files = sorted(log_dir.glob("*.eval"), key=lambda f: f.stat().st_mtime, reverse=True)
+async def _read_log_headers(log_dir: str) -> list[dict]:
+    """Read .eval log headers (no samples) from a directory (local or S3)."""
+    eval_log_infos = await list_eval_logs_async(log_dir)
     results = []
-    for f in eval_files:
+    for info in eval_log_infos:
         try:
-            log = await read_eval_log_async(str(f), header_only=True)
+            log = await read_eval_log_async(info.name, header_only=True)
             entry = {
-                "file": str(f),
+                "file": info.name,
                 "run_id": log.eval.run_id if log.eval.run_id else None,
                 "task": log.eval.task,
                 "model": log.eval.model,
@@ -65,7 +67,7 @@ async def _read_log_headers(log_dir: Path) -> list[dict]:
                     entry["completed_at"] = str(log.stats.completed_at)
             results.append(entry)
         except Exception as e:
-            logger.warning(f"Failed to read log {f}: {e}")
+            logger.warning(f"Failed to read log {info.name}: {e}")
     return results
 
 
@@ -114,10 +116,7 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
 @router.get("/groups")
 async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
     """List evaluation comparison groups for the user."""
-    user_dir = get_user_dir(user_id)
-    log_dir = user_dir / "logs"
-    if not log_dir.exists():
-        return {"groups": []}
+    log_dir = get_user_log_dir(user_id)
 
     logs = await _read_log_headers(log_dir)
 
@@ -180,9 +179,7 @@ def _load_criteria_descriptions(user_dir: Path, task_name: str, criteria_names: 
 async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_id)):
     """Get full comparison data for a specific evaluation group."""
     user_dir = get_user_dir(user_id)
-    log_dir = user_dir / "logs"
-    if not log_dir.exists():
-        raise HTTPException(status_code=404, detail="No logs found")
+    log_dir = get_user_log_dir(user_id)
 
     headers = await _read_log_headers(log_dir)
 
@@ -328,15 +325,12 @@ async def get_sample_detail(
     user_id: str = Depends(_get_user_id),
 ):
     """Get full detail for a single sample including judge reasoning."""
-    user_dir = get_user_dir(user_id)
-
-    log_path = Path(log_file)
-    if not str(log_path).startswith(str(user_dir)):
+    # Validate the log file belongs to this user
+    log_dir = get_user_log_dir(user_id)
+    if not log_file.startswith(log_dir) and f"/users/{user_id}/" not in log_file:
         raise HTTPException(status_code=403, detail="Access denied")
-    if not log_path.exists():
-        raise HTTPException(status_code=404, detail="Log file not found")
 
-    full_logs = await _read_full_logs([str(log_path)])
+    full_logs = await _read_full_logs([log_file])
     if not full_logs:
         raise HTTPException(status_code=500, detail="Failed to read log")
 

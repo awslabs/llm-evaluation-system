@@ -6,9 +6,10 @@ from typing import Any, Dict, List
 
 from mcp.types import TextContent
 
-from inspect_ai.log import read_eval_log
+from inspect_ai._view.common import list_eval_logs_async
+from inspect_ai.log import read_eval_log_async
 
-from backend.core.user_storage import get_user_dir
+from backend.core.user_storage import get_user_log_dir
 
 
 async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
@@ -25,24 +26,10 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
-        user_dir = get_user_dir(user_id)
-        log_dir = user_dir / "logs"
+        log_dir = get_user_log_dir(user_id)
+        eval_log_infos = await list_eval_logs_async(log_dir)
 
-        if not log_dir.exists():
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": True,
-                        "evaluations": [],
-                        "message": "No evaluations found. Run an evaluation first.",
-                    }),
-                )
-            ]
-
-        log_files = sorted(log_dir.glob("*.eval"), key=lambda f: f.stat().st_mtime, reverse=True)
-
-        if not log_files:
+        if not eval_log_infos:
             return [
                 TextContent(
                     type="text",
@@ -55,9 +42,9 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
             ]
 
         evaluations = []
-        for log_file in log_files[:limit]:
+        for info in eval_log_infos[:limit]:
             try:
-                log = read_eval_log(str(log_file), header_only=True)
+                log = await read_eval_log_async(info.name, header_only=True)
 
                 scores_summary = []
                 if log.results and log.results.scores:
@@ -75,7 +62,7 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
                     "totalSamples": log.eval.dataset.samples if log.eval.dataset else 0,
                     "scores": scores_summary,
                     "status": log.status,
-                    "logFile": log_file.name,
+                    "logFile": info.name,
                 }
 
                 if log.stats and log.stats.model_usage:

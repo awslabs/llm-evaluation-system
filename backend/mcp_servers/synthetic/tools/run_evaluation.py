@@ -439,10 +439,29 @@ print(json.dumps({{"totalTests": log.eval.dataset.samples if log.eval.dataset el
         except Exception as e:
             results_summary = {"error": f"Could not parse results: {str(e)}"}
 
+        # Get run_id from newest .eval file for deep-linking to results
+        run_id = None
+        try:
+            log_dir = user_dir / "logs"
+            eval_files = sorted(log_dir.glob("*.eval"), key=lambda f: f.stat().st_mtime, reverse=True)
+            if eval_files:
+                proc = await asyncio.create_subprocess_exec(
+                    "python3", "-c",
+                    f"from inspect_ai.log import read_eval_log; log = read_eval_log('{eval_files[0]}', header_only=True); print(log.eval.run_id)",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+                if proc.returncode == 0:
+                    run_id = out.decode().strip()
+        except Exception:
+            pass
+
         result = {
             "success": True,
             "evalId": eval_id,
             "configName": config_name,
+            "runId": run_id,
+            "viewerUrl": f"/results?group={run_id}" if run_id else "/results",
             "userDir": str(user_dir),
             "message": "Evaluation completed successfully",
             "summary": results_summary,

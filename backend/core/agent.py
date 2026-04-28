@@ -120,8 +120,8 @@ Example - "compare Claude vs GPT-4o on healthcare":
 2. generate_qa_pairs(prompt="healthcare questions", numSamples=10) → get dataset="healthcare_10"
 3. generate_judge(dataset="healthcare_10", domain="healthcare") → get name="healthcare_criteria"
 4. create_eval_config(dataset="healthcare_10", providers=["bedrock/us.anthropic.claude-sonnet-4-6", "openai/gpt-4o"], judge="healthcare_criteria") → get configName
-5. run_evaluation(configName=...) → runs eval
-6. get_viewer_url() → provide URL to user
+5. run_evaluation(configName=...) → runs eval, returns viewerUrl in response
+6. Share the viewerUrl as a markdown link: [View Results](viewerUrl)
 
 Example - user uploads documents:
 User: [Uploaded 1 document. Document paths for generate_qa_pairs: ["folder/manual.pdf"]]

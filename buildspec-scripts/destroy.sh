@@ -112,7 +112,7 @@ if [ -z "$VPC_ID" ] || [[ "$VPC_ID" == *"Warning"* ]] || [[ "$VPC_ID" == *"No ou
   echo "  Platform layer destroyed."
   VPC_ID="unknown"
   DOCUMENTS_BUCKET="unknown"
-  BACKUP_BUCKET="unknown"
+  DATA_BUCKET="unknown"
 else
 VPC_CIDR_BLOCK="$(terraform output -raw vpc_cidr_block)"
 PRIVATE_SUBNETS="$(terraform output -json private_subnets)"
@@ -124,8 +124,8 @@ RDS_SECURITY_GROUP_ID="$(terraform output -raw rds_security_group_id)"
 RDS_RESOURCE_ID="$(terraform output -raw rds_resource_id)"
 DOCUMENTS_BUCKET="$(terraform output -raw documents_bucket)"
 DOCUMENTS_BUCKET_ARN="$(terraform output -raw documents_bucket_arn)"
-BACKUP_BUCKET="$(terraform output -raw backup_bucket)"
-BACKUP_BUCKET_ARN="$(terraform output -raw backup_bucket_arn)"
+DATA_BUCKET="$(terraform output -raw data_bucket)"
+DATA_BUCKET_ARN="$(terraform output -raw data_bucket_arn)"
 
 cd "$PLATFORM_DIR"
 terraform init -upgrade "${TF_BACKEND_ARGS[@]}"
@@ -141,8 +141,8 @@ tf_with_retry destroy -auto-approve \
   -var="rds_resource_id=$RDS_RESOURCE_ID" \
   -var="documents_bucket=$DOCUMENTS_BUCKET" \
   -var="documents_bucket_arn=$DOCUMENTS_BUCKET_ARN" \
-  -var="backup_bucket=$BACKUP_BUCKET" \
-  -var="backup_bucket_arn=$BACKUP_BUCKET_ARN"
+  -var="data_bucket=$DATA_BUCKET" \
+  -var="data_bucket_arn=$DATA_BUCKET_ARN"
 
 echo "  Platform layer destroyed."
 fi
@@ -175,13 +175,13 @@ echo "    Identifier: $RDS_IDENTIFIER"
 echo "    Snapshot:    $SNAPSHOT_ID"
 echo ""
 echo "  S3 Documents Bucket: $DOCUMENTS_BUCKET"
-echo "  S3 Backup Bucket:    $BACKUP_BUCKET"
+echo "  S3 Data Bucket:      $DATA_BUCKET"
 echo "  VPC:                 $VPC_ID"
 echo ""
 echo "@@DESTROY_COMPLETE=true@@"
 echo "@@RDS_IDENTIFIER=${RDS_IDENTIFIER}@@"
 echo "@@SNAPSHOT_ID=${SNAPSHOT_ID}@@"
 echo "@@DOCUMENTS_BUCKET=${DOCUMENTS_BUCKET}@@"
-echo "@@BACKUP_BUCKET=${BACKUP_BUCKET}@@"
+echo "@@DATA_BUCKET=${DATA_BUCKET}@@"
 echo "@@VPC_ID=${VPC_ID}@@"
 echo ""

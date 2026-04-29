@@ -119,12 +119,12 @@ variable "documents_bucket_arn" {
   type        = string
 }
 
-variable "backup_bucket" {
-  description = "S3 backup bucket name from data layer"
+variable "data_bucket" {
+  description = "S3 data bucket name (eval logs, judges, datasets, configs)"
   type        = string
 }
 
-variable "backup_bucket_arn" {
-  description = "S3 backup bucket ARN from data layer"
+variable "data_bucket_arn" {
+  description = "S3 data bucket ARN"
   type        = string
 }

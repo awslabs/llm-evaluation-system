@@ -34,8 +34,7 @@ resource "kubernetes_config_map" "app_config" {
 
     # Storage — S3 is primary store for all persistent data
     S3_BUCKET     = var.documents_bucket
-    DATA_BUCKET   = var.backup_bucket
-    BACKUP_BUCKET = var.backup_bucket
+    DATA_BUCKET = var.data_bucket
 
     # AWS
     AWS_REGION = var.region
@@ -185,7 +184,7 @@ resource "aws_iam_policy" "backend" {
         # Primary data bucket — eval logs, judges, datasets, configs
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation"]
-        Resource = [var.backup_bucket_arn, "${var.backup_bucket_arn}/*"]
+        Resource = [var.data_bucket_arn, "${var.data_bucket_arn}/*"]
       },
       {
         Effect   = "Allow"

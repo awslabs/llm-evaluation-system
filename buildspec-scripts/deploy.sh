@@ -104,8 +104,8 @@ RDS_SECURITY_GROUP_ID="$(terraform output -raw rds_security_group_id)"
 RDS_RESOURCE_ID="$(terraform output -raw rds_resource_id)"
 DOCUMENTS_BUCKET="$(terraform output -raw documents_bucket)"
 DOCUMENTS_BUCKET_ARN="$(terraform output -raw documents_bucket_arn)"
-BACKUP_BUCKET="$(terraform output -raw backup_bucket)"
-BACKUP_BUCKET_ARN="$(terraform output -raw backup_bucket_arn)"
+DATA_BUCKET="$(terraform output -raw data_bucket)"
+DATA_BUCKET_ARN="$(terraform output -raw data_bucket_arn)"
 
 echo ""
 echo "  Data layer deployed."
@@ -134,8 +134,8 @@ PLATFORM_VARS=(
   -var="rds_resource_id=$RDS_RESOURCE_ID"
   -var="documents_bucket=$DOCUMENTS_BUCKET"
   -var="documents_bucket_arn=$DOCUMENTS_BUCKET_ARN"
-  -var="backup_bucket=$BACKUP_BUCKET"
-  -var="backup_bucket_arn=$BACKUP_BUCKET_ARN"
+  -var="data_bucket=$DATA_BUCKET"
+  -var="data_bucket_arn=$DATA_BUCKET_ARN"
 )
 
 # Pass caller's IAM role ARN so they get EKS admin access too

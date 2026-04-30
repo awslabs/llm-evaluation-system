@@ -20,9 +20,9 @@ ENV PATH="/app/.venv/bin:$PATH"
 # Copy source code
 COPY backend/ ./backend/
 
-# Create non-root user (uid 1000) and directories for user data and logs
-RUN groupadd --gid 1000 appuser && useradd --uid 1000 --gid appuser appuser \
-    && mkdir -p /data/users /app/backend/logs && chown -R appuser:appuser /data/users /app/backend/logs
+# Create non-root user (uid 1000) with home directory
+RUN groupadd --gid 1000 appuser && useradd --uid 1000 --gid appuser --create-home appuser \
+    && mkdir -p /data/users && chown -R appuser:appuser /data/users
 
 ENV PYTHONPATH=/app
 ENV USER_STORAGE_BASE=/data/users
@@ -33,6 +33,6 @@ EXPOSE 8080
 
 # tini as entrypoint ensures child processes receive SIGTERM properly
 # (PID 1 in containers ignores signals without an explicit handler)
-ENTRYPOINT ["/sbin/tini", "--"]
+ENTRYPOINT ["/usr/bin/tini", "--"]
 
 CMD ["uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -48,7 +48,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          command: ["/sbin/tini", "--", "python", "-m", "backend.mcp_servers.synthetic.server_http"]
+          command: ["/usr/bin/tini", "--", "python", "-m", "backend.mcp_servers.synthetic.server_http"]
           ports:
             - containerPort: 8002
           env:
@@ -79,7 +79,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          command: ["/sbin/tini", "--", "python", "-m", "backend.mcp_servers.providers.server_http"]
+          command: ["/usr/bin/tini", "--", "python", "-m", "backend.mcp_servers.providers.server_http"]
           ports:
             - containerPort: 8004
           env:
@@ -103,7 +103,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          command: ["/sbin/tini", "--", "python", "-m", "backend.mcp_servers.dataset.server_http"]
+          command: ["/usr/bin/tini", "--", "python", "-m", "backend.mcp_servers.dataset.server_http"]
           ports:
             - containerPort: 8005
           env:

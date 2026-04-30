@@ -393,11 +393,11 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             except (asyncio.TimeoutError, Exception):
                 stderr_str = "(stderr unavailable)"
 
-        # Invalidate viewer cache so fresh results are shown
+        # Invalidate comparison cache so fresh results are shown
         try:
-            backend_url = os.environ.get("BACKEND_URL", "http://backend:8080")
+            backend_url = os.environ.get("BACKEND_URL", "http://localhost:8080")
             async with httpx.AsyncClient() as client:
-                await client.post(f"{backend_url}/api/internal/invalidate-cache/{user_id}", timeout=5.0)
+                await client.post(f"{backend_url}/api/compare/invalidate-cache/{user_id}", timeout=5.0)
         except Exception:
             pass
 

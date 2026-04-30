@@ -2,7 +2,7 @@
 
 # Feature flags
 hpa:
-  enabled: false
+  enabled: true
 
 # AWS Configuration (REQUIRED: override with --set)
 aws:
@@ -16,19 +16,19 @@ image:
   pullPolicy: Always
 
 # Stateless backend — all persistent data in S3
-# t4g.medium is sufficient (~$25/month) since no local storage pressure
+# Scales horizontally under load (HPA), min 2 for high availability
 backend:
-  replicas: 1
+  replicas: 2
   resources:
     requests:
-      cpu: "500m"
-      memory: "2Gi"
+      cpu: "250m"
+      memory: "512Mi"
     limits:
-      cpu: "1500m"
-      memory: "4Gi"
+      cpu: "1000m"
+      memory: "2Gi"
   autoscaling:
-    minReplicas: 1
-    maxReplicas: 1
+    minReplicas: 2
+    maxReplicas: 6
     targetCPUUtilization: 70
     targetMemoryUtilization: 80
 

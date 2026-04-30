@@ -2,12 +2,16 @@
 
 Uses read_eval_log_async() directly since FastAPI endpoints are already
 in an async context — no subprocess or nest_asyncio needed.
+
+Caching: groups list and last N eval details are cached in memory per user.
+Cache is invalidated when a new eval completes.
 """
 
 import asyncio
 import json
 import logging
-from collections import defaultdict
+import time
+from collections import OrderedDict, defaultdict
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +25,18 @@ from backend.core.user_storage import get_user_dir, get_user_log_dir
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Per-user cache: groups response and detail responses (LRU, max 10 details per user)
+_DETAIL_CACHE_SIZE = 10
+
+_groups_cache: dict[str, dict] = {}  # user_id -> {"data": response, "time": timestamp}
+_detail_cache: dict[str, OrderedDict] = {}  # user_id -> OrderedDict{group_id -> response}
+
+
+def invalidate_user_cache(user_id: str) -> None:
+    """Invalidate all cached data for a user. Called after eval completion."""
+    _groups_cache.pop(user_id, None)
+    _detail_cache.pop(user_id, None)
 
 
 async def _get_user_id(request: Request) -> str:
@@ -113,14 +129,11 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
     return results
 
 
-@router.get("/groups")
-async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
-    """List evaluation comparison groups for the user."""
+async def _build_groups_response(user_id: str) -> dict:
+    """Build the groups response (fetches from S3/disk)."""
     log_dir = get_user_log_dir(user_id)
-
     logs = await _read_log_headers(log_dir)
 
-    # Group by run_id
     groups_map: dict[str, list[dict]] = defaultdict(list)
     for log in logs:
         key = log.get("run_id") or log["file"]
@@ -155,42 +168,19 @@ async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
     return {"groups": groups}
 
 
-def _load_criteria_descriptions(user_dir: Path, task_name: str, criteria_names: set[str]) -> dict[str, str]:
-    """Load criteria descriptions from the config JSON file that matches this eval."""
-    configs_dir = user_dir / "configs"
-    if not configs_dir.exists():
-        return {}
-    # Find the config whose criteria names match this eval's criteria
-    for json_file in configs_dir.glob("*.json"):
-        try:
-            data = json.loads(json_file.read_text())
-            criteria = data.get("criteria", [])
-            if not criteria:
-                continue
-            config_names = {c["name"] for c in criteria}
-            if criteria_names and criteria_names.issubset(config_names):
-                return {c["name"]: c["description"] for c in criteria}
-        except Exception:
-            continue
-    return {}
-
-
-@router.get("/detail")
-async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_id)):
-    """Get full comparison data for a specific evaluation group."""
+async def _build_detail_response(user_id: str, group_id: str) -> dict:
+    """Build the detail response for a group (fetches from S3/disk)."""
     user_dir = get_user_dir(user_id)
     log_dir = get_user_log_dir(user_id)
 
     headers = await _read_log_headers(log_dir)
 
-    # Filter to the requested group
     group_logs = [h for h in headers if h.get("run_id") == group_id]
     if not group_logs:
         group_logs = [h for h in headers if h["file"] == group_id]
     if not group_logs:
         raise HTTPException(status_code=404, detail="Group not found")
 
-    # Read full logs with samples
     log_files = [l["file"] for l in group_logs]
     full_logs = await _read_full_logs(log_files)
 
@@ -199,7 +189,6 @@ async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_
 
     models = [l["model"] for l in full_logs]
 
-    # Align samples by ID across models
     samples_by_id: dict[str, dict] = {}
     criteria_set: set[str] = set()
 
@@ -229,7 +218,6 @@ async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_
 
             samples_by_id[sid]["results"][model] = score_data
 
-    # Compute aggregates
     aggregate: dict[str, dict] = {}
     for model in models:
         model_samples = [
@@ -255,14 +243,12 @@ async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_
 
         aggregate[model] = {"overall": overall, "byCriterion": by_criterion}
 
-    # Stats from headers: tokens, cost, latency
     stats: dict[str, dict] = {}
     for log in group_logs:
         model = log["model"]
         started = log.get("started_at")
         completed = log.get("completed_at")
 
-        # Calculate latency
         latency_seconds = None
         if started and completed:
             try:
@@ -294,15 +280,12 @@ async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_
             stats[model]["output_tokens"] = total_output
             stats[model]["total_tokens"] = total_tokens
 
-            # Calculate cost from pricing table
             cost = calculate_cost(model, total_input, total_output)
             stats[model]["cost"] = cost
 
-            # Tokens per second
             if latency_seconds and latency_seconds > 0:
                 stats[model]["tokensPerSecond"] = round(total_output / latency_seconds, 1)
 
-    # Load criteria descriptions from config file
     task_name = group_logs[0].get("task", "")
     criteria_descriptions = _load_criteria_descriptions(user_dir, task_name, criteria_set)
 
@@ -318,6 +301,65 @@ async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_
     }
 
 
+@router.get("/groups")
+async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
+    """List evaluation comparison groups for the user."""
+    cached = _groups_cache.get(user_id)
+    if cached:
+        return cached["data"]
+
+    response = await _build_groups_response(user_id)
+    _groups_cache[user_id] = {"data": response, "time": time.time()}
+    return response
+
+
+@router.get("/detail")
+async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_id)):
+    """Get full comparison data for a specific evaluation group."""
+    user_details = _detail_cache.get(user_id)
+    if user_details and group_id in user_details:
+        user_details.move_to_end(group_id)
+        return user_details[group_id]
+
+    response = await _build_detail_response(user_id, group_id)
+
+    if user_id not in _detail_cache:
+        _detail_cache[user_id] = OrderedDict()
+    _detail_cache[user_id][group_id] = response
+    _detail_cache[user_id].move_to_end(group_id)
+
+    while len(_detail_cache[user_id]) > _DETAIL_CACHE_SIZE:
+        _detail_cache[user_id].popitem(last=False)
+
+    return response
+
+
+@router.post("/invalidate-cache/{user_id}")
+async def invalidate_cache(user_id: str):
+    """Invalidate cache for a user. Called internally after eval completion."""
+    invalidate_user_cache(user_id)
+    return {"ok": True}
+
+
+def _load_criteria_descriptions(user_dir: Path, task_name: str, criteria_names: set[str]) -> dict[str, str]:
+    """Load criteria descriptions from the config JSON file that matches this eval."""
+    configs_dir = user_dir / "configs"
+    if not configs_dir.exists():
+        return {}
+    for json_file in configs_dir.glob("*.json"):
+        try:
+            data = json.loads(json_file.read_text())
+            criteria = data.get("criteria", [])
+            if not criteria:
+                continue
+            config_names = {c["name"] for c in criteria}
+            if criteria_names and criteria_names.issubset(config_names):
+                return {c["name"]: c["description"] for c in criteria}
+        except Exception:
+            continue
+    return {}
+
+
 @router.get("/sample")
 async def get_sample_detail(
     log_file: str,
@@ -325,7 +367,6 @@ async def get_sample_detail(
     user_id: str = Depends(_get_user_id),
 ):
     """Get full detail for a single sample including judge reasoning."""
-    # Validate the log file belongs to this user
     log_dir = get_user_log_dir(user_id)
     if not log_file.startswith(log_dir) and f"/users/{user_id}/" not in log_file:
         raise HTTPException(status_code=403, detail="Access denied")

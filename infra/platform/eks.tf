@@ -223,7 +223,7 @@ resource "kubectl_manifest" "karpenter_node_pool" {
               values: ["t"]
             - key: karpenter.k8s.aws/instance-size
               operator: In
-              values: ["large", "xlarge"]
+              values: ["medium", "large", "xlarge"]
       limits:
         cpu: 100
         memory: 200Gi

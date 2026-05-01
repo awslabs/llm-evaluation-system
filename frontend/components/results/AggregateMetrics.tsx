@@ -3,8 +3,29 @@
 import { useState } from "react";
 
 function formatModel(model: string): string {
-  const parts = model.split("/");
-  return parts[parts.length - 1];
+  const providers: Record<string, string> = {
+    bedrock: "Bedrock",
+    openai: "OpenAI",
+    anthropic: "Anthropic",
+    google: "Google",
+    groq: "Groq",
+    mistral: "Mistral",
+    azure: "Azure",
+  };
+
+  const slashIdx = model.indexOf("/");
+  if (slashIdx === -1) return model;
+
+  const prefix = model.slice(0, slashIdx);
+  const rest = model.slice(slashIdx + 1);
+
+  let name = rest
+    .replace(/^us\.\w+\./, "")
+    .replace(/-v\d+:\d+$/, "")
+    .replace(/-\d{8}$/, "");
+
+  const provider = providers[prefix] || prefix;
+  return `${provider}: ${name}`;
 }
 
 function formatCriterion(name: string): string {
@@ -120,7 +141,7 @@ export default function AggregateMetrics({
                 {models.map((model, i) => (
                   <th key={model} className="pb-2 text-right text-xs font-medium uppercase tracking-wider text-claude-muted">
                     <span className="flex items-center justify-end gap-1.5">
-                      <span className="truncate">{formatModel(model).split(".").pop()}</span>
+                      <span className="truncate">{formatModel(model)}</span>
                       <span className={`inline-block h-2 w-2 rounded-full ${MODEL_COLORS[i % MODEL_COLORS.length].bar}`} />
                     </span>
                   </th>

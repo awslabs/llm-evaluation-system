@@ -4,8 +4,29 @@ import { useState } from "react";
 import type { Sample } from "./ComparisonView";
 
 function formatModel(model: string): string {
-  const parts = model.split("/");
-  return parts[parts.length - 1];
+  const providers: Record<string, string> = {
+    bedrock: "Bedrock",
+    openai: "OpenAI",
+    anthropic: "Anthropic",
+    google: "Google",
+    groq: "Groq",
+    mistral: "Mistral",
+    azure: "Azure",
+  };
+
+  const slashIdx = model.indexOf("/");
+  if (slashIdx === -1) return model;
+
+  const prefix = model.slice(0, slashIdx);
+  const rest = model.slice(slashIdx + 1);
+
+  let name = rest
+    .replace(/^us\.\w+\./, "")
+    .replace(/-v\d+:\d+$/, "")
+    .replace(/-\d{8}$/, "");
+
+  const provider = providers[prefix] || prefix;
+  return `${provider}: ${name}`;
 }
 
 interface SampleDetailPanelProps {

@@ -1,8 +1,8 @@
 # Backend Dockerfile - FastAPI + Python MCP servers + Inspect AI
 FROM public.ecr.aws/docker/library/python:3.12-slim
 
-# Install system dependencies and tini (proper PID 1 signal handling)
-RUN apt-get update && apt-get install -y --no-install-recommends tini \
+# Install system dependencies: tini (PID 1 signal handling) + docker CLI (agent sandbox)
+RUN apt-get update && apt-get install -y --no-install-recommends tini docker.io \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # Install uv for reproducible Python builds

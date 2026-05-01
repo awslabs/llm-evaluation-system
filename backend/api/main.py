@@ -271,6 +271,29 @@ STRUCTURE_MAPPING_TOOL = {
 }
 
 
+def _detect_agent_image(message: str) -> str | None:
+    """Detect a container image URI in a user message.
+
+    Matches ECR, DockerHub, GHCR, and other registry patterns.
+    Returns the image URI or None.
+    """
+    if not message:
+        return None
+    # Common container registry patterns
+    indicators = [".dkr.ecr.", "docker.io/", "ghcr.io/", "gcr.io/", "public.ecr.aws/"]
+    for word in message.split():
+        # Strip surrounding quotes/backticks
+        clean = word.strip("`\"'<>()[]")
+        if any(ind in clean for ind in indicators):
+            return clean
+        # Match image:tag pattern like myregistry.com/org/image:tag
+        if "/" in clean and (":" in clean or "." in clean.split("/")[0]):
+            parts = clean.split("/")
+            if len(parts) >= 2 and "." in parts[0] and not parts[0].startswith("http"):
+                return clean
+    return None
+
+
 def _get_by_path(obj, path: str):
     """Extract value from nested dict/list using dot notation with array indices.
 
@@ -840,6 +863,18 @@ async def chat_stream(request: ChatRequest, user_id: str):
         final_message = f"{request.message}\n\n{file_result_message}" if request.message else file_result_message
     else:
         final_message = request.message
+
+    # Detect container image URIs in the message and inject agent eval context
+    agent_image = _detect_agent_image(final_message)
+    if agent_image:
+        final_message += (
+            f"\n\n[Agent container image detected: {agent_image}\n"
+            "Use analyze_agent_image(agentImage=\""
+            f"{agent_image}\") to automatically extract code, analyze tools/behavior, "
+            "generate test cases, and create the eval config.\n"
+            "Then run_evaluation(configName=...) to execute.\n"
+            "Everything is handled automatically — no dataset or judge setup needed.]"
+        )
 
     # Create queue for this session
     queue = asyncio.Queue()

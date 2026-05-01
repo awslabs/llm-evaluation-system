@@ -322,7 +322,11 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         config_json_path = user_dir / "configs" / f"{config_name}.json"
         if config_json_path.exists():
             config_data = json.loads(config_json_path.read_text())
-            models = config_data.get("providers", [])
+            # Agent evals use single "model" field; standard evals use "providers" list
+            if config_data.get("model"):
+                models = [config_data["model"]]
+            else:
+                models = config_data.get("providers", [])
         else:
             # Fallback: scan task file for provider strings
             for line in task_content.split("\n"):

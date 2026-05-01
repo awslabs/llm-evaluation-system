@@ -78,6 +78,7 @@ services:
     volumes:
       - ../backend:/app/backend
       - userdata:/data/users
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       PYTHONPATH: /app
       WATCHFILES_FORCE_POLLING: "true"
@@ -87,6 +88,9 @@ services:
       AWS_REGION: ${AWS_REGION}
       AWS_DEFAULT_REGION: ${AWS_REGION}
       USER_STORAGE_BASE: /data/users
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
 
   providers-mcp:
     build:

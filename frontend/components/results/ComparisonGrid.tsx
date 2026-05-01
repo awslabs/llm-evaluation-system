@@ -4,8 +4,30 @@ import { useState } from "react";
 import type { Sample, SelectedCell } from "./ComparisonView";
 
 function formatModel(model: string): string {
-  const parts = model.split("/");
-  return parts[parts.length - 1];
+  const providers: Record<string, string> = {
+    bedrock: "Bedrock",
+    openai: "OpenAI",
+    anthropic: "Anthropic",
+    google: "Google",
+    groq: "Groq",
+    mistral: "Mistral",
+    azure: "Azure",
+  };
+
+  const slashIdx = model.indexOf("/");
+  if (slashIdx === -1) return model;
+
+  const prefix = model.slice(0, slashIdx);
+  const rest = model.slice(slashIdx + 1);
+
+  // Extract clean model name: strip region prefixes (us.anthropic.) and version suffixes (-v1:0)
+  let name = rest
+    .replace(/^us\.\w+\./, "")
+    .replace(/-v\d+:\d+$/, "")
+    .replace(/-\d{8}$/, "");
+
+  const provider = providers[prefix] || prefix;
+  return `${provider}: ${name}`;
 }
 
 interface ComparisonGridProps {
@@ -50,7 +72,7 @@ export default function ComparisonGrid({
                 key={model}
                 className="border-b border-claude-border px-4 py-3 text-center text-xs font-medium uppercase tracking-wider text-claude-muted min-w-[100px]"
               >
-                {formatModel(model).split(".").pop()}
+                {formatModel(model)}
               </th>
             ))}
           </tr>

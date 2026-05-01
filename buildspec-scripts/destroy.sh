@@ -106,10 +106,10 @@ echo "=== Phase 3: Destroying platform layer ==="
 
 # Read data-layer outputs to pass as vars
 cd "$DATA_DIR"
-VPC_ID="$(terraform output -raw vpc_id 2>&1)" || true
-if [ -z "$VPC_ID" ] || [[ "$VPC_ID" == *"Warning"* ]] || [[ "$VPC_ID" == *"No outputs"* ]]; then
-  echo "  WARNING: Data layer has no outputs — nothing to destroy."
-  echo "  Platform layer destroyed."
+VPC_ID="$(terraform output -raw vpc_id 2>/dev/null)" || true
+if [ -z "$VPC_ID" ] || [[ "$VPC_ID" == *"Warning"* ]] || [[ "$VPC_ID" == *"not found"* ]] || [[ "$VPC_ID" == *"No outputs"* ]]; then
+  echo "  WARNING: Data layer has no outputs — skipping platform destroy."
+  echo "  Run 'destroy-data' to clean up the data layer directly."
   VPC_ID="unknown"
   DOCUMENTS_BUCKET="unknown"
   DATA_BUCKET="unknown"
@@ -122,10 +122,10 @@ RDS_ENDPOINT="$(terraform output -raw rds_endpoint)"
 RDS_SECRET_ARN="$(terraform output -raw rds_secret_arn)"
 RDS_SECURITY_GROUP_ID="$(terraform output -raw rds_security_group_id)"
 RDS_RESOURCE_ID="$(terraform output -raw rds_resource_id)"
-DOCUMENTS_BUCKET="$(terraform output -raw documents_bucket)"
-DOCUMENTS_BUCKET_ARN="$(terraform output -raw documents_bucket_arn)"
-DATA_BUCKET="$(terraform output -raw data_bucket)"
-DATA_BUCKET_ARN="$(terraform output -raw data_bucket_arn)"
+DOCUMENTS_BUCKET="$(terraform output -raw documents_bucket 2>/dev/null || echo unknown)"
+DOCUMENTS_BUCKET_ARN="$(terraform output -raw documents_bucket_arn 2>/dev/null || echo unknown)"
+DATA_BUCKET="$(terraform output -raw data_bucket 2>/dev/null || terraform output -raw backup_bucket 2>/dev/null || echo unknown)"
+DATA_BUCKET_ARN="$(terraform output -raw data_bucket_arn 2>/dev/null || terraform output -raw backup_bucket_arn 2>/dev/null || echo unknown)"
 
 cd "$PLATFORM_DIR"
 terraform init -upgrade "${TF_BACKEND_ARGS[@]}"

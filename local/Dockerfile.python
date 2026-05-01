@@ -1,6 +1,9 @@
 FROM python:3.12-slim
 
-RUN apt-get update && apt-get install -y --no-install-recommends wget && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends wget curl ca-certificates && rm -rf /var/lib/apt/lists/*
+
+# Install Docker CLI only (not the daemon)
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 

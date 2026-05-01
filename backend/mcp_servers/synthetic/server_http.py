@@ -94,6 +94,24 @@ get_eval_module = importlib.util.module_from_spec(spec_get_eval)
 spec_get_eval.loader.exec_module(get_eval_module)
 handle_get_evaluation_details = get_eval_module.handle_get_evaluation_details
 
+# Import create_agent_eval_config
+spec_agent_config = importlib.util.spec_from_file_location(
+    "create_agent_eval_config",
+    os.path.join(os.path.dirname(__file__), "tools", "create_agent_eval_config.py")
+)
+agent_config_module = importlib.util.module_from_spec(spec_agent_config)
+spec_agent_config.loader.exec_module(agent_config_module)
+handle_create_agent_eval_config = agent_config_module.handle_create_agent_eval_config
+
+# Import analyze_agent_image
+spec_analyze_agent = importlib.util.spec_from_file_location(
+    "analyze_agent_image",
+    os.path.join(os.path.dirname(__file__), "tools", "analyze_agent_image.py")
+)
+analyze_agent_module = importlib.util.module_from_spec(spec_analyze_agent)
+spec_analyze_agent.loader.exec_module(analyze_agent_module)
+handle_analyze_agent_image = analyze_agent_module.handle_analyze_agent_image
+
 
 # Get configuration
 region = os.environ.get("AWS_REGION", "us-west-2")
@@ -264,9 +282,100 @@ async def create_eval_config(
     return result[0].text
 
 
-# DISABLED: list_eval_configs tool (configs are ephemeral, not worth cataloging)
-# @mcp.tool()
-# async def list_eval_configs(...)
+@mcp.tool()
+async def create_agent_eval_config(
+    dataset: str,
+    judge: str,
+    agentImage: str,
+    user_id: str = None,
+    agentCmd: list = None,
+    model: str = "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+    configName: str = "agent_evaluation",
+    description: str = None,
+    judge_models: list = None,
+) -> str:
+    """
+    Create an evaluation config for testing an agent running in a container.
+
+    The agent runs in a Docker container with LLM calls intercepted via proxy.
+    All model calls, tool usage, and token consumption are captured automatically.
+
+    Agent contract:
+    - Agent must use OpenAI or Anthropic SDK format
+    - Agent reads OPENAI_BASE_URL or ANTHROPIC_BASE_URL from environment
+    - Agent accepts a prompt as the last CLI argument
+    - Agent prints its response to stdout
+
+    Args:
+        dataset: Name of dataset from list_datasets
+        judge: Name of judge from list_judges
+        agentImage: Container image URI (e.g., "123456.dkr.ecr.us-east-2.amazonaws.com/my-agent:latest")
+        agentCmd: Command to run the agent (default: ["python", "agent.py"])
+        model: Model to route agent requests to (default: bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0)
+        configName: Name for this evaluation (default: "agent_evaluation")
+        description: Optional description of the evaluation
+        judge_models: Optional list of model IDs to use as judges
+
+    Returns:
+        JSON with config path and summary
+    """
+    args = {
+        "dataset": dataset,
+        "judge": judge,
+        "agentImage": agentImage,
+        "user_id": user_id,
+        "agentCmd": agentCmd or ["python", "agent.py"],
+        "model": model,
+        "configName": configName,
+        "description": description,
+        "judge_models": judge_models,
+    }
+    result = await handle_create_agent_eval_config(args)
+    return result[0].text
+
+
+@mcp.tool()
+async def analyze_agent_image(
+    agentImage: str,
+    user_id: str = None,
+    numSamples: int = 15,
+    agentCmd: list = None,
+    model: str = "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+    configName: str = "agent_evaluation",
+    context: str = None,
+) -> str:
+    """
+    Analyze an agent container image and generate a complete evaluation automatically.
+
+    Extracts code from the image, analyzes tools/subagents/logic, generates
+    test cases covering output correctness, tool usage, and trajectory,
+    and creates the eval config ready to run.
+
+    This is the ONE-STEP agent evaluation tool. User provides an image, gets
+    a complete evaluation config with no other setup needed.
+
+    Args:
+        agentImage: Container image URI (ECR, DockerHub, GHCR, etc.)
+        numSamples: Number of test cases to generate (default: 15)
+        agentCmd: Command to run the agent (auto-detected if not provided)
+        model: Model to route agent's LLM requests to
+        configName: Name for this evaluation (default: "agent_evaluation")
+        context: Optional user description of what the agent should do
+
+    Returns:
+        JSON with eval config ready to run, including analysis summary
+    """
+    args = {
+        "agentImage": agentImage,
+        "user_id": user_id,
+        "numSamples": numSamples,
+        "agentCmd": agentCmd,
+        "model": model,
+        "configName": configName,
+        "context": context,
+    }
+    result = await handle_analyze_agent_image(args)
+    return result[0].text
 
 
 @mcp.tool()

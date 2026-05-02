@@ -86,20 +86,37 @@ AGENT_DEEP_ANALYSIS_TOOL = {
                 },
                 "description": "Test cases covering different capabilities and difficulty levels",
             },
-            "evaluation_criteria": {
+            "pipeline_stages": {
                 "type": "array",
                 "items": {
                     "type": "object",
                     "properties": {
-                        "name": {"type": "string"},
-                        "description": {"type": "string"},
+                        "name": {"type": "string", "description": "snake_case stage identifier"},
+                        "display_name": {"type": "string", "description": "Human-readable stage name"},
+                        "order": {"type": "integer", "description": "Execution order (1 = first)"},
+                        "scorer_type": {"type": "string", "enum": ["deterministic", "llm_judge"], "description": "deterministic for simple checks (tool called, text included), llm_judge for quality assessment"},
+                        "check": {"type": "string", "description": "For deterministic only: 'tool_called' or 'includes_text'"},
+                        "expected_field": {"type": "string", "description": "For deterministic only: dataset metadata field with expected value (e.g. 'expected_tools')"},
+                        "criteria": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string", "description": "snake_case criterion name"},
+                                    "description": {"type": "string"},
+                                },
+                                "required": ["name", "description"],
+                            },
+                            "description": "For llm_judge only: criteria to score on",
+                        },
+                        "context_filter": {"type": "string", "enum": ["all", "first_response", "tool_calls_only", "final_output"], "description": "What part of the agent trace to show the judge"},
                     },
-                    "required": ["name", "description"],
+                    "required": ["name", "display_name", "order", "scorer_type"],
                 },
-                "description": "Criteria for evaluating this agent (output quality, tool usage correctness, efficiency, etc.)",
+                "description": "Evaluation pipeline stages. Design stages that match THIS agent's architecture. Examples: routing stage (deterministic, check orchestrator picks right sub-agent), tool_execution (deterministic, check correct tools called), argument_quality (llm_judge on tool args), final_output (llm_judge on answer). Adapt to what you see in the code.",
             },
         },
-        "required": ["agent_summary", "framework", "tools", "test_cases", "evaluation_criteria"],
+        "required": ["agent_summary", "framework", "tools", "test_cases", "pipeline_stages"],
     },
 }
 
@@ -209,13 +226,25 @@ Tasks:
    - Moderate cases (multi-tool, some reasoning required)
    - Complex cases (multi-step, edge cases, error handling)
    For EACH test case, specify which tools should be called and what the trajectory should look like.
-6. Define evaluation criteria specific to this agent (not generic)
+6. Design a PIPELINE of evaluation stages tailored to THIS agent's architecture.
+   Each stage evaluates one aspect of behavior with its own scorer.
 
-Focus on testing the agent's BEHAVIOR, not just its output. Include test cases that verify:
-- Correct tool selection for different inputs
-- Proper argument passing to tools
-- Multi-step reasoning when needed
-- Handling of ambiguous or edge-case inputs
+   For deterministic stages (simple checks, no LLM needed):
+   - "tool_called": checks if specific tools were invoked (set expected_field to the test case field that has expected tools)
+   - "includes_text": checks if output contains expected text
+
+   For llm_judge stages (quality assessment):
+   - Define specific criteria (snake_case names only)
+   - Set context_filter to control what the judge sees
+
+   Examples of good pipeline designs:
+   - Simple agent: [tool_selection (deterministic), final_output (llm_judge)]
+   - Multi-agent: [routing (deterministic, did orchestrator pick right sub-agent), sub_agent_tools (deterministic, did sub-agent use right tools), argument_quality (llm_judge), final_output (llm_judge)]
+   - RAG agent: [retrieval (deterministic, right docs fetched), context_usage (llm_judge), answer_quality (llm_judge)]
+
+   Adapt the pipeline to what you see in the code. More complex agents need more stages.
+
+Focus on testing the agent's BEHAVIOR, not just its output.
 
 Submit your complete analysis using the submit_agent_evaluation_plan tool."""
 
@@ -233,25 +262,26 @@ Submit your complete analysis using the submit_agent_evaluation_plan tool."""
     if tool_uses:
         return tool_uses[0]["input"]
 
-    return {"agent_summary": "Analysis failed", "framework": "custom", "tools": [], "test_cases": [], "evaluation_criteria": []}
+    return {"agent_summary": "Analysis failed", "framework": "custom", "tools": [], "test_cases": [], "pipeline_stages": []}
 
 
 async def handle_analyze_agent_image(args: Dict[str, Any]) -> List[TextContent]:
     """Handle the analyze_agent_image tool call.
 
-    Extracts code from image, analyzes it, generates dataset + judge criteria,
+    Extracts code from image, analyzes it, generates dataset + pipeline stages,
     and creates the eval config — all in one step.
     """
-    from backend.core.judge_config import JudgeConfig
+    from backend.core.pipeline_stages import PipelineConfig, PipelineStage
+    from backend.core.judge_config import JUDGE_MODELS
     import importlib.util
     import os as _os
     _spec = importlib.util.spec_from_file_location(
-        "create_agent_eval_config",
-        _os.path.join(_os.path.dirname(__file__), "create_agent_eval_config.py")
+        "create_pipeline_eval_config",
+        _os.path.join(_os.path.dirname(__file__), "create_pipeline_eval_config.py")
     )
     _mod = importlib.util.module_from_spec(_spec)
     _spec.loader.exec_module(_mod)
-    create_agent_eval_files = _mod.create_agent_eval_files
+    create_pipeline_eval_files = _mod.create_pipeline_eval_files
 
     try:
         image = args.get("agentImage")
@@ -314,6 +344,8 @@ async def handle_analyze_agent_image(args: Dict[str, Any]) -> List[TextContent]:
 
         inspect_samples = []
         for tc in test_cases:
+            if not tc.get("question"):
+                continue
             inspect_samples.append({
                 "question": tc["question"],
                 "golden_answer": tc["golden_answer"],
@@ -329,26 +361,35 @@ async def handle_analyze_agent_image(args: Dict[str, Any]) -> List[TextContent]:
         db_tests = [{"vars": s} for s in inspect_samples]
         save_dataset_to_db(user_id, dataset_name, db_tests)
 
-        # Step 5: Create evaluation criteria from analysis
-        criteria = analysis.get("evaluation_criteria", [])
-        if not criteria:
-            criteria = [
-                {"name": "output_correctness", "description": "Final output matches expected answer"},
-                {"name": "tool_usage", "description": "Agent calls the correct tools with proper arguments"},
-                {"name": "efficiency", "description": "Agent completes task without unnecessary steps"},
-            ]
-
-        judge_config = JudgeConfig(criteria=criteria)
+        # Step 5: Build pipeline stages from analysis
+        raw_stages = analysis.get("pipeline_stages", [])
+        if raw_stages:
+            stages = []
+            for s in raw_stages:
+                stages.append(PipelineStage(
+                    name=s["name"],
+                    display_name=s["display_name"],
+                    order=s["order"],
+                    scorer_type=s["scorer_type"],
+                    criteria=s.get("criteria"),
+                    check=s.get("check"),
+                    expected_field=s.get("expected_field"),
+                    context_filter=s.get("context_filter", "all"),
+                ))
+            pipeline = PipelineConfig(stages=stages)
+        else:
+            pipeline = PipelineConfig.default_for_agent()
 
         # Step 6: Generate eval files
         config_dir = user_dir / "configs"
         config_dir.mkdir(parents=True, exist_ok=True)
 
-        task_code, config_data, compose_yaml = create_agent_eval_files(
+        task_code, config_data, compose_yaml = create_pipeline_eval_files(
             dataset_path=str(dataset_file),
             config_name=config_name,
             config_dir=str(config_dir),
-            judge_config=judge_config,
+            pipeline=pipeline,
+            judge_models=JUDGE_MODELS,
             agent_image=image,
             agent_cmd=agent_cmd,
             model=model,
@@ -366,8 +407,8 @@ async def handle_analyze_agent_image(args: Dict[str, Any]) -> List[TextContent]:
                 "framework": analysis.get("framework", "unknown"),
                 "tools_found": [t["name"] for t in analysis.get("tools", [])],
                 "subagents": [s["name"] for s in analysis.get("subagents", [])],
-                "test_cases": len(test_cases),
-                "criteria": [c["name"] for c in criteria],
+                "test_cases": len(inspect_samples),
+                "pipeline_stages": [s.display_name for s in pipeline.stages],
                 "difficulty_breakdown": {
                     "simple": sum(1 for tc in test_cases if tc.get("difficulty") == "simple"),
                     "moderate": sum(1 for tc in test_cases if tc.get("difficulty") == "moderate"),

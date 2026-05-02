@@ -1,0 +1,2 @@
+- [Eval platform migration](project_eval_platform_migration.md) — Migrating llm-evaluation-system from promptfoo to Inspect AI with new frontend
+- [Agent eval pipeline architecture](project_agent_eval_pipeline.md) — Multi-stage agent eval using sandbox_agent_bridge with pipeline scorers

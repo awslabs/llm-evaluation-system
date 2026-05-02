@@ -32,13 +32,22 @@ function formatCriterion(name: string): string {
   return name.replace(/_/g, " ");
 }
 
+interface PipelineStage {
+  name: string;
+  displayName: string;
+  order: number;
+  scorerType: "deterministic" | "llm_judge";
+  criteria?: string[];
+}
+
 interface AggregateMetricsProps {
   models: string[];
-  aggregate: Record<string, { overall: number; byCriterion: Record<string, number> }>;
+  aggregate: Record<string, { overall: number; byCriterion: Record<string, number>; byStage?: Record<string, number> }>;
   criteria: string[];
   criteriaDescriptions?: Record<string, string>;
   stats: Record<string, Record<string, unknown>>;
   sampleCount: number;
+  pipeline?: PipelineStage[];
 }
 
 const MODEL_COLORS = [
@@ -55,6 +64,7 @@ export default function AggregateMetrics({
   criteriaDescriptions,
   stats,
   sampleCount,
+  pipeline,
 }: AggregateMetricsProps) {
   const [expandedCriteria, setExpandedCriteria] = useState<Set<string>>(new Set());
 
@@ -129,8 +139,81 @@ export default function AggregateMetrics({
         })}
       </div>
 
-      {/* Per-criterion pass rates */}
-      {criteria.length > 0 && (
+      {/* Pipeline stages overview */}
+      {pipeline && pipeline.length > 0 && (
+        <div className="rounded-lg border border-claude-border bg-claude-surface p-4">
+          <div className="mb-3 text-xs font-medium uppercase tracking-wider text-claude-muted">
+            Pipeline Stages
+          </div>
+          <div className="flex items-center gap-2 overflow-x-auto">
+            {pipeline.sort((a, b) => a.order - b.order).map((stage, i) => {
+              const passRate = aggregate[models[0]]?.byStage?.[stage.name] ?? 0;
+              const color = passRate >= 0.7 ? "border-green-500 text-green-400" : passRate >= 0.4 ? "border-yellow-500 text-yellow-400" : "border-red-500 text-red-400";
+              return (
+                <div key={stage.name} className="flex items-center gap-2">
+                  {i > 0 && <span className="text-claude-muted">→</span>}
+                  <div className={`rounded-md border px-3 py-2 ${color}`}>
+                    <div className="text-sm font-medium">{stage.displayName}</div>
+                    <div className="flex items-center gap-2 mt-0.5">
+                      <span className="text-lg font-bold">{(passRate * 100).toFixed(0)}%</span>
+                      <span className="text-xs text-claude-muted">{stage.scorerType === "deterministic" ? "auto" : "judge"}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Per-stage criteria (pipeline mode) */}
+      {pipeline && pipeline.length > 0 ? (
+        <div className="space-y-3">
+          {pipeline.sort((a, b) => a.order - b.order).map((stage) => {
+            const stagePassRate = aggregate[models[0]]?.byStage?.[stage.name] ?? 0;
+            const stageColor = stagePassRate >= 0.7 ? "text-green-400" : stagePassRate >= 0.4 ? "text-yellow-400" : "text-red-400";
+            return (
+              <div key={stage.name} className="rounded-lg border border-claude-border bg-claude-surface p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-claude-text">{stage.displayName}</span>
+                    <span className="text-xs px-1.5 py-0.5 rounded bg-claude-border/50 text-claude-muted">
+                      {stage.scorerType === "deterministic" ? "auto" : "judge"}
+                    </span>
+                  </div>
+                  <span className={`text-sm font-bold ${stageColor}`}>
+                    {(stagePassRate * 100).toFixed(0)}%
+                  </span>
+                </div>
+                {stage.scorerType === "deterministic" ? (
+                  <div className="text-xs text-claude-muted">
+                    Checks if the correct tools were called for each sample
+                  </div>
+                ) : (
+                  <table className="w-full mt-2">
+                    <tbody>
+                      {(stage.criteria && stage.criteria.length > 0 ? stage.criteria : criteria).map((criterion) => {
+                        const value = aggregate[models[0]]?.byCriterion?.[criterion] ?? 0;
+                        const color = value >= 0.7 ? "text-green-400" : value >= 0.4 ? "text-yellow-400" : "text-red-400";
+                        return (
+                          <tr key={criterion} className="border-t border-claude-border/30">
+                            <td className="py-1.5">
+                              <span className="text-sm text-claude-text capitalize">{formatCriterion(criterion)}</span>
+                            </td>
+                            <td className="py-1.5 text-right">
+                              <span className={`text-sm font-medium ${color}`}>{(value * 100).toFixed(0)}%</span>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : criteria.length > 0 ? (
         <div className="rounded-lg border border-claude-border bg-claude-surface p-4">
           <table className="w-full">
             <thead>
@@ -190,7 +273,7 @@ export default function AggregateMetrics({
             </tbody>
           </table>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

@@ -34,7 +34,7 @@ function ResultsContent() {
   return (
     <div className="flex h-screen flex-col bg-claude-bg">
       <ResultsHeader groupId={groupId} />
-      <div className="flex-1 overflow-hidden">
+      <div className="flex-1 overflow-auto">
         {groupId ? (
           <ComparisonView groupId={groupId} />
         ) : (

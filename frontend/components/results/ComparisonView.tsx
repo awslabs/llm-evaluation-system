@@ -13,12 +13,22 @@ interface CriteriaResult {
   note?: string;
 }
 
+interface StageResult {
+  passed: boolean;
+  explanation?: string;
+  stage_order?: number;
+  tools_called?: string[];
+  tools_expected?: string[];
+  criteriaResults?: CriteriaResult[];
+}
+
 interface SampleResult {
   passed: boolean;
   score: number;
   output: string;
   explanation?: string;
   criteriaResults?: CriteriaResult[];
+  stages?: Record<string, StageResult>;
 }
 
 interface Sample {
@@ -28,15 +38,24 @@ interface Sample {
   results: Record<string, SampleResult>;
 }
 
+interface PipelineStage {
+  name: string;
+  displayName: string;
+  order: number;
+  scorerType: "deterministic" | "llm_judge";
+  criteria?: string[];
+}
+
 interface ComparisonData {
   groupId: string;
   task: string;
   models: string[];
   criteria: string[];
   criteriaDescriptions: Record<string, string>;
-  aggregate: Record<string, { overall: number; byCriterion: Record<string, number> }>;
+  aggregate: Record<string, { overall: number; byCriterion: Record<string, number>; byStage?: Record<string, number> }>;
   samples: Sample[];
   stats: Record<string, Record<string, unknown>>;
+  pipeline?: PipelineStage[];
 }
 
 interface SelectedCell {
@@ -96,6 +115,7 @@ export default function ComparisonView({ groupId }: { groupId: string }) {
           criteriaDescriptions={data.criteriaDescriptions}
           stats={data.stats}
           sampleCount={data.samples.length}
+          pipeline={data.pipeline}
         />
         <ComparisonGrid
           models={data.models}
@@ -121,4 +141,4 @@ export default function ComparisonView({ groupId }: { groupId: string }) {
   );
 }
 
-export type { CriteriaResult, SampleResult, Sample, ComparisonData, SelectedCell };
+export type { CriteriaResult, StageResult, SampleResult, Sample, ComparisonData, PipelineStage, SelectedCell };

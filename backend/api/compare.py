@@ -153,6 +153,12 @@ async def _build_groups_response(user_id: str) -> dict:
         task_name = run_logs[0].get("task", "unknown")
         config_name = task_name.replace("eval_task", "").strip("_") or task_name
 
+        # If Inspect marks as "error" but samples ran, it means some samples
+        # errored (normal for agent evals) — show as "completed" not "error"
+        status = run_logs[0].get("status", "unknown")
+        if status == "error" and run_logs[0].get("dataset_samples", 0) > 0:
+            status = "completed"
+
         groups.append({
             "id": run_id,
             "task": task_name,
@@ -160,7 +166,7 @@ async def _build_groups_response(user_id: str) -> dict:
             "created": run_logs[0].get("created", ""),
             "models": models,
             "sampleCount": run_logs[0].get("dataset_samples", 0),
-            "status": run_logs[0].get("status", "unknown"),
+            "status": status,
             "scores": scores_by_model,
         })
 
@@ -191,6 +197,8 @@ async def _build_detail_response(user_id: str, group_id: str) -> dict:
 
     samples_by_id: dict[str, dict] = {}
     criteria_set: set[str] = set()
+    pipeline_stages: list[dict] = []
+    is_pipeline = False
 
     for log in full_logs:
         model = log["model"]
@@ -206,17 +214,77 @@ async def _build_detail_response(user_id: str, group_id: str) -> dict:
 
             score_data: dict = {"passed": False, "score": 0.0, "output": sample.get("output", "")}
             if sample.get("scores"):
-                for scorer_name, score in sample["scores"].items():
-                    score_data["passed"] = score["value"] == "C"
-                    metadata = score.get("metadata", {})
-                    score_data["score"] = metadata.get("jury_score", 1.0 if score["value"] == "C" else 0.0)
-                    score_data["explanation"] = score.get("explanation", "")
-                    criteria_results = metadata.get("criteria_results", [])
-                    score_data["criteriaResults"] = criteria_results
-                    for cr in criteria_results:
-                        criteria_set.add(cr["name"])
+                scorers = sample["scores"]
+                # Detect pipeline eval (multiple stage_* scorers)
+                stage_scorers = {k: v for k, v in scorers.items() if k.startswith("stage_")}
+                if stage_scorers:
+                    is_pipeline = True
+                    # All stages must pass for overall pass
+                    all_passed = all(s["value"] == "C" for s in stage_scorers.values())
+                    score_data["passed"] = all_passed
+                    score_data["score"] = sum(1 for s in stage_scorers.values() if s["value"] == "C") / len(stage_scorers)
+
+                    # Build per-stage results
+                    stages_data = {}
+                    for scorer_name, score in stage_scorers.items():
+                        stage_name = scorer_name.replace("stage_", "")
+                        metadata = score.get("metadata", {})
+                        stage_result = {
+                            "passed": score["value"] == "C",
+                            "explanation": score.get("explanation", ""),
+                            "stage_order": metadata.get("stage_order", 0),
+                        }
+                        # Deterministic stage data
+                        if "tools_called" in metadata:
+                            stage_result["tools_called"] = metadata["tools_called"]
+                            stage_result["tools_expected"] = metadata.get("tools_expected", [])
+                        # LLM judge stage data
+                        criteria_results = metadata.get("criteria_results", [])
+                        if criteria_results:
+                            stage_result["criteriaResults"] = criteria_results
+                            for cr in criteria_results:
+                                criteria_set.add(cr["name"])
+                        stages_data[stage_name] = stage_result
+
+                    score_data["stages"] = stages_data
+                    # Also keep flat criteriaResults for backward compat
+                    all_criteria = []
+                    for stage in stages_data.values():
+                        all_criteria.extend(stage.get("criteriaResults", []))
+                    score_data["criteriaResults"] = all_criteria
+                else:
+                    # Legacy single-scorer eval
+                    for scorer_name, score in scorers.items():
+                        score_data["passed"] = score["value"] == "C"
+                        metadata = score.get("metadata", {})
+                        score_data["score"] = metadata.get("jury_score", 1.0 if score["value"] == "C" else 0.0)
+                        score_data["explanation"] = score.get("explanation", "")
+                        criteria_results = metadata.get("criteria_results", [])
+                        score_data["criteriaResults"] = criteria_results
+                        for cr in criteria_results:
+                            criteria_set.add(cr["name"])
 
             samples_by_id[sid]["results"][model] = score_data
+
+    # Build pipeline stage metadata if detected
+    if is_pipeline:
+        # Extract stage info from first sample
+        first_sample = next(iter(samples_by_id.values()), None)
+        if first_sample:
+            first_result = next(iter(first_sample["results"].values()), None)
+            if first_result and "stages" in first_result:
+                for stage_name, stage_data in sorted(
+                    first_result["stages"].items(),
+                    key=lambda x: x[1].get("stage_order", 0)
+                ):
+                    stage_info = {
+                        "name": stage_name,
+                        "displayName": stage_name.replace("_", " ").title(),
+                        "order": stage_data.get("stage_order", 0),
+                        "scorerType": "deterministic" if "tools_called" in stage_data else "llm_judge",
+                        "criteria": [cr["name"] for cr in stage_data.get("criteriaResults", [])],
+                    }
+                    pipeline_stages.append(stage_info)
 
     aggregate: dict[str, dict] = {}
     for model in models:
@@ -226,22 +294,36 @@ async def _build_detail_response(user_id: str, group_id: str) -> dict:
             if model in s["results"]
         ]
         total = len(model_samples)
-        passed = sum(1 for s in model_samples if s["passed"])
-        overall = passed / max(total, 1)
+        if is_pipeline:
+            overall = sum(s.get("score", 0) for s in model_samples) / max(total, 1)
+        else:
+            passed = sum(1 for s in model_samples if s["passed"])
+            overall = passed / max(total, 1)
 
         by_criterion: dict[str, float] = {}
         for criterion in criteria_set:
             criterion_passed = 0
-            criterion_total = 0
             for s in model_samples:
                 for cr in s.get("criteriaResults", []):
-                    if cr["name"] == criterion:
-                        criterion_total += 1
-                        if cr["passed"]:
-                            criterion_passed += 1
-            by_criterion[criterion] = criterion_passed / max(criterion_total, 1)
+                    if cr["name"] == criterion and cr["passed"]:
+                        criterion_passed += 1
+            by_criterion[criterion] = criterion_passed / max(total, 1)
 
-        aggregate[model] = {"overall": overall, "byCriterion": by_criterion}
+        # Per-stage pass rates (errors count as failures)
+        by_stage: dict[str, float] = {}
+        if is_pipeline:
+            for s in model_samples:
+                for stage_name, stage_data in s.get("stages", {}).items():
+                    if stage_name not in by_stage:
+                        by_stage[stage_name] = 0
+                    if stage_data.get("passed"):
+                        by_stage[stage_name] += 1
+            by_stage = {k: v / max(total, 1) for k, v in by_stage.items()}
+
+        agg = {"overall": overall, "byCriterion": by_criterion}
+        if by_stage:
+            agg["byStage"] = by_stage
+        aggregate[model] = agg
 
     stats: dict[str, dict] = {}
     for log in group_logs:
@@ -289,7 +371,7 @@ async def _build_detail_response(user_id: str, group_id: str) -> dict:
     task_name = group_logs[0].get("task", "")
     criteria_descriptions = _load_criteria_descriptions(user_dir, task_name, criteria_set)
 
-    return {
+    result = {
         "groupId": group_id,
         "task": task_name,
         "models": models,
@@ -299,6 +381,9 @@ async def _build_detail_response(user_id: str, group_id: str) -> dict:
         "samples": list(samples_by_id.values()),
         "stats": stats,
     }
+    if pipeline_stages:
+        result["pipeline"] = pipeline_stages
+    return result
 
 
 @router.get("/groups")

@@ -200,12 +200,11 @@ def run_subagent(client, agent_type, query_or_text, max_words=None):
 
     # Sub-agent loop
     for _ in range(5):
-        response = client.chat.completions.create(
-            model="inspect",
-            messages=messages,
-            tools=tools if tools else None,
-            tool_choice="auto" if tools else None,
-        )
+        call_kwargs = {"model": "claude-sonnet-4", "messages": messages}
+        if tools:
+            call_kwargs["tools"] = tools
+            call_kwargs["tool_choice"] = "auto"
+        response = client.chat.completions.create(**call_kwargs)
 
         choice = response.choices[0]
         if choice.finish_reason == "stop":
@@ -243,7 +242,7 @@ def main():
 
     for _ in range(10):
         response = client.chat.completions.create(
-            model="inspect",
+            model="claude-sonnet-4",
             messages=messages,
             tools=ORCHESTRATOR_TOOLS,
             tool_choice="auto",

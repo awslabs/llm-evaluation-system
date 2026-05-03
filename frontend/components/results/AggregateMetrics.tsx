@@ -98,7 +98,7 @@ export default function AggregateMetrics({
                 <span className={`text-3xl font-bold ${overall >= 0.7 ? "text-green-400" : overall >= 0.4 ? "text-yellow-400" : "text-red-400"}`}>
                   {(overall * 100).toFixed(0)}%
                 </span>
-                <span className="mb-1 text-xs text-claude-muted">pass rate</span>
+                <span className="mb-1 text-xs text-claude-muted">score</span>
               </div>
               <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-claude-muted">
                 {stats[model]?.cost != null && (

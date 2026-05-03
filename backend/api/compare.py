@@ -294,11 +294,6 @@ async def _build_detail_response(user_id: str, group_id: str) -> dict:
             if model in s["results"]
         ]
         total = len(model_samples)
-        if is_pipeline:
-            overall = sum(s.get("score", 0) for s in model_samples) / max(total, 1)
-        else:
-            passed = sum(1 for s in model_samples if s["passed"])
-            overall = passed / max(total, 1)
 
         by_criterion: dict[str, float] = {}
         for criterion in criteria_set:
@@ -309,16 +304,32 @@ async def _build_detail_response(user_id: str, group_id: str) -> dict:
                         criterion_passed += 1
             by_criterion[criterion] = criterion_passed / max(total, 1)
 
-        # Per-stage pass rates (errors count as failures)
+        # Per-stage scores = average of their criteria scores
         by_stage: dict[str, float] = {}
-        if is_pipeline:
-            for s in model_samples:
-                for stage_name, stage_data in s.get("stages", {}).items():
-                    if stage_name not in by_stage:
-                        by_stage[stage_name] = 0
-                    if stage_data.get("passed"):
-                        by_stage[stage_name] += 1
-            by_stage = {k: v / max(total, 1) for k, v in by_stage.items()}
+        if is_pipeline and pipeline_stages:
+            for stage_info in pipeline_stages:
+                stage_name = stage_info["name"]
+                stage_criteria = stage_info.get("criteria", [])
+                if stage_criteria:
+                    # Average of this stage's criteria pass rates
+                    stage_criteria_scores = [by_criterion.get(c, 0) for c in stage_criteria]
+                    by_stage[stage_name] = sum(stage_criteria_scores) / len(stage_criteria_scores)
+                else:
+                    # Deterministic stage — use pass rate from scorer directly
+                    stage_passed = 0
+                    for s in model_samples:
+                        stage_data = s.get("stages", {}).get(stage_name)
+                        if stage_data and stage_data.get("passed"):
+                            stage_passed += 1
+                    by_stage[stage_name] = stage_passed / max(total, 1)
+
+        # Overall = average of all stage scores (pipeline) or all criteria (non-pipeline)
+        if by_stage:
+            overall = sum(by_stage.values()) / len(by_stage) if by_stage else 0
+        elif by_criterion:
+            overall = sum(by_criterion.values()) / len(by_criterion)
+        else:
+            overall = 0
 
         agg = {"overall": overall, "byCriterion": by_criterion}
         if by_stage:

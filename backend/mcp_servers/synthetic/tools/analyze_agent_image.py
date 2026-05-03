@@ -124,46 +124,85 @@ AGENT_DEEP_ANALYSIS_TOOL = {
 async def extract_code_from_image(image: str) -> Dict[str, str]:
     """Extract Python files from a container image.
 
-    Tries crane first (registry images: ECR, DockerHub, GHCR).
-    Falls back to docker (local images).
+    Uses kubectl (EKS) or docker (local) to start a temporary container,
+    copy out the code, and delete it. Works with any registry the
+    environment can pull from — no extra auth needed.
 
     Returns: dict of {filepath: content}
     """
     tmp_dir = tempfile.mkdtemp(prefix="agent_code_")
+    pod_name = f"extract-{os.getpid()}-{int(asyncio.get_event_loop().time())}"
 
     try:
         extracted = False
 
-        # Try crane first (works for registry images)
+        # Try kubectl first (works in EKS)
         try:
-            # Authenticate crane for ECR images
-            if ".dkr.ecr." in image:
-                registry = image.split("/")[0]
-                region = os.environ.get("AWS_REGION", "us-east-2")
-                import boto3, base64
-                ecr_client = boto3.client("ecr", region_name=region)
-                token_response = ecr_client.get_authorization_token()
-                auth_data = token_response["authorizationData"][0]
-                decoded = base64.b64decode(auth_data["authorizationToken"]).decode()
-                password = decoded.split(":", 1)[1]
+            namespace = os.environ.get("K8S_AGENT_NAMESPACE", os.environ.get("NAMESPACE", "eval-managed"))
 
-                login_proc = await asyncio.create_subprocess_exec(
-                    "crane", "auth", "login", registry, "--username", "AWS", "--password", password,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                await login_proc.wait()
-
+            # Create temp pod
             proc = await asyncio.create_subprocess_exec(
-                "sh", "-c",
-                f"crane export {image} - | tar -xf - -C {tmp_dir} --include='*.py' 2>/dev/null",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                "kubectl", "run", pod_name, "-n", namespace,
+                f"--image={image}", "--restart=Never",
+                "--", "sleep", "120",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             )
             await proc.wait()
-            extracted = proc.returncode == 0
+            if proc.returncode != 0:
+                raise RuntimeError("kubectl run failed")
+
+            # Wait for pod to be ready
+            proc = await asyncio.create_subprocess_exec(
+                "kubectl", "wait", f"pod/{pod_name}", "-n", namespace,
+                "--for=condition=Ready", "--timeout=60s",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.wait()
+            if proc.returncode != 0:
+                raise RuntimeError("pod not ready")
+
+            # Get working dir
+            proc = await asyncio.create_subprocess_exec(
+                "kubectl", "exec", pod_name, "-n", namespace, "--", "pwd",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            workdir = stdout.decode().strip() or "/workspace"
+
+            # List and copy .py files from working dir
+            proc = await asyncio.create_subprocess_exec(
+                "kubectl", "exec", pod_name, "-n", namespace, "--",
+                "find", workdir, "-maxdepth", "3", "-name", "*.py", "-type", "f",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            py_files = [f.strip() for f in stdout.decode().split("\n") if f.strip()]
+
+            for remote_path in py_files:
+                proc = await asyncio.create_subprocess_exec(
+                    "kubectl", "exec", pod_name, "-n", namespace, "--", "cat", remote_path,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await proc.communicate()
+                if proc.returncode == 0:
+                    rel_path = remote_path.replace(workdir + "/", "").lstrip("/")
+                    local_path = Path(tmp_dir) / rel_path
+                    local_path.parent.mkdir(parents=True, exist_ok=True)
+                    local_path.write_text(stdout.decode("utf-8", errors="replace"))
+
+            extracted = True
+
         except Exception:
             pass
+        finally:
+            # Cleanup kubectl pod
+            cleanup = await asyncio.create_subprocess_exec(
+                "kubectl", "delete", "pod", pod_name, "-n",
+                os.environ.get("K8S_AGENT_NAMESPACE", os.environ.get("NAMESPACE", "eval-managed")),
+                "--ignore-not-found", "--grace-period=0",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            await cleanup.wait()
 
         # Fall back to docker (works for local images)
         if not extracted:
@@ -177,7 +216,6 @@ async def extract_code_from_image(image: str) -> Dict[str, str]:
                 if proc.returncode != 0:
                     raise RuntimeError("docker create failed")
 
-                # Get working dir
                 proc = await asyncio.create_subprocess_exec(
                     "docker", "inspect", "--format", "{{.Config.WorkingDir}}", container_name,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -185,7 +223,6 @@ async def extract_code_from_image(image: str) -> Dict[str, str]:
                 stdout, _ = await proc.communicate()
                 workdir = stdout.decode().strip() or "/"
 
-                # Copy working dir
                 proc = await asyncio.create_subprocess_exec(
                     "docker", "cp", f"{container_name}:{workdir}/.", tmp_dir,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -200,7 +237,7 @@ async def extract_code_from_image(image: str) -> Dict[str, str]:
                 await cleanup.wait()
 
         if not extracted:
-            raise RuntimeError(f"Could not extract code from {image} (tried crane and docker)")
+            raise RuntimeError(f"Could not extract code from {image}")
 
         # Read all extracted Python files
         files = {}

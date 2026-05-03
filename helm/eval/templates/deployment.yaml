@@ -56,6 +56,8 @@ spec:
               value: "0.0.0.0"
             - name: USER_STORAGE_BASE
               value: "/data/users"
+            - name: INSPECT_SANDBOX_TYPE
+              value: "k8s"
           envFrom:
             - configMapRef:
                 name: app-config

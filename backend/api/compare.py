@@ -99,6 +99,8 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
                 "status": log.status,
                 "samples": [],
             }
+            # Compute agent-only model usage from events (excludes judge/scorer calls)
+            agent_usage: dict[str, dict] = {}
             if log.samples:
                 for s in log.samples:
                     sample: dict = {
@@ -122,7 +124,27 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
                             k: {"input_tokens": v.input_tokens, "output_tokens": v.output_tokens, "total_tokens": v.total_tokens}
                             for k, v in s.model_usage.items()
                         }
+                    # Separate agent vs judge model usage using span hierarchy
+                    if hasattr(s, 'events') and s.events:
+                        solver_spans = set()
+                        for ev in s.events:
+                            etype = type(ev).__name__
+                            if etype == "SpanBeginEvent":
+                                if getattr(ev, "type", "") in ("solver", "agent"):
+                                    solver_spans.add(ev.id)
+                                elif hasattr(ev, "parent_id") and ev.parent_id in solver_spans:
+                                    solver_spans.add(ev.id)
+                        for ev in s.events:
+                            if type(ev).__name__ == "ModelEvent" and ev.span_id in solver_spans:
+                                if hasattr(ev, "output") and ev.output and ev.output.usage:
+                                    m = ev.model
+                                    if m not in agent_usage:
+                                        agent_usage[m] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+                                    agent_usage[m]["input_tokens"] += ev.output.usage.input_tokens
+                                    agent_usage[m]["output_tokens"] += ev.output.usage.output_tokens
+                                    agent_usage[m]["total_tokens"] += ev.output.usage.input_tokens + ev.output.usage.output_tokens
                     entry["samples"].append(sample)
+            entry["agent_model_usage"] = agent_usage
             results.append(entry)
         except Exception as e:
             logger.warning(f"Failed to read full log {f}: {e}")
@@ -336,6 +358,8 @@ async def _build_detail_response(user_id: str, group_id: str) -> dict:
             agg["byStage"] = by_stage
         aggregate[model] = agg
 
+    task_name = group_logs[0].get("task", "")
+
     stats: dict[str, dict] = {}
     for log in group_logs:
         model = log["model"]
@@ -361,7 +385,39 @@ async def _build_detail_response(user_id: str, group_id: str) -> dict:
             "latencySeconds": round(avg_latency, 2) if avg_latency else None,
         }
 
-        if log.get("model_usage"):
+        # Use agent-only model usage (computed from events, excludes judge calls)
+        full_log = next((fl for fl in full_logs if fl.get("model") == model), None)
+        agent_usage = full_log.get("agent_model_usage", {}) if full_log else {}
+
+        if agent_usage:
+            agent_input = 0
+            agent_output = 0
+            agent_tokens = 0
+            agent_cost = 0.0
+            per_model = {}
+            for model_name, usage in agent_usage.items():
+                inp = usage["input_tokens"]
+                out = usage["output_tokens"]
+                tot = usage["total_tokens"]
+                agent_input += inp
+                agent_output += out
+                agent_tokens += tot
+                model_cost = calculate_cost(model_name, inp, out)
+                if model_cost is not None:
+                    agent_cost += model_cost
+                per_model[model_name] = {
+                    "input_tokens": inp,
+                    "output_tokens": out,
+                    "total_tokens": tot,
+                    "cost": model_cost,
+                }
+            stats[model]["input_tokens"] = agent_input
+            stats[model]["output_tokens"] = agent_output
+            stats[model]["total_tokens"] = agent_tokens
+            stats[model]["cost"] = agent_cost
+            stats[model]["modelUsage"] = per_model
+        elif log.get("model_usage"):
+            # Fallback: use full model usage (non-pipeline evals)
             total_input = 0
             total_output = 0
             total_tokens = 0
@@ -372,14 +428,11 @@ async def _build_detail_response(user_id: str, group_id: str) -> dict:
             stats[model]["input_tokens"] = total_input
             stats[model]["output_tokens"] = total_output
             stats[model]["total_tokens"] = total_tokens
-
-            cost = calculate_cost(model, total_input, total_output)
-            stats[model]["cost"] = cost
+            stats[model]["cost"] = calculate_cost(model, total_input, total_output)
 
             if latency_seconds and latency_seconds > 0:
-                stats[model]["tokensPerSecond"] = round(total_output / latency_seconds, 1)
+                stats[model]["tokensPerSecond"] = round(agent_output / latency_seconds, 1)
 
-    task_name = group_logs[0].get("task", "")
     criteria_descriptions = _load_criteria_descriptions(user_dir, task_name, criteria_set)
 
     result = {

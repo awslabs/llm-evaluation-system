@@ -547,6 +547,117 @@ async def get_viewer_url(
     })
 
 
+@mcp.tool()
+async def explore_eval_data(
+    user_id: str = None,
+    code: str = "",
+) -> str:
+    """
+    Explore evaluation data by running Python code against eval logs.
+
+    You have access to these functions and the full Inspect AI log API:
+    - list_logs() → list of {"file": path, "run_id": id, "task": name, "model": model, "status": status}
+    - read_log(file, header_only=False) → EvalLog object
+    - read_sample(file, sample_id) → EvalSample object
+
+    EvalLog structure:
+    - log.eval.model, log.eval.task, log.eval.dataset.samples
+    - log.status
+    - log.results.scores → list of EvalScore(name, metrics)
+    - log.stats.model_usage → dict of model → ModelUsage(input_tokens, output_tokens, total_tokens)
+    - log.samples → list of EvalSample
+
+    EvalSample structure:
+    - sample.id, sample.input, sample.output.completion, sample.target
+    - sample.scores → dict of scorer_name → Score(value, explanation, metadata)
+    - sample.messages → conversation history
+    - sample.events → full trace (ModelEvent, ToolEvent, SpanEvent, etc.)
+    - sample.model_usage → per-model token usage for this sample
+    - sample.error → error message if sample failed
+
+    ModelEvent (in sample.events):
+    - ev.model → which model was called
+    - ev.output.message.tool_calls → list of ToolCall(function, arguments)
+    - ev.output.message.text → response text
+
+    Assign your result to the variable `result`. Examples:
+
+    # Get overview of latest eval
+    logs = list_logs()
+    log = read_log(logs[0]["file"], header_only=True)
+    result = {"samples": log.eval.dataset.samples, "model_usage": {m: u.total_tokens for m, u in log.stats.model_usage.items()}}
+
+    # Find failed samples
+    log = read_log(logs[0]["file"])
+    result = [{"id": s.id, "input": str(s.input)[:80], "error": str(s.error)[:100] if s.error else None} for s in log.samples if any(v.value == "I" for v in s.scores.values())]
+
+    # Check which models a specific sample used
+    sample = read_sample(logs[0]["file"], 1)
+    result = [{"model": ev.model, "tools": [t.function for t in ev.output.message.tool_calls] if ev.output.message.tool_calls else []} for ev in sample.events if type(ev).__name__ == "ModelEvent"]
+
+    Args:
+        code: Python code to execute. Assign result to `result` variable.
+
+    Returns:
+        The value of `result` as JSON string.
+    """
+    import asyncio
+    from inspect_ai.log import read_eval_log, read_eval_log_sample
+    from inspect_ai._view.common import list_eval_logs_async
+    from backend.core.user_storage import get_user_dir, get_user_log_dir
+
+    if not user_id:
+        return json.dumps({"error": "user_id is required"})
+    if not code:
+        return json.dumps({"error": "code is required"})
+
+    log_dir = get_user_log_dir(user_id)
+
+    # Build helper functions for the agent
+    async def _list_logs():
+        from inspect_ai.log import read_eval_log_async
+        infos = await list_eval_logs_async(log_dir)
+        results = []
+        for info in infos[:20]:
+            try:
+                header = await read_eval_log_async(info.name, header_only=True)
+                results.append({
+                    "file": info.name,
+                    "run_id": header.eval.run_id,
+                    "task": header.eval.task,
+                    "model": header.eval.model,
+                    "status": header.status,
+                    "samples": header.eval.dataset.samples if header.eval.dataset else 0,
+                })
+            except Exception:
+                pass
+        return results
+
+    logs_list = await _list_logs()
+
+    def list_logs():
+        return logs_list
+
+    def read_log(file, header_only=False):
+        return read_eval_log(file, header_only=header_only)
+
+    def read_sample(file, sample_id):
+        return read_eval_log_sample(file, id=sample_id)
+
+    try:
+        local_vars = {
+            "list_logs": list_logs,
+            "read_log": read_log,
+            "read_sample": read_sample,
+            "json": json,
+        }
+        exec(code, {"__builtins__": __builtins__}, local_vars)
+        result = local_vars.get("result", "No 'result' variable set")
+        return json.dumps(result, indent=2, default=str)
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
 if __name__ == "__main__":
     import uvicorn
     from starlette.routing import Route

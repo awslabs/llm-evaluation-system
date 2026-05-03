@@ -198,9 +198,9 @@ def run_subagent(client, agent_type, query_or_text, max_words=None):
     else:
         return f"Unknown agent: {agent_type}"
 
-    # Sub-agent loop
+    # Sub-agents use Nova Pro (cheaper, faster for simple tasks)
     for _ in range(5):
-        call_kwargs = {"model": "claude-sonnet-4", "messages": messages}
+        call_kwargs = {"model": "bedrock/us.amazon.nova-pro-v1:0", "messages": messages}
         if tools:
             call_kwargs["tools"] = tools
             call_kwargs["tool_choice"] = "auto"
@@ -240,9 +240,10 @@ def main():
         {"role": "user", "content": prompt},
     ]
 
+    # Orchestrator uses Claude Sonnet 4.6 (complex reasoning/routing)
     for _ in range(10):
         response = client.chat.completions.create(
-            model="claude-sonnet-4",
+            model="bedrock/us.anthropic.claude-sonnet-4-6",
             messages=messages,
             tools=ORCHESTRATOR_TOOLS,
             tool_choice="auto",

@@ -91,7 +91,7 @@ export default function AggregateMetrics({
               <div className="flex items-center gap-2">
                 <div className={`h-3 w-3 rounded-full ${color.bar}`} />
                 <span className="text-sm font-medium text-claude-text truncate">
-                  {formatModel(model)}
+                  {pipeline ? "Agent Evaluation" : formatModel(model)}
                 </span>
               </div>
               <div className="mt-2 flex items-end gap-2">
@@ -134,6 +134,20 @@ export default function AggregateMetrics({
                   </>
                 )}
               </div>
+              {/* Per-model usage breakdown for pipeline evals */}
+              {pipeline && (stats[model] as Record<string, unknown>)?.modelUsage && (
+                <div className="mt-3 border-t border-claude-border/50 pt-2">
+                  <div className="text-xs text-claude-muted mb-1">Models used</div>
+                  {Object.entries((stats[model] as Record<string, unknown>).modelUsage as Record<string, Record<string, number>>).map(([modelName, usage]) => (
+                    <div key={modelName} className="flex justify-between text-xs py-0.5">
+                      <span className="text-claude-text truncate">{formatModel(modelName)}</span>
+                      <span className="text-claude-muted ml-2 whitespace-nowrap">
+                        {usage.total_tokens?.toLocaleString()} tok {usage.cost != null && `· $${usage.cost.toFixed(4)}`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           );
         })}

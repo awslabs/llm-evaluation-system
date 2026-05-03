@@ -149,26 +149,26 @@ def stage_{stage.name}():
         for label, model_id in _stage_judges.items():
             try:
                 judge = get_model(model_id)
-                result = await judge.generate(
-                    [
-                        ChatMessageSystem(content=system_prompt),
-                        ChatMessageUser(content=f"Question:\\n{{question}}\\n\\n{{context}}\\n\\nReference Answer:\\n{{golden}}"),
-                    ],
-                    tools=[tool],
-                    tool_choice="any",
-                )
+                judge_msgs = [
+                    ChatMessageSystem(content=system_prompt),
+                    ChatMessageUser(content=f"Question:\\n{{question}}\\n\\n{{context}}\\n\\nReference Answer:\\n{{golden}}"),
+                ]
                 args = {{}}
-                if result.message and result.message.tool_calls:
-                    for tc in result.message.tool_calls:
-                        if tc.function == "submit_scores":
-                            args.update(tc.arguments)
+                for attempt in range(2):
+                    result = await judge.generate(judge_msgs, tools=[tool], tool_choice="any")
+                    if result.message and result.message.tool_calls:
+                        for tc in result.message.tool_calls:
+                            if tc.function == "submit_scores":
+                                args.update(tc.arguments)
+                    if args:
+                        break
                 if args:
                     for n in criteria_names:
                         if n in args:
                             votes[n].append(int(bool(args[n])))
                     details.append(f"  {{label}}: {{{{n: args.get(n) for n in criteria_names}}}} - {{args.get('reason', '')}}")
                 else:
-                    errors.append(f"  {{label}}: No submit_scores call")
+                    errors.append(f"  {{label}}: No submit_scores call after retry")
             except Exception as e:
                 errors.append(f"  {{label}}: {{str(e)[:100]}}")
 
@@ -253,7 +253,7 @@ def agent_solver() -> Agent:
     """Run the user's agent in a container with LLM interception."""
 
     async def execute(state: AgentState) -> AgentState:
-        async with sandbox_agent_bridge(state, model="inspect") as bridge:
+        async with sandbox_agent_bridge(state) as bridge:
             prompt = ""
             for msg in reversed(state.messages):
                 if isinstance(msg, ChatMessageUser):
@@ -284,11 +284,18 @@ def agent_solver() -> Agent:
 
 @task
 def eval_task():
+    import os
+    sandbox_type = os.environ.get("INSPECT_SANDBOX_TYPE", "docker")
+    if sandbox_type == "k8s":
+        sandbox_config = ("k8s", "values.yaml")
+    else:
+        sandbox_config = ("docker", "compose.yaml")
+
     return Task(
         dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer", metadata=["expected_tools", "expected_steps", "difficulty"])),
         solver=agent_solver(),
         scorer=[{scorers_list}],
-        sandbox=("docker", "compose.yaml"),
+        sandbox=sandbox_config,
     )
 '''
     return task_code
@@ -298,6 +305,13 @@ AGENT_COMPOSE_TEMPLATE = """services:
   default:
     image: {image}
     command: tail -f /dev/null
+"""
+
+AGENT_K8S_VALUES_TEMPLATE = """services:
+  default:
+    image: {image}
+    command: ["tail", "-f", "/dev/null"]
+    runtimeClassName: gvisor
 """
 
 
@@ -311,14 +325,15 @@ def create_pipeline_eval_files(
     agent_cmd: List[str],
     model: str,
     description: Optional[str] = None,
-) -> tuple[str, dict, str]:
-    """Create pipeline task file, config JSON, and compose.yaml.
+) -> tuple[str, dict, str, str]:
+    """Create pipeline task file, config JSON, compose.yaml, and values.yaml.
 
     Returns:
-        (task_code, config_dict, compose_yaml)
+        (task_code, config_dict, compose_yaml, k8s_values_yaml)
     """
     task_code = generate_pipeline_task_code(config_name, pipeline, judge_models)
     compose_yaml = AGENT_COMPOSE_TEMPLATE.format(image=agent_image)
+    k8s_values = AGENT_K8S_VALUES_TEMPLATE.format(image=agent_image)
 
     config_data = {
         "dataset_path": dataset_path,
@@ -330,4 +345,4 @@ def create_pipeline_eval_files(
         "description": description or "",
     }
 
-    return task_code, config_data, compose_yaml
+    return task_code, config_data, compose_yaml, k8s_values

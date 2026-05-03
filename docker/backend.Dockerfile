@@ -1,9 +1,15 @@
 # Backend Dockerfile - FastAPI + Python MCP servers + Inspect AI
 FROM public.ecr.aws/docker/library/python:3.12-slim
 
-# Install system dependencies: tini (PID 1 signal handling) + docker CLI (agent sandbox)
-RUN apt-get update && apt-get install -y --no-install-recommends tini docker.io \
+# Install system dependencies: tini (PID 1 signal handling)
+RUN apt-get update && apt-get install -y --no-install-recommends tini \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
+
+# Install Helm CLI (required by inspect-k8s-sandbox)
+COPY --from=alpine/helm:3.17.3 /usr/bin/helm /usr/local/bin/helm
+
+# Install crane (extract files from container images without Docker)
+COPY --from=gcr.io/go-containerregistry/crane:latest /ko-app/crane /usr/local/bin/crane
 
 # Install uv for reproducible Python builds
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv

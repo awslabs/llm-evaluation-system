@@ -122,66 +122,102 @@ AGENT_DEEP_ANALYSIS_TOOL = {
 
 
 async def extract_code_from_image(image: str) -> Dict[str, str]:
-    """Pull image and extract Python files from the working directory.
+    """Extract Python files from a container image.
+
+    Tries crane first (registry images: ECR, DockerHub, GHCR).
+    Falls back to docker (local images).
 
     Returns: dict of {filepath: content}
     """
-    container_name = f"inspect_extract_{os.getpid()}"
     tmp_dir = tempfile.mkdtemp(prefix="agent_code_")
 
     try:
-        # Create container (don't start it)
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "create", "--name", container_name, image,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.wait()
-        if proc.returncode != 0:
-            stderr = await proc.stderr.read()
-            raise RuntimeError(f"Failed to create container from {image}: {stderr.decode()}")
+        extracted = False
 
-        # Get working dir from image
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "inspect", "--format", "{{.Config.WorkingDir}}", container_name,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await proc.communicate()
-        workdir = stdout.decode().strip() or "/workspace"
+        # Try crane first (works for registry images)
+        try:
+            # Authenticate crane for ECR images
+            if ".dkr.ecr." in image:
+                registry = image.split("/")[0]
+                region = os.environ.get("AWS_REGION", "us-east-2")
+                import boto3, base64
+                ecr_client = boto3.client("ecr", region_name=region)
+                token_response = ecr_client.get_authorization_token()
+                auth_data = token_response["authorizationData"][0]
+                decoded = base64.b64decode(auth_data["authorizationToken"]).decode()
+                password = decoded.split(":", 1)[1]
 
-        # Copy working dir contents
-        proc = await asyncio.create_subprocess_exec(
-            "docker", "cp", f"{container_name}:{workdir}/.", tmp_dir,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await proc.wait()
+                login_proc = await asyncio.create_subprocess_exec(
+                    "crane", "auth", "login", registry, "--username", "AWS", "--password", password,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await login_proc.wait()
 
-        # Read all Python files
+            proc = await asyncio.create_subprocess_exec(
+                "sh", "-c",
+                f"crane export {image} - | tar -xf - -C {tmp_dir} --include='*.py' 2>/dev/null",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await proc.wait()
+            extracted = proc.returncode == 0
+        except Exception:
+            pass
+
+        # Fall back to docker (works for local images)
+        if not extracted:
+            container_name = f"inspect_extract_{os.getpid()}"
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "create", "--name", container_name, image,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.wait()
+                if proc.returncode != 0:
+                    raise RuntimeError("docker create failed")
+
+                # Get working dir
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "inspect", "--format", "{{.Config.WorkingDir}}", container_name,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await proc.communicate()
+                workdir = stdout.decode().strip() or "/"
+
+                # Copy working dir
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "cp", f"{container_name}:{workdir}/.", tmp_dir,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.wait()
+                extracted = True
+            finally:
+                cleanup = await asyncio.create_subprocess_exec(
+                    "docker", "rm", container_name,
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await cleanup.wait()
+
+        if not extracted:
+            raise RuntimeError(f"Could not extract code from {image} (tried crane and docker)")
+
+        # Read all extracted Python files
         files = {}
         for py_file in Path(tmp_dir).rglob("*.py"):
             rel_path = str(py_file.relative_to(tmp_dir))
+            if "site-packages" in rel_path or "/usr/lib/" in rel_path:
+                continue
             try:
-                files[rel_path] = py_file.read_text(encoding="utf-8", errors="replace")
+                content = py_file.read_text(encoding="utf-8", errors="replace")
+                if len(content) < 50000:
+                    files[rel_path] = content
             except Exception:
                 continue
-
-        # Also check for Dockerfile to understand entrypoint
-        dockerfile = Path(tmp_dir) / "Dockerfile"
-        if dockerfile.exists():
-            files["Dockerfile"] = dockerfile.read_text(errors="replace")
 
         return files
 
     finally:
-        # Cleanup
-        cleanup = await asyncio.create_subprocess_exec(
-            "docker", "rm", container_name,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await cleanup.wait()
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
@@ -384,7 +420,7 @@ async def handle_analyze_agent_image(args: Dict[str, Any]) -> List[TextContent]:
         config_dir = user_dir / "configs"
         config_dir.mkdir(parents=True, exist_ok=True)
 
-        task_code, config_data, compose_yaml = create_pipeline_eval_files(
+        task_code, config_data, compose_yaml, k8s_values = create_pipeline_eval_files(
             dataset_path=str(dataset_file),
             config_name=config_name,
             config_dir=str(config_dir),
@@ -398,6 +434,7 @@ async def handle_analyze_agent_image(args: Dict[str, Any]) -> List[TextContent]:
         (config_dir / f"{config_name}.py").write_text(task_code)
         (config_dir / f"{config_name}.json").write_text(json.dumps(config_data, indent=2))
         (config_dir / "compose.yaml").write_text(compose_yaml)
+        (config_dir / "values.yaml").write_text(k8s_values)
 
         result = {
             "success": True,

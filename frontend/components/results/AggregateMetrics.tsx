@@ -40,12 +40,28 @@ interface PipelineStage {
   criteria?: string[];
 }
 
+interface ModelUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  cost: number | null;
+}
+
+interface ModelStats {
+  cost?: number;
+  latencySeconds?: number;
+  total_tokens?: number;
+  tokensPerSecond?: number;
+  modelUsage?: Record<string, ModelUsage>;
+  [key: string]: unknown;
+}
+
 interface AggregateMetricsProps {
   models: string[];
   aggregate: Record<string, { overall: number; byCriterion: Record<string, number>; byStage?: Record<string, number> }>;
   criteria: string[];
   criteriaDescriptions?: Record<string, string>;
-  stats: Record<string, Record<string, unknown>>;
+  stats: Record<string, ModelStats>;
   sampleCount: number;
   pipeline?: PipelineStage[];
 }
@@ -135,14 +151,14 @@ export default function AggregateMetrics({
                 )}
               </div>
               {/* Per-model usage breakdown for pipeline evals */}
-              {pipeline && (stats[model] as Record<string, unknown>)?.modelUsage && (
+              {pipeline && stats[model]?.modelUsage && (
                 <div className="mt-3 border-t border-claude-border/50 pt-2">
                   <div className="text-xs text-claude-muted mb-1">Models used</div>
-                  {Object.entries((stats[model] as Record<string, unknown>).modelUsage as Record<string, Record<string, number>>).map(([modelName, usage]) => (
+                  {Object.entries(stats[model].modelUsage!).map(([modelName, usage]) => (
                     <div key={modelName} className="flex justify-between text-xs py-0.5">
                       <span className="text-claude-text truncate">{formatModel(modelName)}</span>
                       <span className="text-claude-muted ml-2 whitespace-nowrap">
-                        {usage.total_tokens?.toLocaleString()} tok {usage.cost != null && `· $${usage.cost.toFixed(4)}`}
+                        {usage.total_tokens?.toLocaleString()} tok {usage.cost != null && ` · $${usage.cost.toFixed(4)}`}
                       </span>
                     </div>
                   ))}

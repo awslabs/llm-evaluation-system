@@ -334,9 +334,9 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                     matches = _re.findall(r'"([^"]+/[^"]+)"', line)
                     models.extend(matches)
 
-        # Agent evals run sequentially to avoid overwhelming the node
+        # Agent evals cap concurrency (each sample = separate K8s pod + LLM calls)
         is_agent_eval = config_data.get("agent_image") if config_json_path.exists() else False
-        effective_concurrency = 1 if is_agent_eval else max_concurrency
+        effective_concurrency = min(max_concurrency, 4) if is_agent_eval else max_concurrency
 
         cmd: List[str] = [
             "inspect", "eval",

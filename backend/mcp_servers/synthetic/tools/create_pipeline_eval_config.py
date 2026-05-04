@@ -312,6 +312,10 @@ AGENT_K8S_VALUES_TEMPLATE = """services:
     image: {image}
     command: ["tail", "-f", "/dev/null"]
     runtimeClassName: gvisor
+    resources:
+      requests:
+        memory: "512Mi"
+        cpu: "250m"
 """
 
 

@@ -10,13 +10,21 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "delete"]
   - apiGroups: [""]
     resources: ["pods/exec"]
-    verbs: ["create"]
+    verbs: ["create", "get"]
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list", "watch"]
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Cilium network policies (created by inspect-k8s-sandbox Helm chart)
+  - apiGroups: ["cilium.io"]
+    resources: ["ciliumnetworkpolicies"]
+    verbs: ["create", "get", "list", "watch", "update", "delete"]
+  # Persistent volume claims (if sandbox uses volumes)
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "get", "list", "watch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

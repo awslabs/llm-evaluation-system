@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import boto3
-import httpx
 from botocore.config import Config
 from inspect_ai.log import read_eval_log_async
 from mcp.types import TextContent
@@ -335,10 +334,14 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                     matches = _re.findall(r'"([^"]+/[^"]+)"', line)
                     models.extend(matches)
 
+        # Agent evals run sequentially to avoid overwhelming the node
+        is_agent_eval = config_data.get("agent_image") if config_json_path.exists() else False
+        effective_concurrency = 1 if is_agent_eval else max_concurrency
+
         cmd: List[str] = [
             "inspect", "eval",
             relative_task,
-            "--max-connections", str(max_concurrency),
+            "--max-connections", str(effective_concurrency),
             "--no-log-images",
         ]
 
@@ -397,13 +400,12 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             except (asyncio.TimeoutError, Exception):
                 stderr_str = "(stderr unavailable)"
 
-        # Invalidate comparison cache so fresh results are shown
+        # Pre-compute comparison JSON so the viewer reads instantly
         try:
-            backend_url = os.environ.get("BACKEND_URL", "http://localhost:8080")
-            async with httpx.AsyncClient() as client:
-                await client.post(f"{backend_url}/api/compare/invalidate-cache/{user_id}", timeout=5.0)
-        except Exception:
-            pass
+            from backend.core.eval_results import precompute_eval_results
+            await precompute_eval_results(user_id)
+        except Exception as e:
+            logger.warning(f"Failed to pre-compute eval results: {e}")
 
         if process.returncode != 0:
             return [

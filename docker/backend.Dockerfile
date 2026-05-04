@@ -8,8 +8,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends tini \
 # Install Helm CLI (required by inspect-k8s-sandbox)
 COPY --from=alpine/helm:3.17.3 /usr/bin/helm /usr/local/bin/helm
 
-# Install crane (extract files from container images without Docker)
-COPY --from=gcr.io/go-containerregistry/crane:latest /ko-app/crane /usr/local/bin/crane
+# Install kubectl (for agent pod management and code extraction)
+COPY --from=bitnami/kubectl:latest /opt/bitnami/kubectl/bin/kubectl /usr/local/bin/kubectl
 
 # Install uv for reproducible Python builds
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv

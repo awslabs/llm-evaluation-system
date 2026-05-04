@@ -472,6 +472,47 @@ def list_datasets_from_db(user_id: str, search_term: str = "") -> list[dict[str,
     return results
 
 
+# ============== Eval Results (pre-computed JSON for fast reads) ==============
+
+
+def save_eval_groups(user_id: str, data: dict[str, Any]) -> None:
+    """Save pre-computed groups response for a user (overwrites previous)."""
+    if _s3_enabled():
+        _s3_save_json(user_id, "eval_results", "_groups.json", data)
+    else:
+        store_dir = _get_json_store_dir(user_id, "eval_results")
+        _save_json_file(store_dir / "_groups.json", data)
+
+
+def load_eval_groups(user_id: str) -> Optional[dict[str, Any]]:
+    """Load pre-computed groups response for a user."""
+    if _s3_enabled():
+        return _s3_load_json(user_id, "eval_results", "_groups.json")
+    store_dir = _get_json_store_dir(user_id, "eval_results")
+    return _load_json_file(store_dir / "_groups.json")
+
+
+def save_eval_detail(user_id: str, group_id: str, data: dict[str, Any]) -> None:
+    """Save pre-computed detail response for an eval group."""
+    safe_id = group_id.replace("/", "_").replace("\\", "_")
+    filename = f"detail_{safe_id}.json"
+    if _s3_enabled():
+        _s3_save_json(user_id, "eval_results", filename, data)
+    else:
+        store_dir = _get_json_store_dir(user_id, "eval_results")
+        _save_json_file(store_dir / filename, data)
+
+
+def load_eval_detail(user_id: str, group_id: str) -> Optional[dict[str, Any]]:
+    """Load pre-computed detail response for an eval group."""
+    safe_id = group_id.replace("/", "_").replace("\\", "_")
+    filename = f"detail_{safe_id}.json"
+    if _s3_enabled():
+        return _s3_load_json(user_id, "eval_results", filename)
+    store_dir = _get_json_store_dir(user_id, "eval_results")
+    return _load_json_file(store_dir / filename)
+
+
 # ============== Document Storage ==============
 
 def get_user_documents_dir(user_id: str) -> Path:

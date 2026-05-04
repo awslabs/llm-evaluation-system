@@ -195,14 +195,16 @@ async def extract_code_from_image(image: str) -> Dict[str, str]:
         except Exception:
             pass
         finally:
-            # Cleanup kubectl pod
-            cleanup = await asyncio.create_subprocess_exec(
-                "kubectl", "delete", "pod", pod_name, "-n",
-                os.environ.get("K8S_AGENT_NAMESPACE", os.environ.get("NAMESPACE", "eval-managed")),
-                "--ignore-not-found", "--grace-period=0",
-                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-            )
-            await cleanup.wait()
+            try:
+                cleanup = await asyncio.create_subprocess_exec(
+                    "kubectl", "delete", "pod", pod_name, "-n",
+                    os.environ.get("K8S_AGENT_NAMESPACE", os.environ.get("NAMESPACE", "eval-managed")),
+                    "--ignore-not-found", "--grace-period=0",
+                    stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                )
+                await cleanup.wait()
+            except Exception:
+                pass
 
         # Fall back to docker (works for local images)
         if not extracted:

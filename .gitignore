@@ -115,3 +115,4 @@ terraform.tfvars
 
 # Local tool installs (deploy.sh auto-installs terraform/kubectl/helm here)
 .tools/
+.claude/

@@ -12,6 +12,7 @@ function formatModel(model: string): string {
     groq: "Groq",
     mistral: "Mistral",
     azure: "Azure",
+    agent: "Agent",
   };
 
   const slashIdx = model.indexOf("/");
@@ -19,6 +20,9 @@ function formatModel(model: string): string {
 
   const prefix = model.slice(0, slashIdx);
   const rest = model.slice(slashIdx + 1);
+
+  // Agent evals: show image name directly
+  if (prefix === "agent") return `Agent: ${rest}`;
 
   // Extract clean model name: strip region prefixes (us.anthropic.) and version suffixes (-v1:0)
   let name = rest

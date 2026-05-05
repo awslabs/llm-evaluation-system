@@ -36,6 +36,7 @@ async def _read_log_headers(log_dir: str) -> list[dict]:
                 "file": info.name,
                 "run_id": log.eval.run_id if log.eval.run_id else None,
                 "task": log.eval.task,
+                "task_file": log.eval.task_file if hasattr(log.eval, "task_file") else None,
                 "model": log.eval.model,
                 "status": log.status,
                 "created": log.eval.created,
@@ -153,7 +154,7 @@ def _build_groups_from_headers(headers: list[dict]) -> dict:
 
     groups = []
     for run_id, run_logs in groups_map.items():
-        models = [l["model"] for l in run_logs]
+        models = list(dict.fromkeys(l["model"] for l in run_logs))
         scores_by_model = {}
         for l in run_logs:
             if l.get("scores"):
@@ -395,10 +396,41 @@ def _build_detail_from_logs(
 
     criteria_descriptions = _load_criteria_descriptions(user_dir, task_name, criteria_set)
 
+    # For agent evals, replace model name with agent image name
+    agent_image = None
+    configs_dir = user_dir / "configs"
+    if configs_dir.exists():
+        # Get config file name from task_file in log header
+        task_file = group_logs[0].get("task_file") if group_logs else None
+        if task_file:
+            config_json = configs_dir / Path(task_file).with_suffix(".json").name
+        else:
+            config_json = configs_dir / f"{config_name}.json"
+        if config_json.exists():
+            try:
+                data = json.loads(config_json.read_text())
+                if data.get("agent_image"):
+                    agent_image = data["agent_image"]
+            except Exception:
+                pass
+
+    display_models = models
+    if agent_image and len(models) == 1:
+        display_models = [f"agent/{agent_image}"]
+        # Remap aggregate, stats, and sample results
+        old_model = models[0]
+        if old_model in aggregate:
+            aggregate[f"agent/{agent_image}"] = aggregate.pop(old_model)
+        if old_model in stats:
+            stats[f"agent/{agent_image}"] = stats.pop(old_model)
+        for sample in samples_by_id.values():
+            if old_model in sample.get("results", {}):
+                sample["results"][f"agent/{agent_image}"] = sample["results"].pop(old_model)
+
     result = {
         "groupId": group_id,
         "task": task_name,
-        "models": models,
+        "models": display_models,
         "criteria": sorted(criteria_set),
         "criteriaDescriptions": criteria_descriptions,
         "aggregate": aggregate,
@@ -407,6 +439,8 @@ def _build_detail_from_logs(
     }
     if pipeline_stages:
         result["pipeline"] = pipeline_stages
+    if agent_image:
+        result["agentImage"] = agent_image
     return result
 
 
@@ -429,8 +463,9 @@ async def precompute_eval_results(user_id: str) -> None:
     for group in groups_response["groups"]:
         group_id = group["id"]
 
+        # Always re-compute details for running evals; cache completed ones
         existing = load_eval_detail(user_id, group_id)
-        if existing:
+        if existing and group.get("status") == "success":
             continue
 
         group_logs = [h for h in headers if (h.get("run_id") or h["file"]) == group_id]

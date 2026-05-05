@@ -73,6 +73,7 @@ spec_run_eval = importlib.util.spec_from_file_location(
 run_eval_module = importlib.util.module_from_spec(spec_run_eval)
 spec_run_eval.loader.exec_module(run_eval_module)
 handle_run_evaluation = run_eval_module.handle_run_evaluation
+handle_retry_evaluation = run_eval_module.handle_retry_evaluation
 cancel_user_evaluation = run_eval_module.cancel_user_evaluation
 get_running_eval_info = run_eval_module.get_running_eval_info
 
@@ -289,7 +290,7 @@ async def create_agent_eval_config(
     agentImage: str,
     user_id: str = None,
     agentCmd: list = None,
-    model: str = "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+    model: str = None,
     configName: str = "agent_evaluation",
     description: str = None,
     judge_models: list = None,
@@ -311,7 +312,7 @@ async def create_agent_eval_config(
         judge: Name of judge from list_judges
         agentImage: Container image URI (e.g., "123456.dkr.ecr.us-east-2.amazonaws.com/my-agent:latest")
         agentCmd: Command to run the agent (default: ["python", "agent.py"])
-        model: Model to route agent requests to (default: bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0)
+        model: Model to route agent LLM requests through (only needed if agent uses model="inspect")
         configName: Name for this evaluation (default: "agent_evaluation")
         description: Optional description of the evaluation
         judge_models: Optional list of model IDs to use as judges
@@ -340,7 +341,7 @@ async def analyze_agent_image(
     user_id: str = None,
     numSamples: int = 15,
     agentCmd: list = None,
-    model: str = "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0",
+    model: str = None,
     configName: str = "agent_evaluation",
     context: str = None,
 ) -> str:
@@ -510,6 +511,32 @@ async def run_evaluation(
         "maxConcurrency": maxConcurrency,
     }
     result = await handle_run_evaluation(args)
+    return result[0].text
+
+
+@mcp.tool()
+async def retry_evaluation(
+    user_id: str = None,
+    maxConcurrency: int = 16,
+) -> str:
+    """
+    Retry failed or incomplete evaluations.
+
+    Finds evaluations that failed, were cancelled, or were killed mid-run,
+    and retries only the incomplete samples. Use this when a previous
+    run_evaluation was interrupted or had errors.
+
+    Args:
+        maxConcurrency: Maximum concurrent model requests (default: 16)
+
+    Returns:
+        JSON with retry results
+    """
+    args = {
+        "user_id": user_id,
+        "maxConcurrency": maxConcurrency,
+    }
+    result = await handle_retry_evaluation(args)
     return result[0].text
 
 

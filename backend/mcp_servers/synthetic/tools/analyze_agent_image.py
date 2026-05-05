@@ -363,7 +363,7 @@ async def handle_analyze_agent_image(args: Dict[str, Any]) -> List[TextContent]:
         user_id = args.get("user_id")
         num_samples = args.get("numSamples", 15)
         config_name = args.get("configName", "agent_evaluation")
-        model = args.get("model", "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0")
+        model = args.get("model")
         agent_cmd = args.get("agentCmd")
         user_context = args.get("context")
 

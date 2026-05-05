@@ -273,7 +273,7 @@ async def handle_create_agent_eval_config(args: Dict[str, Any]) -> List[TextCont
         config_name = args.get("configName", "agent_evaluation")
         agent_image = args.get("agentImage")
         agent_cmd = args.get("agentCmd", ["python", "agent.py"])
-        model = args.get("model", "bedrock/us.anthropic.claude-sonnet-4-20250514-v1:0")
+        model = args.get("model")
         description = args.get("description")
         user_id = args.get("user_id")
 

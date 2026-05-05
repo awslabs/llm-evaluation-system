@@ -343,6 +343,8 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             relative_task,
             "--max-connections", str(effective_concurrency),
             "--no-log-images",
+            "--no-fail-on-error",
+            "--log-shared", "10",
         ]
 
         # Pass models to inspect eval (comma-separated for multiple)
@@ -399,6 +401,47 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 stderr_str = stderr_bytes.decode("utf-8") if stderr_bytes else ""
             except (asyncio.TimeoutError, Exception):
                 stderr_str = "(stderr unavailable)"
+
+        # Retry failed/incomplete samples from this run
+        try:
+            from inspect_ai._view.common import list_eval_logs_async
+            all_logs = await list_eval_logs_async(log_dir_str)
+            # Find the run_id from this eval (all logs in a multi-model run share it)
+            this_run_id = None
+            for log_info in all_logs:
+                log_check = await read_eval_log_async(log_info.name, header_only=True)
+                if log_check.eval.run_id:
+                    this_run_id = log_check.eval.run_id
+                    break
+
+            if this_run_id:
+                logs_to_retry = []
+                for log_info in all_logs:
+                    log_check = await read_eval_log_async(log_info.name, header_only=True)
+                    if log_check.eval.run_id == this_run_id and log_check.status in ("error", "cancelled", "started"):
+                        logs_to_retry.append(log_info.name)
+
+                if logs_to_retry:
+                    logger.info(f"Retrying {len(logs_to_retry)} failed logs (run_id={this_run_id}) for user {user_id}")
+                    retry_cmd = [
+                        "inspect", "eval-retry",
+                        *[str(l) for l in logs_to_retry],
+                        "--max-connections", str(effective_concurrency),
+                        "--no-log-images",
+                        "--no-fail-on-error",
+                    ]
+                    retry_process = await asyncio.create_subprocess_exec(
+                        *retry_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        env=env,
+                        cwd=str(user_dir),
+                        start_new_session=True,
+                    )
+                    await asyncio.wait_for(retry_process.wait(), timeout=3600)
+                    logger.info(f"Retry completed with exit code {retry_process.returncode}")
+        except Exception as e:
+            logger.warning(f"Retry attempt failed: {e}")
 
         # Pre-compute comparison JSON so the viewer reads instantly
         try:
@@ -483,3 +526,129 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 }),
             )
         ]
+
+
+async def handle_retry_evaluation(args: Dict[str, Any]) -> List[TextContent]:
+    """Retry incomplete/failed evaluations for a user.
+
+    Finds eval logs with status 'error', 'cancelled', or 'started' (killed mid-run)
+    and retries only the failed samples using inspect eval-retry.
+    """
+    try:
+        user_id = args.get("user_id")
+        max_concurrency = args.get("maxConcurrency", 16)
+
+        if not user_id:
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": "user_id is required"}))]
+
+        user_dir = get_user_dir(user_id)
+        log_dir_str = get_user_log_dir(user_id)
+
+        from inspect_ai._view.common import list_eval_logs_async
+
+        all_logs = await list_eval_logs_async(log_dir_str)
+        logs_to_retry = []
+
+        for log_info in all_logs:
+            try:
+                log_check = await read_eval_log_async(log_info.name, header_only=True)
+                if log_check.status in ("error", "cancelled", "started"):
+                    logs_to_retry.append(log_info.name)
+            except Exception:
+                continue
+
+        if not logs_to_retry:
+            return [TextContent(type="text", text=json.dumps({
+                "success": True,
+                "message": "No failed evaluations to retry. All evaluations completed successfully.",
+                "retried": 0,
+            }))]
+
+        # Set up environment
+        env = os.environ.copy()
+        env["INSPECT_LOG_DIR"] = log_dir_str
+        region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))
+        env["AWS_REGION"] = region
+        env["AWS_DEFAULT_REGION"] = region
+
+        retry_cmd = [
+            "inspect", "eval-retry",
+            *[str(l) for l in logs_to_retry],
+            "--max-connections", str(max_concurrency),
+            "--no-log-images",
+            "--no-fail-on-error",
+        ]
+
+        logger.info(f"Retrying {len(logs_to_retry)} failed evals for user {user_id}")
+
+        process = await asyncio.create_subprocess_exec(
+            *retry_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=str(user_dir),
+            start_new_session=True,
+        )
+
+        _running_evaluations[user_id] = {
+            "process": process,
+            "eval_id": "retry",
+            "config_name": "retry",
+        }
+
+        try:
+            await asyncio.wait_for(process.wait(), timeout=3600)
+        except asyncio.TimeoutError:
+            await _terminate_process_gracefully(process)
+            _running_evaluations.pop(user_id, None)
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": "Retry timed out after 1 hour.",
+                "retried": len(logs_to_retry),
+            }))]
+        finally:
+            _running_evaluations.pop(user_id, None)
+
+        # Pre-compute results
+        try:
+            from backend.core.eval_results import precompute_eval_results
+            await precompute_eval_results(user_id)
+        except Exception:
+            pass
+
+        # Read results
+        results_summary = []
+        updated_logs = await list_eval_logs_async(log_dir_str)
+        for log_info in updated_logs[:10]:
+            try:
+                log = await read_eval_log_async(log_info.name, header_only=True)
+                if log.results and log.results.scores:
+                    results_summary.append({
+                        "model": log.eval.model,
+                        "status": log.status,
+                        "scores": {n: m.value for s in log.results.scores for n, m in s.metrics.items()},
+                    })
+            except Exception:
+                continue
+
+        run_id = None
+        if updated_logs:
+            try:
+                latest = await read_eval_log_async(updated_logs[0].name, header_only=True)
+                run_id = latest.eval.run_id
+            except Exception:
+                pass
+
+        return [TextContent(type="text", text=json.dumps({
+            "success": True,
+            "message": f"Retried {len(logs_to_retry)} evaluations",
+            "retried": len(logs_to_retry),
+            "viewerUrl": f"/results?group={run_id}" if run_id else "/results",
+            "results": results_summary,
+        }, indent=2))]
+
+    except Exception as e:
+        return [TextContent(type="text", text=json.dumps({
+            "success": False,
+            "error": f"Retry failed: {str(e)}",
+        }))]

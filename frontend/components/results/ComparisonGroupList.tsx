@@ -58,19 +58,27 @@ export default function ComparisonGroupList() {
   const router = useRouter();
 
   useEffect(() => {
-    fetch("/api/compare/groups")
-      .then((res) => {
-        if (!res.ok) throw new Error(`Failed to load: ${res.status}`);
-        return res.json();
-      })
-      .then((data) => {
-        setGroups(data.groups || []);
-        setLoading(false);
-      })
-      .catch((err) => {
-        setError(err.message);
-        setLoading(false);
-      });
+    const loadGroups = () => {
+      fetch("/api/compare/groups")
+        .then((res) => {
+          if (!res.ok) throw new Error(`Failed to load: ${res.status}`);
+          return res.json();
+        })
+        .then((data) => {
+          setGroups(data.groups || []);
+          setLoading(false);
+        })
+        .catch((err) => {
+          setError(err.message);
+          setLoading(false);
+        });
+    };
+
+    loadGroups();
+
+    // Auto-refresh every 10s to show live progress for running evals
+    const interval = setInterval(loadGroups, 10000);
+    return () => clearInterval(interval);
   }, []);
 
   if (loading) {
@@ -140,12 +148,12 @@ export default function ComparisonGroupList() {
               </span>
             </div>
             <div className="mt-3 flex flex-wrap gap-3">
-              {group.models.map((model) => {
+              {[...new Set(group.models)].map((model, idx) => {
                 const modelScores = group.scores[model] || {};
                 const accuracy = modelScores.accuracy ?? modelScores.jury_score;
                 return (
                   <div
-                    key={model}
+                    key={`${model}-${idx}`}
                     className="flex items-center gap-2 rounded bg-claude-bg px-3 py-1.5"
                   >
                     <span className="text-sm text-claude-text">

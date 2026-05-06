@@ -3,7 +3,7 @@
 import { useState } from "react";
 import type { Sample, SelectedCell } from "./ComparisonView";
 
-function formatModel(model: string): string {
+function formatModelName(model: string): string {
   const providers: Record<string, string> = {
     bedrock: "Bedrock",
     openai: "OpenAI",
@@ -21,10 +21,8 @@ function formatModel(model: string): string {
   const prefix = model.slice(0, slashIdx);
   const rest = model.slice(slashIdx + 1);
 
-  // Agent evals: show image name directly
   if (prefix === "agent") return `Agent: ${rest}`;
 
-  // Extract clean model name: strip region prefixes (us.anthropic.) and version suffixes (-v1:0)
   let name = rest
     .replace(/^us\.\w+\./, "")
     .replace(/-v\d+:\d+$/, "")
@@ -34,9 +32,29 @@ function formatModel(model: string): string {
   return `${provider}: ${name}`;
 }
 
+function getPromptIndex(columnKey: string): number | null {
+  if (columnKey.startsWith("eval_")) {
+    const sep = columnKey.indexOf("/");
+    if (sep !== -1) {
+      const num = parseInt(columnKey.slice(5, sep), 10);
+      if (!isNaN(num)) return num - 1;
+    }
+  }
+  return null;
+}
+
+function getModelFromKey(columnKey: string): string {
+  if (columnKey.startsWith("eval_")) {
+    const sep = columnKey.indexOf("/");
+    if (sep !== -1) return columnKey.slice(sep + 1);
+  }
+  return columnKey;
+}
+
 interface ComparisonGridProps {
   models: string[];
   samples: Sample[];
+  prompts?: string[];
   selectedCell: SelectedCell | null;
   onCellClick: (sampleId: string, model: string) => void;
 }
@@ -44,6 +62,7 @@ interface ComparisonGridProps {
 export default function ComparisonGrid({
   models,
   samples,
+  prompts,
   selectedCell,
   onCellClick,
 }: ComparisonGridProps) {
@@ -71,14 +90,25 @@ export default function ComparisonGrid({
                 ({samples.length} samples)
               </span>
             </th>
-            {models.map((model) => (
-              <th
-                key={model}
-                className="border-b border-claude-border px-4 py-3 text-center text-xs font-medium uppercase tracking-wider text-claude-muted min-w-[100px]"
-              >
-                {formatModel(model)}
-              </th>
-            ))}
+            {models.map((model) => {
+              const promptIdx = getPromptIndex(model);
+              const modelName = getModelFromKey(model);
+              return (
+                <th
+                  key={model}
+                  className="border-b border-claude-border px-4 py-3 text-center min-w-[100px]"
+                >
+                  <div className="text-xs font-medium text-claude-text">
+                    {formatModelName(modelName)}
+                  </div>
+                  {promptIdx !== null && (
+                    <div className="mt-1 text-[10px] font-normal normal-case text-claude-accent">
+                      P{promptIdx + 1}
+                    </div>
+                  )}
+                </th>
+              );
+            })}
           </tr>
         </thead>
         <tbody>

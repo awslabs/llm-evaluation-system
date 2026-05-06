@@ -160,7 +160,7 @@ async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_
     if data:
         return data
 
-    # Fallback: pre-compute this group (handles old evals without pre-computed JSON)
+    # Fallback: compute this group on demand
     await precompute_eval_results(user_id)
     data = load_eval_detail(user_id, group_id)
     if data:
@@ -174,7 +174,7 @@ async def rebuild_results(user_id: str = Depends(_get_user_id)):
 
     Use this once to migrate existing evals, or to fix corrupted data.
     """
-    await precompute_eval_results(user_id)
+    await precompute_eval_results(user_id, force=True)
     data = load_eval_groups(user_id)
     count = len(data["groups"]) if data else 0
     return {"ok": True, "groups_rebuilt": count}

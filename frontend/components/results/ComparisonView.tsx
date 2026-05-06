@@ -56,6 +56,7 @@ interface ComparisonData {
   samples: Sample[];
   stats: Record<string, Record<string, unknown>>;
   pipeline?: PipelineStage[];
+  prompts?: string[];
 }
 
 interface SelectedCell {
@@ -116,10 +117,28 @@ export default function ComparisonView({ groupId }: { groupId: string }) {
           stats={data.stats}
           sampleCount={data.samples.length}
           pipeline={data.pipeline}
+          prompts={data.prompts}
         />
+        {data.prompts && data.prompts.length > 1 && (
+          <details className="mb-4 rounded-lg border border-claude-border bg-claude-surface group">
+            <summary className="px-3 py-2 cursor-pointer text-xs font-medium uppercase tracking-wider text-claude-muted select-none list-none flex items-center gap-1">
+              <span className="group-open:rotate-90 transition-transform text-[10px]">▶</span>
+              Prompt Templates ({data.prompts.length}) — click to expand
+            </summary>
+            <div className="px-3 pb-3 space-y-2 border-t border-claude-border/50 pt-2">
+              {data.prompts.map((prompt, i) => (
+                <div key={i} className="flex items-start gap-2">
+                  <span className="font-mono text-claude-accent flex-shrink-0 text-xs mt-0.5">P{i + 1}</span>
+                  <span className="text-claude-text font-mono text-[11px] whitespace-pre-wrap break-all">{prompt}</span>
+                </div>
+              ))}
+            </div>
+          </details>
+        )}
         <ComparisonGrid
           models={data.models}
           samples={data.samples}
+          prompts={data.prompts}
           selectedCell={selectedCell}
           onCellClick={(sampleId, model) =>
             setSelectedCell(

@@ -74,6 +74,7 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
             log = await read_eval_log_async(f, header_only=False)
             entry: dict = {
                 "file": f,
+                "task": log.eval.task,
                 "model": log.eval.model,
                 "status": log.status,
                 "samples": [],
@@ -154,14 +155,20 @@ def _build_groups_from_headers(headers: list[dict]) -> dict:
 
     groups = []
     for run_id, run_logs in groups_map.items():
+        distinct_tasks = list(dict.fromkeys(l.get("task", "") for l in run_logs))
+        is_prompt_comparison = len(distinct_tasks) > 1
         models = list(dict.fromkeys(l["model"] for l in run_logs))
-        scores_by_model = {}
+
+        scores_by_key = {}
         for l in run_logs:
             if l.get("scores"):
                 metrics = {}
                 for s in l["scores"]:
                     metrics.update(s["metrics"])
-                scores_by_model[l["model"]] = metrics
+                if is_prompt_comparison:
+                    scores_by_key[f"{l.get('task', '')}/{l['model']}"] = metrics
+                else:
+                    scores_by_key[l["model"]] = metrics
 
         task_name = run_logs[0].get("task", "unknown")
         config_name = task_name.replace("eval_task", "").strip("_") or task_name
@@ -170,7 +177,7 @@ def _build_groups_from_headers(headers: list[dict]) -> dict:
         if status == "error" and run_logs[0].get("dataset_samples", 0) > 0:
             status = "completed"
 
-        groups.append({
+        group = {
             "id": run_id,
             "task": task_name,
             "configName": config_name,
@@ -178,8 +185,13 @@ def _build_groups_from_headers(headers: list[dict]) -> dict:
             "models": models,
             "sampleCount": run_logs[0].get("dataset_samples", 0),
             "status": status,
-            "scores": scores_by_model,
-        })
+            "scores": scores_by_key,
+        }
+        if is_prompt_comparison:
+            group["promptComparison"] = True
+            group["promptCount"] = len(distinct_tasks)
+
+        groups.append(group)
 
     groups.sort(key=lambda g: g["created"], reverse=True)
     return {"groups": groups}
@@ -191,7 +203,21 @@ def _build_detail_from_logs(
     full_logs: list[dict],
     user_dir: Path,
 ) -> dict:
-    models = [l["model"] for l in full_logs]
+    # Detect prompt comparison: multiple distinct task names in one group
+    distinct_tasks = list(dict.fromkeys(l.get("task", "") for l in full_logs))
+    is_prompt_comparison = len(distinct_tasks) > 1
+
+    if is_prompt_comparison:
+        models = list(dict.fromkeys(f"{l.get('task', '')}/{l['model']}" for l in full_logs))
+        # Sort by model first, then prompt number — same model side by side: P1 P2 P1 P2
+        def _col_sort_key(k: str) -> tuple:
+            task_part, model_part = k.split("/", 1)
+            # Extract number from eval_N
+            num = int(task_part.replace("eval_", "")) if task_part.startswith("eval_") else 0
+            return (model_part, num)
+        models.sort(key=_col_sort_key)
+    else:
+        models = [l["model"] for l in full_logs]
 
     samples_by_id: dict[str, dict] = {}
     criteria_set: set[str] = set()
@@ -199,7 +225,10 @@ def _build_detail_from_logs(
     is_pipeline = False
 
     for log in full_logs:
-        model = log["model"]
+        if is_prompt_comparison:
+            column_key = f"{log.get('task', '')}/{log['model']}"
+        else:
+            column_key = log["model"]
         for sample in log.get("samples", []):
             sid = sample["id"]
             if sid not in samples_by_id:
@@ -255,7 +284,7 @@ def _build_detail_from_logs(
                         for cr in criteria_results:
                             criteria_set.add(cr["name"])
 
-            samples_by_id[sid]["results"][model] = score_data
+            samples_by_id[sid]["results"][column_key] = score_data
 
     if is_pipeline:
         first_sample = next(iter(samples_by_id.values()), None)
@@ -325,7 +354,11 @@ def _build_detail_from_logs(
 
     stats: dict[str, dict] = {}
     for log_header in group_logs:
-        model = log_header["model"]
+        raw_model = log_header["model"]
+        if is_prompt_comparison:
+            stat_key = f"{log_header.get('task', '')}/{raw_model}"
+        else:
+            stat_key = raw_model
         started = log_header.get("started_at")
         completed = log_header.get("completed_at")
 
@@ -341,14 +374,14 @@ def _build_detail_from_logs(
         sample_count = log_header.get("dataset_samples", 1) or 1
         avg_latency = latency_seconds / sample_count if latency_seconds else None
 
-        stats[model] = {
+        stats[stat_key] = {
             "startedAt": started,
             "completedAt": completed,
             "totalSeconds": latency_seconds,
             "latencySeconds": round(avg_latency, 2) if avg_latency else None,
         }
 
-        full_log = next((fl for fl in full_logs if fl.get("model") == model), None)
+        full_log = next((fl for fl in full_logs if fl.get("model") == raw_model and fl.get("task") == log_header.get("task")), None)
         agent_usage = full_log.get("agent_model_usage", {}) if full_log else {}
 
         if agent_usage:
@@ -373,11 +406,11 @@ def _build_detail_from_logs(
                     "total_tokens": tot,
                     "cost": model_cost,
                 }
-            stats[model]["input_tokens"] = agent_input
-            stats[model]["output_tokens"] = agent_output
-            stats[model]["total_tokens"] = agent_tokens
-            stats[model]["cost"] = agent_cost
-            stats[model]["modelUsage"] = per_model
+            stats[stat_key]["input_tokens"] = agent_input
+            stats[stat_key]["output_tokens"] = agent_output
+            stats[stat_key]["total_tokens"] = agent_tokens
+            stats[stat_key]["cost"] = agent_cost
+            stats[stat_key]["modelUsage"] = per_model
         elif log_header.get("model_usage"):
             total_input = 0
             total_output = 0
@@ -386,21 +419,21 @@ def _build_detail_from_logs(
                 total_input += usage.get("input_tokens", 0)
                 total_output += usage.get("output_tokens", 0)
                 total_tokens += usage.get("total_tokens", 0)
-            stats[model]["input_tokens"] = total_input
-            stats[model]["output_tokens"] = total_output
-            stats[model]["total_tokens"] = total_tokens
-            stats[model]["cost"] = calculate_cost(model, total_input, total_output)
+            stats[stat_key]["input_tokens"] = total_input
+            stats[stat_key]["output_tokens"] = total_output
+            stats[stat_key]["total_tokens"] = total_tokens
+            stats[stat_key]["cost"] = calculate_cost(raw_model, total_input, total_output)
 
             if latency_seconds and latency_seconds > 0:
-                stats[model]["tokensPerSecond"] = round(agent_output / latency_seconds, 1)
+                stats[stat_key]["tokensPerSecond"] = round(total_output / latency_seconds, 1)
 
     criteria_descriptions = _load_criteria_descriptions(user_dir, task_name, criteria_set)
 
     # For agent evals, replace model name with agent image name
     agent_image = None
+    config_data = None
     configs_dir = user_dir / "configs"
     if configs_dir.exists():
-        # Get config file name from task_file in log header
         task_file = group_logs[0].get("task_file") if group_logs else None
         if task_file:
             config_json = configs_dir / Path(task_file).with_suffix(".json").name
@@ -408,16 +441,15 @@ def _build_detail_from_logs(
             config_json = configs_dir / f"{config_name}.json"
         if config_json.exists():
             try:
-                data = json.loads(config_json.read_text())
-                if data.get("agent_image"):
-                    agent_image = data["agent_image"]
+                config_data = json.loads(config_json.read_text())
+                if config_data.get("agent_image"):
+                    agent_image = config_data["agent_image"]
             except Exception:
                 pass
 
     display_models = models
     if agent_image and len(models) == 1:
         display_models = [f"agent/{agent_image}"]
-        # Remap aggregate, stats, and sample results
         old_model = models[0]
         if old_model in aggregate:
             aggregate[f"agent/{agent_image}"] = aggregate.pop(old_model)
@@ -441,10 +473,12 @@ def _build_detail_from_logs(
         result["pipeline"] = pipeline_stages
     if agent_image:
         result["agentImage"] = agent_image
+    if is_prompt_comparison and config_data and config_data.get("prompts"):
+        result["prompts"] = config_data["prompts"]
     return result
 
 
-async def precompute_eval_results(user_id: str) -> None:
+async def precompute_eval_results(user_id: str, force: bool = False) -> None:
     """Parse all .eval files for a user and save pre-computed JSON to S3/disk.
 
     Called after an eval completes and by the migration script.
@@ -463,10 +497,10 @@ async def precompute_eval_results(user_id: str) -> None:
     for group in groups_response["groups"]:
         group_id = group["id"]
 
-        # Always re-compute details for running evals; cache completed ones
-        existing = load_eval_detail(user_id, group_id)
-        if existing and group.get("status") == "success":
-            continue
+        if not force:
+            existing = load_eval_detail(user_id, group_id)
+            if existing and group.get("status") == "success":
+                continue
 
         group_logs = [h for h in headers if (h.get("run_id") or h["file"]) == group_id]
         if not group_logs:

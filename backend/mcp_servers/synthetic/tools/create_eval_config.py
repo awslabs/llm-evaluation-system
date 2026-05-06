@@ -43,9 +43,10 @@ def build_config_json(
     providers: List[str],
     judge_config: JudgeConfig,
     description: Optional[str] = None,
+    prompts: Optional[List[str]] = None,
 ) -> dict:
     """Build the JSON config that the task file will load."""
-    return {
+    config = {
         "dataset_path": dataset_path,
         "providers": providers,
         "judge_models": dict(judge_config.judges),
@@ -53,9 +54,12 @@ def build_config_json(
         "system_prompt": build_judge_system_prompt(judge_config.criteria),
         "description": description or "",
     }
+    if prompts and len(prompts) > 1:
+        config["prompts"] = prompts
+    return config
 
 
-TASK_FILE_TEMPLATE = '''"""Inspect AI evaluation task: {config_name}
+TASK_FILE_HEADER = '''"""Inspect AI evaluation task: {config_name}
 
 Auto-generated. Uses multi-judge jury scoring with tool-forced structured output.
 """
@@ -67,7 +71,7 @@ from inspect_ai import Task, task
 from inspect_ai.dataset import json_dataset, FieldSpec
 from inspect_ai.model import ChatMessageUser, ChatMessageSystem, get_model
 from inspect_ai.scorer import Score, accuracy, scorer, stderr
-from inspect_ai.solver import generate
+from inspect_ai.solver import generate, prompt_template
 
 from inspect_ai.tool._tool_info import ToolInfo
 from inspect_ai.tool._tool_params import ToolParams
@@ -110,7 +114,6 @@ def _extract_scores(output, criteria_names):
         text = output.completion[:200] if output and output.completion else "(empty)"
         return None, None, f"No tool call. Response: {{text}}"
 
-    # Merge all submit_scores tool calls (some models split across multiple calls)
     args = {{}}
     for tc in output.message.tool_calls:
         if tc.function == "submit_scores":
@@ -169,7 +172,6 @@ def jury_scorer():
                 errors.append(f"  {{label}}: {{str(e)[:200]}}")
                 details.append(f"  {{label}}: ERROR ({{str(e)[:80]}})")
 
-        # Per-criterion majority vote
         results = []
         for n in criteria_names:
             v = votes[n]
@@ -179,7 +181,6 @@ def jury_scorer():
                 vf = sum(v)
                 results.append({{"name": n, "votes_for": vf, "total": len(v), "passed": vf > len(v) / 2}})
 
-        # Overall pass if >50% criteria pass
         n_passed = sum(1 for r in results if r["passed"])
         n_total = len(criteria_names)
         jury_score = n_passed / max(n_total, 1)
@@ -203,12 +204,24 @@ def jury_scorer():
 
     return score
 
+'''
 
+SINGLE_TASK_TEMPLATE = '''
 @task
 def eval_task():
     return Task(
         dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
         solver=[generate()],
+        scorer=jury_scorer(),
+    )
+'''
+
+PROMPT_TASK_TEMPLATE = '''
+@task
+def eval_{index}():
+    return Task(
+        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
+        solver=[prompt_template({prompt_repr}), generate()],
         scorer=jury_scorer(),
     )
 '''
@@ -221,14 +234,30 @@ def create_inspect_task_file(
     config_dir: str,
     judge_config: JudgeConfig,
     description: Optional[str] = None,
+    prompts: Optional[List[str]] = None,
 ) -> tuple[str, dict]:
     """Create task file code and config JSON.
 
     Returns:
         (task_code, config_dict) — caller writes both to disk.
     """
-    config_data = build_config_json(dataset_path, providers, judge_config, description)
-    task_code = TASK_FILE_TEMPLATE.format(config_name=config_name)
+    config_data = build_config_json(
+        dataset_path, providers, judge_config, description, prompts
+    )
+    header = TASK_FILE_HEADER.format(config_name=config_name)
+
+    if prompts and len(prompts) > 1:
+        tasks = ""
+        for i, prompt in enumerate(prompts):
+            # prompt_template() uses {prompt} as the placeholder for input text
+            normalized = prompt.replace("{question}", "{prompt}")
+            tasks += PROMPT_TASK_TEMPLATE.format(
+                index=i + 1, prompt_repr=repr(normalized)
+            )
+        task_code = header + tasks
+    else:
+        task_code = header + SINGLE_TASK_TEMPLATE
+
     return task_code, config_data
 
 
@@ -288,6 +317,14 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
         with open(dataset_file, "w") as f:
             json.dump(inspect_samples, f, indent=2)
 
+        # Normalize prompts
+        prompts_arg = args.get("prompts")
+        prompts: Optional[List[str]] = None
+        if isinstance(prompts_arg, list) and len(prompts_arg) > 1:
+            prompts = prompts_arg
+        elif isinstance(prompts_arg, str) and prompts_arg != "{question}":
+            prompts = [prompts_arg]
+
         # Generate task file + config JSON
         config_dir = user_dir / "configs"
         config_dir.mkdir(parents=True, exist_ok=True)
@@ -299,6 +336,7 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             config_dir=str(config_dir),
             description=description,
             judge_config=judge_config,
+            prompts=prompts,
         )
 
         # Write both files
@@ -315,6 +353,7 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
                 "testCases": len(tests),
                 "judges": list(judge_config.judges.keys()),
                 "criteria": [c["name"] for c in criteria],
+                "prompts": len(prompts) if prompts else 1,
                 "description": description or f"Evaluation: {config_name}",
             },
             "nextStep": f"Run evaluation: run_evaluation(configName='{config_name}')",

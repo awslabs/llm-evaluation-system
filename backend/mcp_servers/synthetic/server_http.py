@@ -259,7 +259,7 @@ async def create_eval_config(
             - Google: "google/gemini-2.5-pro" (requires GOOGLE_API_KEY)
             Use list_available_models() to discover available providers and models.
         judge: Name of judge from list_judges (REQUIRED - criteria adapted to QA pairs)
-        prompts: Single prompt string OR list of prompts (default: "{{question}}")
+        prompts: Single prompt string OR list of prompts for comparison. Use {question} or {prompt} as placeholder for the input text. (default: "{{question}}")
         configName: Name for this evaluation (default: "evaluation")
         description: Optional description of the evaluation
         judge_models: Optional list of Bedrock model IDs to use as judges

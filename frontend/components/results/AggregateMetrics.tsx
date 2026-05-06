@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 
-function formatModel(model: string): string {
+function formatModelName(model: string): string {
   const providers: Record<string, string> = {
     bedrock: "Bedrock",
     openai: "OpenAI",
@@ -19,6 +19,8 @@ function formatModel(model: string): string {
   const prefix = model.slice(0, slashIdx);
   const rest = model.slice(slashIdx + 1);
 
+  if (prefix === "agent") return `Agent: ${rest}`;
+
   let name = rest
     .replace(/^us\.\w+\./, "")
     .replace(/-v\d+:\d+$/, "")
@@ -26,6 +28,25 @@ function formatModel(model: string): string {
 
   const provider = providers[prefix] || prefix;
   return `${provider}: ${name}`;
+}
+
+function getPromptIndex(columnKey: string): number | null {
+  if (columnKey.startsWith("eval_")) {
+    const sep = columnKey.indexOf("/");
+    if (sep !== -1) {
+      const num = parseInt(columnKey.slice(5, sep), 10);
+      if (!isNaN(num)) return num - 1;
+    }
+  }
+  return null;
+}
+
+function getModelFromKey(columnKey: string): string {
+  if (columnKey.startsWith("eval_")) {
+    const sep = columnKey.indexOf("/");
+    if (sep !== -1) return columnKey.slice(sep + 1);
+  }
+  return columnKey;
 }
 
 function formatCriterion(name: string): string {
@@ -64,6 +85,7 @@ interface AggregateMetricsProps {
   stats: Record<string, ModelStats>;
   sampleCount: number;
   pipeline?: PipelineStage[];
+  prompts?: string[];
 }
 
 const MODEL_COLORS = [
@@ -81,6 +103,7 @@ export default function AggregateMetrics({
   stats,
   sampleCount,
   pipeline,
+  prompts,
 }: AggregateMetricsProps) {
   const [expandedCriteria, setExpandedCriteria] = useState<Set<string>>(new Set());
 
@@ -107,8 +130,11 @@ export default function AggregateMetrics({
               <div className="flex items-center gap-2">
                 <div className={`h-3 w-3 rounded-full ${color.bar}`} />
                 <span className="text-sm font-medium text-claude-text truncate">
-                  {pipeline ? "Agent Evaluation" : formatModel(model)}
+                  {pipeline ? "Agent Evaluation" : formatModelName(getModelFromKey(model))}
                 </span>
+                {prompts && getPromptIndex(model) !== null && (
+                  <span className="text-[10px] text-claude-accent flex-shrink-0">P{getPromptIndex(model)! + 1}</span>
+                )}
               </div>
               <div className="mt-2 flex items-end gap-2">
                 <span className={`text-3xl font-bold ${overall >= 0.7 ? "text-green-400" : overall >= 0.4 ? "text-yellow-400" : "text-red-400"}`}>
@@ -156,7 +182,7 @@ export default function AggregateMetrics({
                   <div className="text-xs text-claude-muted mb-1">Models used</div>
                   {Object.entries(stats[model].modelUsage!).map(([modelName, usage]) => (
                     <div key={modelName} className="flex justify-between text-xs py-0.5">
-                      <span className="text-claude-text truncate">{formatModel(modelName)}</span>
+                      <span className="text-claude-text truncate">{formatModelName(modelName)}</span>
                       <span className="text-claude-muted ml-2 whitespace-nowrap">
                         {usage.total_tokens?.toLocaleString()} tok {usage.cost != null && ` · $${usage.cost.toFixed(4)}`}
                       </span>
@@ -254,7 +280,10 @@ export default function AggregateMetrics({
                 {models.map((model, i) => (
                   <th key={model} className="pb-2 text-right text-xs font-medium uppercase tracking-wider text-claude-muted">
                     <span className="flex items-center justify-end gap-1.5">
-                      <span className="truncate">{formatModel(model)}</span>
+                      <span className="truncate">{formatModelName(getModelFromKey(model))}</span>
+                      {getPromptIndex(model) !== null && (
+                        <span className="text-claude-accent">P{getPromptIndex(model)! + 1}</span>
+                      )}
                       <span className={`inline-block h-2 w-2 rounded-full ${MODEL_COLORS[i % MODEL_COLORS.length].bar}`} />
                     </span>
                   </th>

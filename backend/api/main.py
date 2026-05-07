@@ -635,7 +635,7 @@ async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_i
     # Read eval info BEFORE cancelling (read-only, doesn't kill subprocess)
     eval_info = {}
     try:
-        mcp_url = os.environ["SYNTHETIC_EVAL_MCP_URL"]
+        mcp_url = os.environ["EVAL_MCP_URL"]
         base_url = mcp_url.replace("/mcp", "")
         async with httpx.AsyncClient() as client:
             resp = await client.get(f"{base_url}/eval-info/{user_id}", timeout=2.0)
@@ -652,11 +652,11 @@ async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_i
 
     # Kill the evaluation subprocess and reconnect MCP
     try:
-        mcp_url = os.environ["SYNTHETIC_EVAL_MCP_URL"]
+        mcp_url = os.environ["EVAL_MCP_URL"]
         base_url = mcp_url.replace("/mcp", "")
         async with httpx.AsyncClient() as client:
             await client.post(f"{base_url}/cancel/{user_id}", timeout=5.0)
-        await mcp_client.reconnect_server("synthetic-eval")
+        await mcp_client.reconnect_server("eval")
     except Exception as e:
         logger.warning(f"[CANCEL] Failed to cancel evaluation: {e}")
 

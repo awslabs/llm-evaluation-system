@@ -37,8 +37,8 @@ spec:
         fsGroup: 1000
       terminationGracePeriodSeconds: 30
       initContainers:
-        # Native sidecar containers (K8s 1.28+) - start before main container
-        - name: synthetic-eval-mcp
+        # Unified MCP sidecar (K8s 1.28+ native sidecar)
+        - name: eval-mcp
           restartPolicy: Always
           image: {{ include "eval.backendImage" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -48,12 +48,14 @@ spec:
             capabilities:
               drop:
                 - ALL
-          command: ["/usr/bin/tini", "--", "python", "-m", "backend.mcp_servers.synthetic.server_http"]
+          command: ["/usr/bin/tini", "--", "python", "-m", "backend.mcp_servers.server"]
           ports:
             - containerPort: 8002
           env:
             - name: HOST
               value: "0.0.0.0"
+            - name: EVAL_MCP_TRANSPORT
+              value: "http"
             - name: USER_STORAGE_BASE
               value: "/data/users"
             - name: INSPECT_SANDBOX_TYPE
@@ -70,59 +72,7 @@ spec:
             - name: ephemeral-data
               mountPath: /data
           resources:
-            {{- toYaml .Values.mcp.syntheticEval.resources | nindent 12 }}
-        - name: providers-mcp
-          restartPolicy: Always
-          image: {{ include "eval.backendImage" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
-            capabilities:
-              drop:
-                - ALL
-          command: ["/usr/bin/tini", "--", "python", "-m", "backend.mcp_servers.providers.server_http"]
-          ports:
-            - containerPort: 8004
-          env:
-            - name: HOST
-              value: "0.0.0.0"
-          envFrom:
-            - configMapRef:
-                name: app-config
-            - secretRef:
-                name: llm-provider-keys
-                optional: true
-          resources:
-            {{- toYaml .Values.mcp.providers.resources | nindent 12 }}
-        - name: dataset-mcp
-          restartPolicy: Always
-          image: {{ include "eval.backendImage" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
-            capabilities:
-              drop:
-                - ALL
-          command: ["/usr/bin/tini", "--", "python", "-m", "backend.mcp_servers.dataset.server_http"]
-          ports:
-            - containerPort: 8005
-          env:
-            - name: HOST
-              value: "0.0.0.0"
-            - name: USER_STORAGE_BASE
-              value: "/data/users"
-          envFrom:
-            - configMapRef:
-                name: app-config
-            - secretRef:
-                name: db-credentials
-          volumeMounts:
-            - name: ephemeral-data
-              mountPath: /data
-          resources:
-            {{- toYaml .Values.mcp.dataset.resources | nindent 12 }}
+            {{- toYaml .Values.mcp.resources | nindent 12 }}
       containers:
         - name: backend
           image: {{ include "eval.backendImage" . }}
@@ -147,12 +97,8 @@ spec:
           env:
             - name: USER_STORAGE_BASE
               value: "/data/users"
-            - name: SYNTHETIC_EVAL_MCP_URL
+            - name: EVAL_MCP_URL
               value: "http://localhost:8002/mcp"
-            - name: PROVIDERS_MCP_URL
-              value: "http://localhost:8004/mcp"
-            - name: DATASET_MCP_URL
-              value: "http://localhost:8005/mcp"
           resources:
             {{- toYaml .Values.backend.resources | nindent 12 }}
           volumeMounts:

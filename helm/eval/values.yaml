@@ -55,27 +55,10 @@ frontend:
 
 # MCP Sidecar Resources
 mcp:
-  syntheticEval:
-    resources:
-      requests:
-        memory: "1Gi"
-        cpu: "100m"
-      limits:
-        memory: "2Gi"
-        cpu: "500m"
-  providers:
-    resources:
-      requests:
-        memory: "128Mi"
-        cpu: "50m"
-      limits:
-        memory: "256Mi"
-        cpu: "250m"
-  dataset:
-    resources:
-      requests:
-        memory: "128Mi"
-        cpu: "50m"
-      limits:
-        memory: "256Mi"
-        cpu: "250m"
+  resources:
+    requests:
+      memory: "1Gi"
+      cpu: "150m"
+    limits:
+      memory: "2Gi"
+      cpu: "750m"

@@ -66,21 +66,11 @@ class MultiMCPClient:
         env["INSPECT_LOG_DIR"] = cwd
         env["AWS_REGION"] = region
 
-        # Server configurations - ALL HTTP (no stdio!)
-        # URLs configured via environment variables (required)
-        # Note: viewer is handled by backend directly, not as MCP server
+        # Single unified MCP server
         self._server_configs = {
-            "synthetic-eval": {
+            "eval": {
                 "type": "http",
-                "url": os.environ["SYNTHETIC_EVAL_MCP_URL"],
-            },
-            "providers": {
-                "type": "http",
-                "url": os.environ["PROVIDERS_MCP_URL"],
-            },
-            "dataset": {
-                "type": "http",
-                "url": os.environ["DATASET_MCP_URL"],
+                "url": os.environ["EVAL_MCP_URL"],
             },
         }
 
@@ -305,7 +295,7 @@ class MultiMCPClient:
                 raise RuntimeError(f"Tool '{tool_name}' not found on any server")
 
         # Auto-inject user_id for tools that need it
-        if server_name in ("synthetic-eval", "dataset") and self.user_id:
+        if self.user_id:
             arguments = arguments or {}
             arguments["user_id"] = self.user_id
 

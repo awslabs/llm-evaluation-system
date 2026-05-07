@@ -25,11 +25,9 @@ services:
       dockerfile: local/Dockerfile.python
     command: >
       sh -c "
-        echo 'Waiting for MCP servers...' &&
+        echo 'Waiting for MCP server...' &&
         while ! python3 -c \"import socket; socket.create_connection(('127.0.0.1',8002),1)\" 2>/dev/null; do sleep 1; done &&
-        while ! python3 -c \"import socket; socket.create_connection(('127.0.0.1',8004),1)\" 2>/dev/null; do sleep 1; done &&
-        while ! python3 -c \"import socket; socket.create_connection(('127.0.0.1',8005),1)\" 2>/dev/null; do sleep 1; done &&
-        echo 'MCP servers ready, starting backend...' &&
+        echo 'MCP server ready, starting backend...' &&
         uvicorn local.entrypoint:app --host 0.0.0.0 --port 8080 --log-level info
           --reload --reload-dir /app/backend/api --reload-dir /app/backend/core --reload-dir /app/local
       "
@@ -50,9 +48,7 @@ services:
       POSTGRES_DB: evaldb
       POSTGRES_USER: node
       POSTGRES_PASSWORD: localdev
-      SYNTHETIC_EVAL_MCP_URL: http://127.0.0.1:8002/mcp
-      PROVIDERS_MCP_URL: http://127.0.0.1:8004/mcp
-      DATASET_MCP_URL: http://127.0.0.1:8005/mcp
+      EVAL_MCP_URL: http://127.0.0.1:8002/mcp
       USER_STORAGE_BASE: /data/users
       APP_URL: http://127.0.0.1:4001
       # External provider keys (optional — set in .env.keys)
@@ -68,13 +64,13 @@ services:
       timeout: 5s
       retries: 20
 
-  # MCP servers share backend's network (like K8s pod sidecars)
-  synthetic-mcp:
+  # Single unified MCP server (all eval tools)
+  eval-mcp:
     build:
       context: ..
       dockerfile: local/Dockerfile.python
     network_mode: "service:backend"
-    command: watchfiles "python -m backend.mcp_servers.synthetic.server_http" /app/backend/mcp_servers/synthetic
+    command: watchfiles "python -m backend.mcp_servers.server" /app/backend/mcp_servers
     volumes:
       - ../backend:/app/backend
       - userdata:/data/users
@@ -82,6 +78,7 @@ services:
     environment:
       PYTHONPATH: /app
       WATCHFILES_FORCE_POLLING: "true"
+      EVAL_MCP_TRANSPORT: http
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
@@ -91,45 +88,6 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-
-  providers-mcp:
-    build:
-      context: ..
-      dockerfile: local/Dockerfile.python
-    network_mode: "service:backend"
-    command: watchfiles "python -m backend.mcp_servers.providers.server_http" /app/backend/mcp_servers/providers
-    volumes:
-      - ../backend:/app/backend
-    environment:
-      PYTHONPATH: /app
-      WATCHFILES_FORCE_POLLING: "true"
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
-      AWS_REGION: ${AWS_REGION}
-      AWS_DEFAULT_REGION: ${AWS_REGION}
-
-  dataset-mcp:
-    build:
-      context: ..
-      dockerfile: local/Dockerfile.python
-    network_mode: "service:backend"
-    command: watchfiles "python -m backend.mcp_servers.dataset.server_http" /app/backend/mcp_servers/dataset
-    volumes:
-      - ../backend:/app/backend
-      - userdata:/data/users
-    environment:
-      PYTHONPATH: /app
-      WATCHFILES_FORCE_POLLING: "true"
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
-      AWS_REGION: ${AWS_REGION}
-      AWS_DEFAULT_REGION: ${AWS_REGION}
-      USER_STORAGE_BASE: /data/users
 
   frontend:
     build:

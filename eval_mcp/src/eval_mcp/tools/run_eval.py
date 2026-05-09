@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import signal
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -340,7 +339,7 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         effective_concurrency = min(max_concurrency, 4) if is_agent_eval else max_concurrency
 
         cmd: List[str] = [
-            sys.executable, "-m", "inspect_ai", "eval",
+            "inspect", "eval",
             relative_task,
             "--max-connections", str(effective_concurrency),
             "--no-log-images",
@@ -425,7 +424,7 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 if logs_to_retry:
                     logger.info(f"Retrying {len(logs_to_retry)} failed logs (run_id={this_run_id}) for user {user_id}")
                     retry_cmd = [
-                        sys.executable, "-m", "inspect_ai", "eval-retry",
+                        "inspect", "eval-retry",
                         *[str(l) for l in logs_to_retry],
                         "--max-connections", str(effective_concurrency),
                         "--no-log-images",
@@ -573,7 +572,7 @@ async def handle_retry_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         env["AWS_DEFAULT_REGION"] = region
 
         retry_cmd = [
-            sys.executable, "-m", "inspect_ai", "eval-retry",
+            "inspect", "eval-retry",
             *[str(l) for l in logs_to_retry],
             "--max-connections", str(max_concurrency),
             "--no-log-images",

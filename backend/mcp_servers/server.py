@@ -11,6 +11,7 @@ Supports both stdio (local Claude Code) and HTTP (deployed) transports.
 import json
 import os
 import sys
+from pathlib import Path
 
 from mcp.server import FastMCP
 
@@ -43,11 +44,22 @@ region = os.environ.get("AWS_REGION", "us-west-2")
 port = int(os.environ.get("EVAL_MCP_PORT", "8002"))
 host = os.environ.get("HOST", "127.0.0.1")
 
+# Default user for local/standalone mode (no multi-tenant)
+DEFAULT_USER = os.environ.get("EVAL_MCP_USER", "local")
+
+# Set default storage to ~/.eval-mcp if not explicitly configured
+if "USER_STORAGE_BASE" not in os.environ:
+    os.environ["USER_STORAGE_BASE"] = str(Path.home() / ".eval-mcp" / "users")
+
 # Initialize server
 mcp = FastMCP("eval-server", port=port, host=host)
 
 # Shared clients
 bedrock = BedrockClient(region=region)
+
+
+def _user(user_id: str = None) -> str:
+    return user_id or DEFAULT_USER
 
 
 # ============================================================
@@ -102,7 +114,7 @@ async def save_dataset(
         "file_content": file_content,
         "filename": filename,
         "column_mapping": column_mapping,
-        "user_id": user_id,
+        "user_id": _user(user_id),
     }
     result = await handle_save_dataset(args)
     return result[0].text
@@ -144,11 +156,16 @@ def list_bedrock_models(
 
         # Check inference profiles
         try:
+            import re
             response = client.list_inference_profiles(maxResults=100, typeEquals="SYSTEM_DEFINED")
             for profile in response.get("inferenceProfileSummaries", []):
                 model_id = profile.get("inferenceProfileId", "")
+                # Strip version suffix (e.g., -20250514-v1:0) — Converse API needs short form
+                model_id = re.sub(r"-\d{8}-v\d+:\d+$", "", model_id)
+                model_id = re.sub(r"-v\d+:\d+$", "", model_id)
                 full_id = f"bedrock/{model_id}"
-                available.append(full_id)
+                if full_id not in available:
+                    available.append(full_id)
         except Exception:
             pass
 
@@ -275,7 +292,7 @@ async def generate_qa_pairs(
     """
     args = {
         "prompt": prompt or "",
-        "user_id": user_id,
+        "user_id": _user(user_id),
         "documents": documents or [],
         "instructions": instructions,
         "numSamples": numSamples,
@@ -296,10 +313,8 @@ async def list_documents(user_id: str = None) -> str:
     Returns:
         JSON with list of document paths
     """
-    if not user_id:
-        return json.dumps({"success": False, "error": "user_id is required"})
     try:
-        paths = list_user_document_paths(user_id)
+        paths = list_user_document_paths(_user(user_id))
         return json.dumps({
             "success": True,
             "documents": paths,
@@ -331,7 +346,7 @@ async def generate_judge(
     """
     args = {
         "dataset": dataset,
-        "user_id": user_id,
+        "user_id": _user(user_id),
         "domain": domain,
     }
     result = await handle_generate_judge(bedrock, args)
@@ -348,6 +363,8 @@ async def create_eval_config(
     configName: str = "evaluation",
     description: str = None,
     judge_models: list = None,
+    agent_path: str = None,
+    agent_entry: str = None,
 ) -> str:
     """
     Create an Inspect AI evaluation configuration with multi-judge support.
@@ -355,19 +372,20 @@ async def create_eval_config(
     Generates config with LLM judges that evaluate using binary scores.
     Results are aggregated by Jury scoring.
 
+    For agent evaluations: pass agent_path to evaluate a local Python agent
+    with full Bedrock call tracing. The agent code is not modified.
+
     Args:
         dataset: Name of dataset from list_datasets
-        providers: List of target models to evaluate. Supports multiple provider formats:
-            - Bedrock: "bedrock/us.anthropic.claude-sonnet-4-6"
-            - OpenAI: "openai/gpt-4o" (requires OPENAI_API_KEY)
-            - Anthropic direct: "anthropic/claude-sonnet-4-6" (requires ANTHROPIC_API_KEY)
-            - Google: "google/gemini-2.5-pro" (requires GOOGLE_API_KEY)
-            Use list_available_models() to discover available providers and models.
+        providers: List of target models to evaluate (used for jury judges routing).
+            For agent evals, the agent calls Bedrock directly.
         judge: Name of judge from list_judges (REQUIRED - criteria adapted to QA pairs)
-        prompts: Single prompt string OR list of prompts for comparison. Use {question} or {prompt} as placeholder for the input text. (default: "{question}")
+        prompts: Single prompt string OR list of prompts for comparison. Use {question} or {prompt} as placeholder.
         configName: Name for this evaluation (default: "evaluation")
         description: Optional description of the evaluation
         judge_models: Optional list of model IDs to use as judges
+        agent_path: Path to a Python agent file to evaluate. The agent must have a callable entry function.
+        agent_entry: Name of the entry function in the agent file (default: "run_agent")
 
     Returns:
         JSON with config path and summary
@@ -376,11 +394,13 @@ async def create_eval_config(
         "dataset": dataset,
         "providers": providers,
         "judge": judge,
-        "user_id": user_id,
+        "user_id": _user(user_id),
         "prompts": prompts,
         "configName": configName,
         "description": description,
         "judge_models": judge_models,
+        "agent_path": agent_path,
+        "agent_entry": agent_entry,
     }
     result = await handle_create_eval_config(args)
     return result[0].text
@@ -427,7 +447,7 @@ async def create_agent_eval_config(
         "dataset": dataset,
         "judge": judge,
         "agentImage": agentImage,
-        "user_id": user_id,
+        "user_id": _user(user_id),
         "agentCmd": agentCmd or ["python", "agent.py"],
         "model": model,
         "configName": configName,
@@ -471,7 +491,7 @@ async def analyze_agent_image(
     """
     args = {
         "agentImage": agentImage,
-        "user_id": user_id,
+        "user_id": _user(user_id),
         "numSamples": numSamples,
         "agentCmd": agentCmd,
         "model": model,
@@ -499,7 +519,7 @@ async def list_datasets(
     Returns:
         Formatted list of datasets with details
     """
-    args = {"user_id": user_id, "searchTerm": searchTerm}
+    args = {"user_id": _user(user_id), "searchTerm": searchTerm}
     result = await handle_list_datasets(args)
     return result[0].text
 
@@ -521,7 +541,7 @@ async def list_judges(
     Returns:
         Formatted list of judges with details
     """
-    args = {"user_id": user_id, "searchTerm": searchTerm}
+    args = {"user_id": _user(user_id), "searchTerm": searchTerm}
     result = await handle_list_judges(args)
     return result[0].text
 
@@ -542,7 +562,7 @@ async def list_evaluations(
     Returns:
         JSON with list of evaluations and their metadata
     """
-    args = {"user_id": user_id, "limit": limit}
+    args = {"user_id": _user(user_id), "limit": limit}
     result = await handle_list_evaluations(args)
     return result[0].text
 
@@ -563,7 +583,7 @@ async def get_evaluation_details(
     Returns:
         JSON with detailed evaluation results
     """
-    args = {"evalId": evalId, "user_id": user_id}
+    args = {"evalId": evalId, "user_id": _user(user_id)}
     result = await handle_get_evaluation_details(args)
     return result[0].text
 
@@ -594,7 +614,7 @@ async def run_evaluation(
     """
     args = {
         "configName": configName,
-        "user_id": user_id,
+        "user_id": _user(user_id),
         "maxConcurrency": maxConcurrency,
     }
     result = await handle_run_evaluation(args)
@@ -618,7 +638,7 @@ async def retry_evaluation(
     Returns:
         JSON with retry results
     """
-    args = {"user_id": user_id, "maxConcurrency": maxConcurrency}
+    args = {"user_id": _user(user_id), "maxConcurrency": maxConcurrency}
     result = await handle_retry_evaluation(args)
     return result[0].text
 
@@ -648,12 +668,10 @@ async def explore_eval_data(
     from inspect_ai._view.common import list_eval_logs_async
     from backend.core.user_storage import get_user_log_dir
 
-    if not user_id:
-        return json.dumps({"error": "user_id is required"})
     if not code:
         return json.dumps({"error": "code is required"})
 
-    log_dir = get_user_log_dir(user_id)
+    log_dir = get_user_log_dir(_user(user_id))
 
     async def _list_logs():
         from inspect_ai.log import read_eval_log_async
@@ -704,7 +722,8 @@ async def explore_eval_data(
 # Entrypoint
 # ============================================================
 
-if __name__ == "__main__":
+def main():
+    """Entry point for eval-mcp CLI."""
     transport = os.environ.get("EVAL_MCP_TRANSPORT", "stdio")
 
     if transport == "http":
@@ -729,3 +748,7 @@ if __name__ == "__main__":
         uvicorn.run(app, host=host, port=port, log_level="info", timeout_graceful_shutdown=30)
     else:
         mcp.run(transport="stdio")
+
+
+if __name__ == "__main__":
+    main()

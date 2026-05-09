@@ -17,6 +17,7 @@ dependencies = [
     "uvicorn[standard]>=0.24.0",
     "httpx>=0.27.0",
     "pypdf>=4.0.0",
+    "fpdf2>=2.8.0",
     "inspect-ai>=0.3.0",
     "inspect-k8s-sandbox>=0.4.0",
     # Model provider SDKs (optional deps of inspect-ai, needed at runtime)
@@ -46,6 +47,7 @@ dev = [
 ]
 
 [project.scripts]
+eval-mcp = "backend.mcp_servers.server:main"
 eval-chat = "backend.core.main:main"
 
 [build-system]

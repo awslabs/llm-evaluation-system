@@ -226,41 +226,6 @@ def eval_{index}():
     )
 '''
 
-AGENT_TASK_TEMPLATE = '''
-import importlib.util
-import sys
-
-from inspect_ai.solver import solver, Generate, TaskState
-
-# bedrock_capture location injected at generation time
-sys.path.insert(0, CONFIG.get("_eval_mcp_path", ""))
-from eval_mcp.bedrock_capture import bedrock_capture
-
-_agent_spec = importlib.util.spec_from_file_location("_user_agent", CONFIG["agent_path"])
-_agent_module = importlib.util.module_from_spec(_agent_spec)
-_agent_spec.loader.exec_module(_agent_module)
-_agent_fn = getattr(_agent_module, CONFIG.get("agent_entry", "run_agent"))
-
-
-@solver
-def agent_solver():
-    async def solve(state: TaskState, generate: Generate) -> TaskState:
-        with bedrock_capture():
-            result = _agent_fn(state.input_text)
-        state.output.completion = str(result)
-        return state
-    return solve
-
-
-@task
-def eval_task():
-    return Task(
-        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
-        solver=agent_solver(),
-        scorer=jury_scorer(),
-    )
-'''
-
 
 def create_inspect_task_file(
     dataset_path: str,
@@ -270,8 +235,6 @@ def create_inspect_task_file(
     judge_config: JudgeConfig,
     description: Optional[str] = None,
     prompts: Optional[List[str]] = None,
-    agent_path: Optional[str] = None,
-    agent_entry: Optional[str] = None,
 ) -> tuple[str, dict]:
     """Create task file code and config JSON.
 
@@ -281,22 +244,12 @@ def create_inspect_task_file(
     config_data = build_config_json(
         dataset_path, providers, judge_config, description, prompts
     )
-
-    if agent_path:
-        config_data["agent_path"] = agent_path
-        if agent_entry:
-            config_data["agent_entry"] = agent_entry
-        # Include path to eval_mcp package for bedrock_capture
-        eval_mcp_src = str(Path(__file__).parent.parent.parent.parent.parent / "eval_mcp" / "src")
-        config_data["_eval_mcp_path"] = eval_mcp_src
-
     header = TASK_FILE_HEADER.format(config_name=config_name)
 
-    if agent_path:
-        task_code = header + AGENT_TASK_TEMPLATE
-    elif prompts and len(prompts) > 1:
+    if prompts and len(prompts) > 1:
         tasks = ""
         for i, prompt in enumerate(prompts):
+            # prompt_template() uses {prompt} as the placeholder for input text
             normalized = prompt.replace("{question}", "{prompt}")
             tasks += PROMPT_TASK_TEMPLATE.format(
                 index=i + 1, prompt_repr=repr(normalized)
@@ -376,9 +329,6 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
         config_dir = user_dir / "configs"
         config_dir.mkdir(parents=True, exist_ok=True)
 
-        agent_path = args.get("agent_path")
-        agent_entry = args.get("agent_entry")
-
         task_code, config_data = create_inspect_task_file(
             dataset_path=str(dataset_file),
             providers=providers,
@@ -387,8 +337,6 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             description=description,
             judge_config=judge_config,
             prompts=prompts,
-            agent_path=agent_path,
-            agent_entry=agent_entry,
         )
 
         # Write both files

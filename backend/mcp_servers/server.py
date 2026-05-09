@@ -28,6 +28,7 @@ from backend.mcp_servers.synthetic.tools.generate_judge import handle_generate_j
 from backend.mcp_servers.synthetic.tools.create_eval_config import handle_create_eval_config
 from backend.mcp_servers.synthetic.tools.create_agent_eval_config import handle_create_agent_eval_config
 from backend.mcp_servers.synthetic.tools.analyze_agent_image import handle_analyze_agent_image
+from backend.mcp_servers.synthetic.tools.analyze_agent_path import handle_analyze_agent_path
 from backend.mcp_servers.synthetic.tools.list_datasets import handle_list_datasets
 from backend.mcp_servers.synthetic.tools.list_judges import handle_list_judges
 from backend.mcp_servers.synthetic.tools.list_evaluations import handle_list_evaluations
@@ -499,6 +500,54 @@ async def analyze_agent_image(
         "context": context,
     }
     result = await handle_analyze_agent_image(args)
+    return result[0].text
+
+
+@mcp.tool()
+async def analyze_agent_path(
+    agentPath: str,
+    user_id: str = None,
+    agentEntry: str = "run_agent",
+    numSamples: int = 15,
+    configName: str = "agent_evaluation",
+    context: str = None,
+) -> str:
+    """
+    Analyze a local Python agent and generate a complete agentic evaluation.
+
+    Reads the agent code from disk, has Claude analyze tools/sub-agents/logic,
+    generates rich test cases (with expected tools and trajectory per case),
+    designs a pipeline of evaluation stages tailored to THIS agent's
+    architecture (e.g. routing → tool selection → argument quality → final
+    output), and writes a runnable eval config.
+
+    Bedrock calls made by the agent during evaluation are captured via
+    OpenTelemetry — no Docker, no agent code modification required.
+
+    Use this for fully agentic evals (multi-stage scoring with trajectory).
+    For non-agentic prompt comparison, use create_eval_config.
+
+    Args:
+        agentPath: Path to the user's Python agent file (must define run_agent
+            or another callable taking a prompt string and returning a string).
+        agentEntry: Name of the entry function (default: "run_agent")
+        numSamples: Number of test cases to generate (default: 15)
+        configName: Name for this evaluation (default: "agent_evaluation")
+        context: Optional user description of what the agent should do
+
+    Returns:
+        JSON with eval config ready to run, including analysis summary and
+        the pipeline stages designed for this agent.
+    """
+    args = {
+        "agentPath": agentPath,
+        "agentEntry": agentEntry,
+        "user_id": _user(user_id),
+        "numSamples": numSamples,
+        "configName": configName,
+        "context": context,
+    }
+    result = await handle_analyze_agent_path(args)
     return result[0].text
 
 

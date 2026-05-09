@@ -88,30 +88,67 @@ def _generate_llm_judge_scorer(stage: PipelineStage, judge_models: Dict[str, str
     context_extractor = ""
     if stage.context_filter == "final_output":
         context_extractor = '''
-        # Extract final output only
         output = state.output.completion if state.output else ""
         context = f"Agent output:\\n{output}"'''
     elif stage.context_filter == "tool_calls_only":
         context_extractor = '''
-        # Extract tool calls
+        from inspect_ai.log._samples import sample_active
         tool_parts = []
-        for msg in state.messages:
-            if hasattr(msg, "tool_calls") and msg.tool_calls:
-                for tc in msg.tool_calls:
-                    tool_parts.append(f"Called {tc.function}({json.dumps(tc.arguments)})")
+        sample = sample_active()
+        if sample and sample.transcript:
+            for ev in sample.transcript.events:
+                if type(ev).__name__ == "ModelEvent" and getattr(ev, "output", None):
+                    msg = ev.output.message
+                    if getattr(msg, "tool_calls", None):
+                        for tc in msg.tool_calls:
+                            if tc.function == "submit_scores":
+                                continue
+                            tool_parts.append(f"Called {tc.function}({json.dumps(tc.arguments)})")
         context = "Tool calls made:\\n" + "\\n".join(tool_parts) if tool_parts else "No tool calls"'''
     elif stage.context_filter == "first_response":
         context_extractor = '''
-        # Extract first response
+        from inspect_ai.log._samples import sample_active
         first_response = ""
-        for msg in state.messages:
-            if hasattr(msg, "role") and getattr(msg, "role", None) == "assistant":
-                first_response = msg.text if hasattr(msg, "text") else str(msg.content)
-                break
+        sample = sample_active()
+        if sample and sample.transcript:
+            for ev in sample.transcript.events:
+                if type(ev).__name__ == "ModelEvent" and getattr(ev, "output", None):
+                    msg = ev.output.message
+                    text = getattr(msg, "text", None)
+                    if text is None:
+                        content = getattr(msg, "content", "")
+                        text = content if isinstance(content, str) else str(content)
+                    if text:
+                        first_response = text
+                        break
         context = f"First response:\\n{first_response}"'''
+    elif stage.context_filter == "all":
+        context_extractor = '''
+        from inspect_ai.log._samples import sample_active
+        steps = []
+        sample = sample_active()
+        if sample and sample.transcript:
+            for ev in sample.transcript.events:
+                if type(ev).__name__ != "ModelEvent" or not getattr(ev, "output", None):
+                    continue
+                msg = ev.output.message
+                text = getattr(msg, "text", None)
+                if text is None:
+                    content = getattr(msg, "content", "")
+                    text = content if isinstance(content, str) else str(content)
+                line = f"[{getattr(ev, 'model', 'model')}]"
+                if text:
+                    line += f" {text}"
+                if getattr(msg, "tool_calls", None):
+                    for tc in msg.tool_calls:
+                        if tc.function == "submit_scores":
+                            continue
+                        line += f"\\n  -> {tc.function}({json.dumps(tc.arguments)})"
+                steps.append(line)
+        output = state.output.completion if state.output else ""
+        context = "Trajectory:\\n" + "\\n".join(steps) + f"\\n\\nFinal output:\\n{output}" if steps else f"Agent output:\\n{output}"'''
     else:
         context_extractor = '''
-        # Full context
         output = state.output.completion if state.output else ""
         context = f"Agent output:\\n{output}"'''
 
@@ -208,10 +245,17 @@ def generate_pipeline_task_code(
     config_name: str,
     pipeline: PipelineConfig,
     judge_models: Dict[str, str],
+    mode: str = "container",
 ) -> str:
-    """Generate the full task file code with multi-stage scorers."""
+    """Generate the full task file code with multi-stage scorers.
 
-    # Build scorer functions
+    Args:
+        mode: "container" runs the agent in a Docker/k8s sandbox via
+            sandbox_agent_bridge (intercepts OpenAI/Anthropic SDK calls).
+            "local" runs the agent in-process via importlib and captures
+            Bedrock calls via OpenTelemetry (eval_mcp.bedrock_capture).
+    """
+
     scorer_functions = []
     scorer_names = []
     for stage in sorted(pipeline.stages, key=lambda s: s.order):
@@ -223,9 +267,16 @@ def generate_pipeline_task_code(
 
     scorers_list = ", ".join(scorer_names)
 
-    task_code = f'''"""Inspect AI pipeline agent evaluation: {config_name}
+    if mode == "local":
+        return _generate_local_task_code(config_name, scorer_functions, scorers_list)
+    return _generate_container_task_code(config_name, scorer_functions, scorers_list)
+
+
+def _generate_container_task_code(config_name: str, scorer_functions: list, scorers_list: str) -> str:
+    return f'''"""Inspect AI pipeline agent evaluation: {config_name}
 
 Auto-generated. Multi-stage evaluation with separate scorers per stage.
+Container mode: runs agent in Docker/k8s with sandbox_agent_bridge.
 """
 
 import json
@@ -298,7 +349,62 @@ def eval_task():
         sandbox=sandbox_config,
     )
 '''
-    return task_code
+
+
+def _generate_local_task_code(config_name: str, scorer_functions: list, scorers_list: str) -> str:
+    return f'''"""Inspect AI pipeline agent evaluation: {config_name}
+
+Auto-generated. Multi-stage evaluation with separate scorers per stage.
+Local mode: runs agent in-process with bedrock_capture (OpenTelemetry).
+"""
+
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+from inspect_ai import Task, task
+from inspect_ai.dataset import json_dataset, FieldSpec
+from inspect_ai.model import ChatMessageUser, ChatMessageSystem, get_model
+from inspect_ai.scorer import Score, accuracy, scorer, stderr
+from inspect_ai.solver import Generate, TaskState, solver
+
+from inspect_ai.tool._tool_info import ToolInfo
+from inspect_ai.tool._tool_params import ToolParams
+
+_config_path = Path(__file__).with_suffix(".json")
+CONFIG = json.loads(_config_path.read_text())
+
+DATASET_PATH = CONFIG["dataset_path"]
+
+sys.path.insert(0, CONFIG.get("_eval_mcp_path", ""))
+from eval_mcp.bedrock_capture import bedrock_capture
+
+_agent_spec = importlib.util.spec_from_file_location("_user_agent", CONFIG["agent_path"])
+_agent_module = importlib.util.module_from_spec(_agent_spec)
+_agent_spec.loader.exec_module(_agent_module)
+_agent_fn = getattr(_agent_module, CONFIG.get("agent_entry", "run_agent"))
+
+
+@solver
+def agent_solver():
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        with bedrock_capture():
+            result = _agent_fn(state.input_text)
+        state.output.completion = str(result)
+        return state
+    return solve
+
+{"".join(scorer_functions)}
+
+@task
+def eval_task():
+    return Task(
+        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer", metadata=["expected_tools", "expected_steps", "difficulty"])),
+        solver=agent_solver(),
+        scorer=[{scorers_list}],
+    )
+'''
 
 
 AGENT_COMPOSE_TEMPLATE = """services:
@@ -335,7 +441,7 @@ def create_pipeline_eval_files(
     Returns:
         (task_code, config_dict, compose_yaml, k8s_values_yaml)
     """
-    task_code = generate_pipeline_task_code(config_name, pipeline, judge_models)
+    task_code = generate_pipeline_task_code(config_name, pipeline, judge_models, mode="container")
     compose_yaml = AGENT_COMPOSE_TEMPLATE.format(image=agent_image)
     k8s_values = AGENT_K8S_VALUES_TEMPLATE.format(image=agent_image)
 
@@ -350,3 +456,32 @@ def create_pipeline_eval_files(
     }
 
     return task_code, config_data, compose_yaml, k8s_values
+
+
+def create_local_pipeline_eval_files(
+    dataset_path: str,
+    config_name: str,
+    pipeline: PipelineConfig,
+    judge_models: Dict[str, str],
+    agent_path: str,
+    agent_entry: str = "run_agent",
+    description: Optional[str] = None,
+) -> tuple[str, dict]:
+    """Create pipeline task file + config JSON for local-mode (no container).
+
+    The agent is loaded via importlib and Bedrock calls are captured via OTel.
+    Returns: (task_code, config_dict)
+    """
+    task_code = generate_pipeline_task_code(config_name, pipeline, judge_models, mode="local")
+    eval_mcp_src = str(Path(__file__).parent.parent.parent.parent.parent / "eval_mcp" / "src")
+
+    config_data = {
+        "dataset_path": dataset_path,
+        "judge_models": judge_models,
+        "pipeline_stages": pipeline.to_dict(),
+        "agent_path": agent_path,
+        "agent_entry": agent_entry,
+        "_eval_mcp_path": eval_mcp_src,
+        "description": description or "",
+    }
+    return task_code, config_data

@@ -20,6 +20,9 @@ dependencies = [
     "fpdf2>=2.8.0",
     "inspect-ai>=0.3.0",
     "inspect-k8s-sandbox>=0.4.0",
+    # OpenTelemetry for Bedrock call capture in agent evals
+    "opentelemetry-instrumentation-botocore>=0.50",
+    "opentelemetry-sdk>=1.30",
     # Model provider SDKs (optional deps of inspect-ai, needed at runtime)
     "openai>=2.26.0",
     "anthropic>=0.80.0",

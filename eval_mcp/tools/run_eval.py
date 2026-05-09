@@ -450,6 +450,15 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         except Exception as e:
             logger.warning(f"Failed to pre-compute eval results: {e}")
 
+        # Sync logs to S3 if configured
+        try:
+            from eval_mcp.config import get_bucket
+            if get_bucket():
+                from eval_mcp.s3_sync import sync_logs_up
+                sync_logs_up(user_id, log_dir=Path(log_dir_str))
+        except Exception as e:
+            logger.warning(f"S3 log sync failed: {e}")
+
         if process.returncode != 0:
             return [
                 TextContent(

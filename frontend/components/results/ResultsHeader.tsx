@@ -70,18 +70,22 @@ export default function ResultsHeader({ groupId, sessionId }: ResultsHeaderProps
               Signed in as <span className="text-claude-text font-medium">{user.name}</span>
             </div>
           )}
-          <button
-            onClick={() => router.push("/chat")}
-            className="rounded-lg bg-claude-accent px-4 py-2 text-sm font-semibold text-white hover:bg-claude-hover"
-          >
-            Back to Chat
-          </button>
-          <button
-            onClick={() => { window.location.href = logoutUrl; }}
-            className="rounded-lg border border-claude-border px-4 py-2 text-sm text-claude-text hover:bg-claude-surface"
-          >
-            Sign Out
-          </button>
+          {process.env.NEXT_PUBLIC_SHOW_CHAT !== "false" && (
+            <button
+              onClick={() => router.push("/chat")}
+              className="rounded-lg bg-claude-accent px-4 py-2 text-sm font-semibold text-white hover:bg-claude-hover"
+            >
+              Back to Chat
+            </button>
+          )}
+          {process.env.NEXT_PUBLIC_SHOW_CHAT !== "false" && (
+            <button
+              onClick={() => { window.location.href = logoutUrl; }}
+              className="rounded-lg border border-claude-border px-4 py-2 text-sm text-claude-text hover:bg-claude-surface"
+            >
+              Sign Out
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -69,6 +69,11 @@ def create_viewer_app() -> FastAPI:
         await precompute_eval_results(user_id, force=True)
         return {"ok": True}
 
+    # Auth stub for local viewer (only binds to 127.0.0.1, never deployed to AWS)
+    @app.get("/api/auth/user")
+    async def auth_user():
+        return {"user": {}, "logoutUrl": "#"}
+
     # Serve static files
     if STATIC_DIR.exists():
         @app.get("/results")

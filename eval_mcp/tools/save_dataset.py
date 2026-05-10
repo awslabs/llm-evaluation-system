@@ -84,27 +84,49 @@ def generate_dataset_name(base_name: str) -> str:
 async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
     """Handle save_dataset tool call.
 
+    Accepts either `file_path` (preferred — tool reads from disk) or
+    `file_content` (raw string, kept for callers that already have it in-memory).
+
     Args:
         args: Tool arguments containing:
-            - file_content: Raw CSV content
-            - filename: Original filename (used for naming)
+            - file_path: Absolute path to the dataset file on disk (CSV/JSON/JSONL)
+            - file_content: Raw content as string (fallback when no path available)
+            - filename: Optional display name (inferred from file_path when omitted)
             - user_id: User ID for storage isolation
             - column_mapping: {question: col_name, golden_answer: col_name}
 
     Returns:
         Result with saved path
     """
+    file_path = args.get("file_path")
     file_content = args.get("file_content", "")
-    filename = args.get("filename", "dataset.csv")
+    filename = args.get("filename")
     user_id = args.get("user_id")
     column_mapping = args.get("column_mapping", {})
+
+    if file_path and not file_content:
+        try:
+            file_content = Path(file_path).read_text()
+            if not filename:
+                filename = Path(file_path).name
+        except Exception as e:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": f"Could not read file_path {file_path!r}: {e}",
+                }),
+            )]
+
+    if not filename:
+        filename = "dataset.csv"
 
     if not file_content:
         return [TextContent(
             type="text",
             text=json.dumps({
                 "success": False,
-                "error": "No file content provided",
+                "error": "Provide either file_path or file_content",
             }),
         )]
 

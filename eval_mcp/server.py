@@ -81,23 +81,40 @@ def _auto_pull(user_id: str = None) -> None:
 
 @mcp.tool()
 async def analyze_dataset(
-    file_content: str,
-    filename: str = "dataset.csv",
+    file_path: str = None,
+    file_content: str = None,
+    filename: str = None,
     user_id: str = None,
 ) -> str:
     """
-    Analyze a CSV dataset for structure and quality.
+    Analyze a CSV/JSON/JSONL dataset for structure and quality.
 
-    Uses an intelligent agent to parse the CSV, detect structure,
+    Uses an intelligent agent to parse the file, detect structure,
     identify question/answer columns, and check for data quality issues.
 
+    Prefer `file_path` — the tool reads the file from disk. Pass `file_content`
+    only if the data isn't on the local filesystem.
+
     Args:
-        file_content: The raw CSV file content as a string
-        filename: Name of the file (for display purposes)
+        file_path: Absolute path to the dataset file (recommended).
+        file_content: Raw file content as a string (fallback).
+        filename: Optional display name (inferred from file_path when omitted).
 
     Returns:
-        JSON analysis report with validity, column mapping, issues, and summary
+        JSON analysis report with validity, column mapping, issues, and summary.
     """
+    if file_path and not file_content:
+        try:
+            file_content = Path(file_path).read_text()
+            if not filename:
+                filename = Path(file_path).name
+        except Exception as e:
+            return json.dumps({"success": False, "error": f"Could not read file_path {file_path!r}: {e}"})
+    if not filename:
+        filename = "dataset.csv"
+    if not file_content:
+        return json.dumps({"success": False, "error": "Provide either file_path or file_content"})
+
     agent = DatasetAgent(bedrock)
     analysis = await agent.analyze(file_content, filename)
     return json.dumps({"success": True, "filename": filename, "analysis": analysis}, indent=2)
@@ -105,25 +122,30 @@ async def analyze_dataset(
 
 @mcp.tool()
 async def save_dataset(
-    file_content: str,
-    filename: str,
     column_mapping: dict,
+    file_path: str = None,
+    file_content: str = None,
+    filename: str = None,
     user_id: str = None,
 ) -> str:
     """
-    Save a CSV dataset for evaluation.
+    Save a CSV/JSON/JSONL dataset for evaluation.
 
-    Converts the CSV to the required format with question and golden_answer fields.
+    Converts the file to the canonical {question, golden_answer} format and
+    persists it. Prefer `file_path` — the tool reads from disk (cheap).
+    Pass `file_content` only if the data isn't on the local filesystem.
 
     Args:
-        file_content: The raw CSV file content
-        filename: Original filename (used for naming the output)
-        column_mapping: Dict with 'question' and 'golden_answer' keys mapping to CSV column names
+        column_mapping: {"question": col_name, "golden_answer": col_name}
+        file_path: Absolute path to the dataset file (recommended).
+        file_content: Raw file content as a string (fallback).
+        filename: Optional display name (inferred from file_path when omitted).
 
     Returns:
-        JSON with success status, path, and rows saved
+        JSON with success status, generated dataset name, and rows saved.
     """
     args = {
+        "file_path": file_path,
         "file_content": file_content,
         "filename": filename,
         "column_mapping": column_mapping,
@@ -683,66 +705,107 @@ async def run_evaluation(
 @mcp.tool()
 async def run_evaluation_and_report(
     user_id: str = None,
-    # Standard eval inputs
-    dataset: str = None,
+    # Standard / prompt-comparison eval inputs (all optional — missing pieces are generated)
     providers: list = None,
+    dataset: str = None,
     judge: str = None,
     prompts: str | list = "{question}",
     description: str = None,
     judge_models: list = None,
+    documents: list = None,
     # Agent eval inputs (alternative path)
     agent_path: str = None,
     agent_entry: str = "run_agent",
     num_samples: int = 15,
-    # Report inputs
+    # Expert mode: user-authored Inspect AI task.py
+    task_path: str = None,
+    # Shared
     context: str = None,
     monthly_volume: int = 10000,
 ) -> str:
     """
-    The one-shot eval tool — creates a fresh config, runs it, generates a PDF report.
+    The one-shot eval tool — auto-fills missing pieces, runs, writes a PDF report.
 
-    This is the preferred tool for any eval. It builds the config from the
-    inputs you pass here (so it can't accidentally reuse a stale config).
+    There are four modes — you only pass what makes the mode distinct;
+    dataset/judge auto-generate when omitted (modes B/C):
 
-    THREE MODES (pick one by which args you pass):
+    A. Agent eval:
+         agent_path (+ agent_entry, num_samples, context)
+         Everything else (dataset, judge, pipeline) is generated from the code.
 
-    1) Standard prompt/dataset eval:
-         dataset + providers + judge (+ optional prompts)
+    B. Standard eval:
+         providers
+         If `dataset` omitted: generate_qa_pairs runs first (uses `documents`
+         if provided, otherwise synthesizes from `context`).
+         If `judge` omitted: generate_judge runs on the resulting dataset.
 
-    2) Prompt-comparison eval (same dataset, multiple prompts):
-         dataset + providers + judge + prompts=[list of templates]
+    C. Prompt comparison:
+         providers + prompts=[list of templates]
+         Same auto-generation of dataset/judge as B.
 
-    3) Agent eval (Python agent file analyzed and scored with pipeline stages):
-         agent_path (+ optional agent_entry, num_samples)
-         No dataset/judge/providers needed — all generated automatically from
-         the agent's tools, subagents, and logic.
+    D. Expert mode — user-authored Inspect AI task:
+         task_path (+ optional providers, context)
+         Runs your own `task.py` with whatever Inspect AI scorers/solvers you
+         chose (exact_match, model_graded_qa, pass_at_k, etc.). The tool runs
+         `inspect eval <task_path>`, captures the log, generates a report, and
+         opens the viewer. Use this when the jury-scoring pipeline isn't what
+         you want. Check `inspect --help` and inspect_ai source for available
+         scorers and task helpers.
 
     Args:
-        dataset: Name of the dataset (from list_datasets). Required for modes 1/2.
-        providers: Target model IDs to evaluate, e.g. ["bedrock/us.anthropic.claude-sonnet-4-6"].
-            Required for modes 1/2.
-        judge: Name of the judge (from list_judges). Required for modes 1/2.
+        providers: Target model IDs, e.g. ["bedrock/us.anthropic.claude-sonnet-4-6"].
+            Required for modes B/C.
+        dataset: Name of an existing dataset (from list_datasets). Optional —
+            auto-generated when omitted.
+        judge: Name of an existing judge (from list_judges). Optional —
+            auto-generated from the dataset + context when omitted.
         prompts: Single prompt template, or list of prompts for a comparison.
             Use {question} or {prompt} as the placeholder. Default: "{question}"
-        description: Optional description recorded in the eval
-        judge_models: Optional override list of judge model IDs
+        description: Optional description recorded in the eval.
+        judge_models: Optional override list of judge model IDs.
+        documents: Optional list of document paths to ground dataset generation
+            (PDFs, markdown, etc.) when auto-generating a dataset.
 
-        agent_path: Path to the user's Python agent file. Required for mode 3.
-        agent_entry: Name of the entry function (default: "run_agent")
-        num_samples: Number of test cases to generate for agent eval (default: 15)
+        agent_path: Path to the user's Python agent file (mode A).
+        agent_entry: Entry function name (default: "run_agent").
+        num_samples: Number of test cases (default: 15).
 
-        context: Brief description of what the user is evaluating and why;
-            used to tailor the PDF report narrative
-        monthly_volume: Projected monthly call volume for cost projections (default: 10000)
+        context: Short description of what the user is evaluating and why.
+            Used to tailor auto-generated datasets/judges AND the report narrative.
+        monthly_volume: Projected monthly call volume for cost projections.
 
     Returns:
-        JSON combining eval results, the generated configName, and report download URL.
+        JSON combining eval results, the auto-generated configName, any
+        auto-generated dataset/judge names, and the report download URL.
     """
     uid = _user(user_id)
+    generated: dict = {}  # track what was auto-created so the caller can see
 
-    # Mode 3: agent eval path — delegates to analyze_agent_path which generates
-    # the dataset, pipeline stages, and config from the agent code itself.
-    if agent_path:
+    # Mode D: expert — run a user-authored Inspect AI task.py as-is.
+    # We copy it into the user's configs/ dir so the standard run pipeline
+    # (log dir, retry, S3 sync, viewer) picks it up without special-casing.
+    if task_path:
+        import shutil
+        import time as _time
+        from eval_mcp.core.user_storage import get_user_dir
+
+        src = Path(task_path)
+        if not src.exists() or not src.is_file():
+            return json.dumps({
+                "success": False,
+                "error": f"task_path does not exist: {task_path}",
+            }, indent=2)
+
+        config_name = f"custom_task_{int(_time.time() * 1000)}"
+        user_dir = get_user_dir(uid)
+        configs_dir = user_dir / "configs"
+        configs_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, configs_dir / f"{config_name}.py")
+        generated["task_path"] = str(src)
+
+    # Mode A: agent eval — analyze_agent_path already auto-generates everything
+    # from the agent code (dataset, judge, pipeline stages, config).
+    elif agent_path:
         analyze_result = await handle_analyze_agent_path({
             "agentPath": agent_path,
             "agentEntry": agent_entry,
@@ -754,14 +817,61 @@ async def run_evaluation_and_report(
         if not analyze_data.get("success"):
             return analyze_result[0].text
         config_name = analyze_data["configName"]
-    else:
-        # Modes 1/2: standard/prompt-comparison eval — build config from inputs.
-        if not (dataset and providers and judge):
+    elif not task_path:
+        # Modes B / C: standard or prompt-comparison eval.
+        if not providers:
             return json.dumps({
                 "success": False,
-                "error": "For a standard eval you must pass dataset, providers, and judge. "
+                "error": "providers is required (list of model IDs). "
                          "For an agent eval pass agent_path instead.",
             }, indent=2)
+
+        # Auto-generate dataset if one wasn't named.
+        if not dataset:
+            qa_args = {
+                "user_id": uid,
+                "numSamples": num_samples,
+                "prompt": context or description or "",
+            }
+            if documents:
+                # `documents` may be either registered doc names (already under
+                # the user's documents dir) OR absolute local paths to arbitrary
+                # files. For the latter we copy into the user's documents dir so
+                # generate_qa_pairs → get_document_content can find them.
+                import shutil as _shutil
+                from eval_mcp.core.user_storage import get_user_documents_dir
+                docs_dir = get_user_documents_dir(uid)
+                resolved_docs = []
+                for doc in documents:
+                    p = Path(doc)
+                    if p.is_absolute() and p.is_file():
+                        dest = docs_dir / p.name
+                        if not dest.exists() or dest.stat().st_size != p.stat().st_size:
+                            _shutil.copy2(p, dest)
+                        resolved_docs.append(p.name)
+                    else:
+                        resolved_docs.append(doc)
+                qa_args["documents"] = resolved_docs
+            qa_result = await handle_generate_qa_pairs(bedrock, qa_args)
+            qa_data = json.loads(qa_result[0].text)
+            if not qa_data.get("success"):
+                return qa_result[0].text
+            dataset = qa_data["dataset"]
+            generated["dataset"] = dataset
+
+        # Auto-generate judge if one wasn't named.
+        if not judge:
+            j_args = {
+                "user_id": uid,
+                "dataset": dataset,
+                "domain": context or description or "general",
+            }
+            j_result = await handle_generate_judge(bedrock, j_args)
+            j_data = json.loads(j_result[0].text)
+            if not j_data.get("success"):
+                return j_result[0].text
+            judge = j_data["name"]
+            generated["judge"] = judge
 
         create_result = await handle_create_eval_config({
             "dataset": dataset,
@@ -784,6 +894,8 @@ async def run_evaluation_and_report(
     })
     eval_data = json.loads(eval_result[0].text)
     eval_data["configName"] = config_name
+    if generated:
+        eval_data["autoGenerated"] = generated
 
     if not eval_data.get("success"):
         return json.dumps(eval_data, indent=2)  # propagate eval failure as-is

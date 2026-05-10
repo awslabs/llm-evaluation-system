@@ -203,21 +203,43 @@ def sample_rows(
 async def handle_analyze_dataset(args: Dict[str, Any]) -> List[TextContent]:
     """Handle analyze_dataset tool call.
 
+    Accepts `file_path` (preferred) or `file_content` (raw string).
+
     Args:
-        args: Tool arguments containing file_content, filename
+        args: Tool arguments containing file_path or file_content, and optional filename
 
     Returns:
         Analysis report as TextContent
     """
+    from pathlib import Path as _Path
+
+    file_path = args.get("file_path")
     file_content = args.get("file_content", "")
-    filename = args.get("filename", "dataset.csv")
+    filename = args.get("filename")
+
+    if file_path and not file_content:
+        try:
+            file_content = _Path(file_path).read_text()
+            if not filename:
+                filename = _Path(file_path).name
+        except Exception as e:
+            return [TextContent(
+                type="text",
+                text=json.dumps({
+                    "success": False,
+                    "error": f"Could not read file_path {file_path!r}: {e}",
+                }),
+            )]
+
+    if not filename:
+        filename = "dataset.csv"
 
     if not file_content:
         return [TextContent(
             type="text",
             text=json.dumps({
                 "success": False,
-                "error": "No file content provided",
+                "error": "Provide either file_path or file_content",
             }),
         )]
 

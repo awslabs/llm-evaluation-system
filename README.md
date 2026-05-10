@@ -137,7 +137,27 @@ The AI assistant analyzes the agent code, generates test cases, designs pipeline
 
 For a multi-user web app with Cognito auth, chat UI, and per-user isolation, the repo also ships an EKS deployment. This is the heavyweight path — for most users the MCP above is enough.
 
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full deployment.
+```bash
+./deploy.sh
+```
+
+The script auto-installs Terraform, kubectl, and Helm, then deploys the complete platform (Cognito auth, CloudFront, WAF, per-user isolation).
+
+### User Management
+
+```bash
+./manage-users.sh create user@example.com
+./manage-users.sh list
+./manage-users.sh delete user@example.com
+```
+
+### Teardown
+
+```bash
+./destroy.sh
+```
+
+Architecture details, OIDC config, Helm values, and manual deployment steps: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
 ## Contributing / Local Development
 

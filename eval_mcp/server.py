@@ -682,31 +682,55 @@ async def run_evaluation(
 
 @mcp.tool()
 async def run_evaluation_and_report(
-    dataset: str,
-    providers: list,
-    judge: str,
     user_id: str = None,
+    # Standard eval inputs
+    dataset: str = None,
+    providers: list = None,
+    judge: str = None,
     prompts: str | list = "{question}",
     description: str = None,
     judge_models: list = None,
+    # Agent eval inputs (alternative path)
+    agent_path: str = None,
+    agent_entry: str = "run_agent",
+    num_samples: int = 15,
+    # Report inputs
     context: str = None,
     monthly_volume: int = 10000,
 ) -> str:
     """
     The one-shot eval tool — creates a fresh config, runs it, generates a PDF report.
 
-    This is the preferred tool when a user asks "run an eval". It builds the
-    config from the inputs you pass here (so it can't accidentally reuse a
-    stale config someone made earlier).
+    This is the preferred tool for any eval. It builds the config from the
+    inputs you pass here (so it can't accidentally reuse a stale config).
+
+    THREE MODES (pick one by which args you pass):
+
+    1) Standard prompt/dataset eval:
+         dataset + providers + judge (+ optional prompts)
+
+    2) Prompt-comparison eval (same dataset, multiple prompts):
+         dataset + providers + judge + prompts=[list of templates]
+
+    3) Agent eval (Python agent file analyzed and scored with pipeline stages):
+         agent_path (+ optional agent_entry, num_samples)
+         No dataset/judge/providers needed — all generated automatically from
+         the agent's tools, subagents, and logic.
 
     Args:
-        dataset: Name of the dataset (from list_datasets)
-        providers: Target model IDs to evaluate, e.g. ["bedrock/us.anthropic.claude-sonnet-4-6"]
-        judge: Name of the judge (from list_judges) — its criteria shape the scoring
+        dataset: Name of the dataset (from list_datasets). Required for modes 1/2.
+        providers: Target model IDs to evaluate, e.g. ["bedrock/us.anthropic.claude-sonnet-4-6"].
+            Required for modes 1/2.
+        judge: Name of the judge (from list_judges). Required for modes 1/2.
         prompts: Single prompt template, or list of prompts for a comparison.
             Use {question} or {prompt} as the placeholder. Default: "{question}"
         description: Optional description recorded in the eval
         judge_models: Optional override list of judge model IDs
+
+        agent_path: Path to the user's Python agent file. Required for mode 3.
+        agent_entry: Name of the entry function (default: "run_agent")
+        num_samples: Number of test cases to generate for agent eval (default: 15)
+
         context: Brief description of what the user is evaluating and why;
             used to tailor the PDF report narrative
         monthly_volume: Projected monthly call volume for cost projections (default: 10000)
@@ -716,21 +740,43 @@ async def run_evaluation_and_report(
     """
     uid = _user(user_id)
 
-    # Build a fresh config — name auto-generated from timestamp inside the handler.
-    create_result = await handle_create_eval_config({
-        "dataset": dataset,
-        "providers": providers,
-        "judge": judge,
-        "user_id": uid,
-        "prompts": prompts,
-        "description": description,
-        "judge_models": judge_models,
-    })
-    create_data = json.loads(create_result[0].text)
-    if not create_data.get("success"):
-        return create_result[0].text
+    # Mode 3: agent eval path — delegates to analyze_agent_path which generates
+    # the dataset, pipeline stages, and config from the agent code itself.
+    if agent_path:
+        analyze_result = await handle_analyze_agent_path({
+            "agentPath": agent_path,
+            "agentEntry": agent_entry,
+            "user_id": uid,
+            "numSamples": num_samples,
+            "context": context,
+        })
+        analyze_data = json.loads(analyze_result[0].text)
+        if not analyze_data.get("success"):
+            return analyze_result[0].text
+        config_name = analyze_data["configName"]
+    else:
+        # Modes 1/2: standard/prompt-comparison eval — build config from inputs.
+        if not (dataset and providers and judge):
+            return json.dumps({
+                "success": False,
+                "error": "For a standard eval you must pass dataset, providers, and judge. "
+                         "For an agent eval pass agent_path instead.",
+            }, indent=2)
 
-    config_name = create_data["configName"]
+        create_result = await handle_create_eval_config({
+            "dataset": dataset,
+            "providers": providers,
+            "judge": judge,
+            "user_id": uid,
+            "prompts": prompts,
+            "description": description,
+            "judge_models": judge_models,
+        })
+        create_data = json.loads(create_result[0].text)
+        if not create_data.get("success"):
+            return create_result[0].text
+
+        config_name = create_data["configName"]
 
     eval_result = await handle_run_evaluation({
         "configName": config_name,

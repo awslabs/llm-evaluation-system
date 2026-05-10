@@ -20,17 +20,27 @@ def _load_pricing() -> dict:
 def _normalize_model_id(model_id: str) -> tuple[str, str]:
     """Extract provider section and base model name from a model ID.
 
+    Accepts both Inspect AI style ("bedrock/...") and OTel GenAI semconv style
+    ("aws.bedrock/..."). Keeps other providers (openai, anthropic, google, ...)
+    as-is since those names already match between Inspect and OTel.
+
     Examples:
-        "bedrock/us.anthropic.claude-sonnet-4-6" -> ("bedrock", "anthropic.claude-sonnet-4-6")
-        "openai/gpt-4o" -> ("openai", "gpt-4o")
-        "anthropic/claude-opus-4-6" -> ("anthropic", "claude-opus-4-6")
-        "google/gemini-2.5-pro" -> ("google", "gemini-2.5-pro")
+        "bedrock/us.anthropic.claude-sonnet-4-6"     -> ("bedrock", "anthropic.claude-sonnet-4-6")
+        "aws.bedrock/us.anthropic.claude-sonnet-4-6" -> ("bedrock", "anthropic.claude-sonnet-4-6")
+        "openai/gpt-4o"                              -> ("openai", "gpt-4o")
+        "anthropic/claude-opus-4-6"                  -> ("anthropic", "claude-opus-4-6")
+        "google/gemini-2.5-pro"                      -> ("google", "gemini-2.5-pro")
     """
     # Split provider prefix
     if "/" in model_id:
         provider, model = model_id.split("/", 1)
     else:
         return "", model_id
+
+    # Map OTel's gen_ai.system values to the names used in our pricing table.
+    # See https://opentelemetry.io/docs/specs/semconv/gen-ai/gen-ai-spans/
+    _OTEL_PROVIDER_ALIASES = {"aws.bedrock": "bedrock"}
+    provider = _OTEL_PROVIDER_ALIASES.get(provider, provider)
 
     # For bedrock, strip region prefix (us., eu., apac., etc.) and version suffix (-v1:0)
     if provider == "bedrock":

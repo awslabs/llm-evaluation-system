@@ -18,6 +18,53 @@ def main(ctx):
 
 
 @main.command()
+@click.option("--print-only", is_flag=True, help="Only print the guidance, don't warm the uvx cache.")
+def install(print_only):
+    """Print installation guidance for a coding agent to follow.
+
+    \b
+    This prints the bundled INSTALL.md — instructions for a coding agent
+    (Claude Code, Cursor, etc.) to install eval-mcp into a user's IDE. The
+    agent reads the guidance, detects the IDE, edits the right config file
+    safely, and warms the uvx cache so the first IDE launch is instant.
+
+    Run this from any coding agent and follow the instructions it emits.
+    """
+    from pathlib import Path
+    import subprocess
+    import sys as _sys
+
+    guide = Path(__file__).parent / "INSTALL.md"
+    if not guide.exists():
+        click.echo("INSTALL.md not bundled with this install — reinstall the package.", err=True)
+        _sys.exit(1)
+
+    click.echo(guide.read_text())
+
+    if print_only:
+        return
+
+    # Warm the uvx cache so the user's first IDE launch after install is
+    # instant. The agent shows its usual progress UI while we wait.
+    click.echo("\n---\nWarming uvx cache (first run only, may take ~60s)...", err=True)
+    try:
+        subprocess.run(
+            ["uvx", "--from", "llm-evaluation-system", "eval-mcp", "--help"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+            timeout=180,
+        )
+        click.echo("uvx cache warmed.", err=True)
+    except FileNotFoundError:
+        click.echo("uvx not found on PATH. Install uv first: curl -LsSf https://astral.sh/uv/install.sh | sh", err=True)
+    except subprocess.TimeoutExpired:
+        click.echo("uvx warm-up timed out after 3 min — the IDE may need a longer timeout on first launch.", err=True)
+    except subprocess.CalledProcessError as e:
+        click.echo(f"uvx warm-up failed with exit {e.returncode} — the IDE may slow-start on first launch.", err=True)
+
+
+@main.command()
 @click.argument("bucket")
 def init(bucket):
     """Set up S3 sharing with one command.

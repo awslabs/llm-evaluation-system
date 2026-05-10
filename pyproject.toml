@@ -79,7 +79,7 @@ where = ["."]
 include = ["backend*", "eval_mcp*"]
 
 [tool.setuptools.package-data]
-eval_mcp = ["viewer_static/**/*", "provider_pricing.json"]
+eval_mcp = ["viewer_static/**/*", "provider_pricing.json", "INSTALL.md"]
 "eval_mcp.core" = ["provider_pricing.json"]
 
 [tool.black]

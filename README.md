@@ -1,3 +1,5 @@
+<!-- mcp-name: io.github.awslabs/llm-evaluation-system -->
+
 # Agentic AI-Guided Evaluation Platform
 
 An LLM evaluation platform that plugs into your IDE as an MCP server. Describe what you want to evaluate — the AI assistant handles dataset generation, judge configuration, execution, and analysis through natural conversation.
@@ -20,41 +22,11 @@ An LLM evaluation platform that plugs into your IDE as an MCP server. Describe w
 
 ### Install
 
-Add this to your IDE's MCP config — nothing else to install. `uvx` pulls the package from PyPI on first run and caches it.
+Ask your coding agent:
 
-**Claude Code** — add to `.claude/settings.json`:
-```json
-{
-  "mcpServers": {
-    "eval": {
-      "command": "uvx",
-      "args": ["--from", "llm-evaluation-system", "eval-mcp"]
-    }
-  }
-}
-```
+> Install eval-mcp by following https://github.com/awslabs/llm-evaluation-system/blob/main/INSTALL.md
 
-**Cursor / VS Code** — add to MCP settings:
-```json
-{
-  "eval": {
-    "command": "uvx",
-    "args": ["--from", "llm-evaluation-system", "eval-mcp"]
-  }
-}
-```
-
-**Kiro** — add to `.kiro/settings/mcp.json`:
-```json
-{
-  "mcpServers": {
-    "eval": {
-      "command": "uvx",
-      "args": ["--from", "llm-evaluation-system", "eval-mcp"]
-    }
-  }
-}
-```
+The agent edits your IDE's MCP config, warms the cache, and tells you to restart. See [INSTALL.md](INSTALL.md) for the full guidance (also works as a manual reference).
 
 ### Use
 

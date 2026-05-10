@@ -57,14 +57,39 @@ This compiles the frontend and copies the static output into `eval_mcp/viewer_st
 
 ```bash
 # Bump version in pyproject.toml, then
+uv lock              # keep uv.lock in sync (EKS build requires --locked)
 rm -rf dist && uv build
-uv publish    # uses UV_PUBLISH_TOKEN env var
+uv publish           # uses UV_PUBLISH_TOKEN env var
 ```
 
 Verify from a clean venv:
 ```bash
 uvx --refresh --from 'llm-evaluation-system==<new-version>' eval-mcp --help
 ```
+
+### 6. Running the MCP in Docker (optional)
+
+The repo root `Dockerfile` builds a slim container that runs `eval-mcp serve` as an HTTP MCP (for self-hosting on EC2/ECS/AgentCore). Local dev rarely needs this — use the editable install above.
+
+```bash
+docker build -t eval-mcp .
+docker run -p 8002:8002 \
+  -e AWS_REGION=us-west-2 \
+  -v ~/.aws:/root/.aws:ro \
+  eval-mcp
+```
+
+MCP listens at `http://localhost:8002/mcp`.
+
+## Full web app locally (Docker Compose)
+
+If you're changing the EKS web app (FastAPI + Next.js chat) and want hot reload for all services:
+
+```bash
+AWS_PROFILE=my-profile make dev    # from repo root
+```
+
+Opens http://localhost:4001. Each service hot-reloads independently; see [`local/README.md`](../local/README.md) for commands (`make logs`, `make restart s=backend`, etc.) and the architecture diagram.
 
 ## Architecture
 

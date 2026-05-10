@@ -130,18 +130,29 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
 
 
 def _load_criteria_descriptions(user_dir: Path, task_name: str, criteria_names: set[str]) -> dict[str, str]:
+    """Find a config whose criteria cover all names we care about; return {name: description}.
+
+    Supports both standard configs (top-level `criteria`) and pipeline agent
+    configs (nested under `pipeline_stages.stages[].criteria`).
+    """
     configs_dir = user_dir / "configs"
     if not configs_dir.exists():
         return {}
     for json_file in configs_dir.glob("*.json"):
         try:
             data = json.loads(json_file.read_text())
-            criteria = data.get("criteria", [])
-            if not criteria:
-                continue
-            config_names = {c["name"] for c in criteria}
-            if criteria_names and criteria_names.issubset(config_names):
-                return {c["name"]: c["description"] for c in criteria}
+            # Collect all {name: description} from either layout
+            merged: dict[str, str] = {}
+            for c in data.get("criteria", []) or []:
+                if c.get("name") and c.get("description"):
+                    merged[c["name"]] = c["description"]
+            pipeline = (data.get("pipeline_stages") or {}).get("stages") or []
+            for stage in pipeline:
+                for c in (stage.get("criteria") or []):
+                    if c.get("name") and c.get("description"):
+                        merged[c["name"]] = c["description"]
+            if criteria_names and criteria_names.issubset(merged.keys()):
+                return {name: merged[name] for name in criteria_names}
         except Exception:
             continue
     return {}

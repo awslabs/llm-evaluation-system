@@ -251,12 +251,31 @@ export default function AggregateMetrics({
                       {(stage.criteria && stage.criteria.length > 0 ? stage.criteria : criteria).map((criterion) => {
                         const value = aggregate[models[0]]?.byCriterion?.[criterion] ?? 0;
                         const color = value >= 0.7 ? "text-green-400" : value >= 0.4 ? "text-yellow-400" : "text-red-400";
+                        const description = criteriaDescriptions?.[criterion];
+                        const isExpanded = expandedCriteria.has(criterion);
                         return (
                           <tr key={criterion} className="border-t border-claude-border/30">
                             <td className="py-1.5">
-                              <span className="text-sm text-claude-text capitalize">{formatCriterion(criterion)}</span>
+                              <div
+                                className={`text-sm text-claude-text capitalize ${description ? "cursor-pointer hover:text-claude-accent" : ""}`}
+                                onClick={() => description && toggleCriterion(criterion)}
+                              >
+                                <span className="flex items-center gap-1.5">
+                                  {description && (
+                                    <span className="text-xs text-claude-muted select-none">
+                                      {isExpanded ? "▼" : "▶"}
+                                    </span>
+                                  )}
+                                  {formatCriterion(criterion)}
+                                </span>
+                              </div>
+                              {isExpanded && description && (
+                                <div className="mt-1 ml-4 text-xs text-claude-muted normal-case">
+                                  {description}
+                                </div>
+                              )}
                             </td>
-                            <td className="py-1.5 text-right">
+                            <td className="py-1.5 text-right align-top">
                               <span className={`text-sm font-medium ${color}`}>{(value * 100).toFixed(0)}%</span>
                             </td>
                           </tr>

@@ -22,11 +22,38 @@ An LLM evaluation platform that plugs into your IDE as an MCP server. Describe w
 
 ### Install
 
-Ask your coding agent:
+Pick your IDE and paste / click.
 
-> Install eval-mcp by following https://github.com/awslabs/llm-evaluation-system/blob/main/INSTALL.md
+**Claude Code** — one CLI command:
+```bash
+claude mcp add-json eval '{"type":"stdio","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}' --scope user
+```
 
-The agent edits your IDE's MCP config, warms the cache, and tells you to restart. See [INSTALL.md](INSTALL.md) for the full guidance (also works as a manual reference).
+**Cursor** — one-click deeplink: [Install eval-mcp in Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=eval&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJsbG0tZXZhbHVhdGlvbi1zeXN0ZW0iLCJldmFsLW1jcCJdfQ==)
+
+**Kiro** — add to `~/.kiro/settings/mcp.json`:
+```json
+{
+  "mcpServers": {
+    "eval": {
+      "command": "uvx",
+      "args": ["--from", "llm-evaluation-system", "eval-mcp"]
+    }
+  }
+}
+```
+
+**Codex CLI** — add to `~/.codex/config.toml`, then restart Codex:
+```toml
+[mcp_servers.eval]
+command = "uvx"
+args = ["--from", "llm-evaluation-system", "eval-mcp"]
+```
+
+**VS Code** (with GitHub Copilot MCP) — one CLI command:
+```bash
+code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}'
+```
 
 ### Use
 

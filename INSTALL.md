@@ -68,6 +68,45 @@ For each IDE the user has installed:
 7. **Tell the user** exactly which file you changed and that they need to
    restart the IDE to activate the MCP.
 
+8. **Offer S3 team sharing (optional).** After the MCP is installed, ask:
+
+   > Do you want to share eval results, datasets, judges, and reports with
+   > teammates via S3? [yes / no]
+
+   If the user says **no**, skip this step — everything stays local. They can
+   enable it later by running `eval-mcp init <bucket>` themselves.
+
+   If the user says **yes**, ask:
+
+   > Does your team already have a shared eval bucket? [yes / no]
+
+   **If the team already has a bucket**, ask for its name and run:
+   ```bash
+   uvx --from llm-evaluation-system eval-mcp init <bucket-name>
+   ```
+
+   **If they're first on the team** (need to create the bucket), use the
+   Terraform module already in the repo:
+   ```bash
+   git clone https://github.com/awslabs/llm-evaluation-system.git /tmp/eval-mcp-infra
+   cd /tmp/eval-mcp-infra/infra/modules/eval-logs-bucket
+   terraform init
+   terraform apply -var="bucket_name=<bucket-name>"
+   ```
+   Then run `eval-mcp init <bucket-name>`. Tell the user to share the bucket
+   name with their teammates (their teammates just run `eval-mcp init` with
+   the same name — no Terraform needed).
+
+   A reasonable default bucket name is `eval-mcp-<aws-account-id>` (globally
+   unique, easy to remember). Get the account ID with:
+   ```bash
+   aws sts get-caller-identity --query Account --output text
+   ```
+
+   After `eval-mcp init` runs, every eval result, dataset, judge, config, and
+   PDF report auto-replicates to `s3://<bucket>/users/<you>/` in the
+   background, and every read auto-pulls from S3 first. No further setup.
+
 ---
 
 ## Per-IDE details

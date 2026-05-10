@@ -2,7 +2,7 @@
 
 # Agentic AI-Guided Evaluation Platform
 
-An LLM evaluation platform that plugs into your IDE as an MCP server. Describe what you want to evaluate — the AI assistant handles dataset generation, judge configuration, execution, and analysis through natural conversation.
+An LLM evaluation system where you describe what you want to evaluate in natural language — an expert AI agent handles dataset generation, judge configuration, execution, and analysis end-to-end, and hands you back a PDF report.
 
 ## Features
 
@@ -59,22 +59,14 @@ Using a coding agent to install? Point it at [INSTALL.md](INSTALL.md) — it han
 
 ### Use
 
-Ask your AI assistant:
+Ask your AI assistant to evaluate agents, models, or prompts — using a dataset you provide or one generated from your documents or context:
 
-- "Evaluate my RAG pipeline on these documents"
-- "Generate a QA dataset from this PDF and compare Claude Sonnet vs Nova Pro"
-- "Run an agent eval on `./my_agent.py`"
-- "Compare these three prompt templates"
+- "Evaluate my agent at `./my_agent.py`"
+- "Compare Claude Sonnet vs Nova Pro on this dataset"
+- "Test these three prompt templates against my golden QA set"
+- "Generate a dataset from this PDF and run an eval"
 
-The agent picks the right eval mode, auto-generates whatever's missing (dataset, judge, criteria), runs it, and gives you a PDF report.
-
-### View Results
-
-```bash
-uvx --from llm-evaluation-system eval-mcp view
-```
-
-Opens the comparison viewer at http://localhost:4001. The viewer auto-opens after every eval run — this command is only for re-opening past results.
+The agent picks the right mode, auto-generates whatever's missing (dataset, judge, criteria), runs it, opens the results viewer in your browser, and hands you a PDF report.
 
 ## Team Sharing (S3)
 

@@ -9,7 +9,7 @@ An LLM evaluation platform that works as an MCP server in your IDE. An expert AI
 - **Adaptable binary scoring** — Binary pass/fail per criteria rather than subjective numeric scales, shown to produce more reliable results across judges ([Chiang et al., 2025](https://arxiv.org/abs/2503.23339v2)). Criteria are tailored by the agent to what you're evaluating.
 - **Document-grounded synthetic data** — Upload PDFs, knowledge bases, or product docs and generate QA pairs grounded in your actual content, reflecting real customer scenarios.
 - **Agentic eval support** — Evaluate any agent calling Bedrock (Strands, LangChain, custom boto3) with zero code modification via OpenTelemetry instrumentation.
-- **Shared results via S3** — Team members sync eval logs to a shared S3 bucket. Each user has a personal prefix; projects provide shared access.
+- **Shared results via S3** — Team members sync eval logs, datasets, judges, and configs to a shared S3 bucket. Each user has a personal prefix; projects provide shared access.
 - **Local viewer** — Browse and compare evaluation results locally in your browser.
 
 ## Quick Start (MCP)
@@ -70,30 +70,30 @@ Opens the comparison viewer at http://localhost:4001.
 
 ## Team Sharing (S3)
 
-Share eval results across your team with a shared S3 bucket. No servers needed.
+Share datasets, judges, configs, and eval results across your team via a shared S3 bucket. No servers needed.
 
 ### Setup
 
 ```bash
-eval-mcp init my-team-evals
+eval-mcp config set bucket my-team-evals
 ```
 
-That's it. User identity is auto-detected from your AWS credentials. Projects are auto-discovered from the bucket.
+User identity is auto-detected from your AWS credentials. Projects are auto-discovered from the bucket.
 
 ### How it works
 
 ```
 s3://my-team-evals/
-  users/alice/            ← Alice's evals (auto-uploaded after each run)
-  users/bob/              ← Bob's evals
+  users/alice/            ← Alice's evals, datasets, judges, configs (auto-replicated on every write)
+  users/bob/              ← Bob's
   projects/project-alpha/ ← shared team evals
   projects/project-beta/  ← shared team evals
 ```
 
-- After eval runs → logs auto-upload to `users/{you}/`
-- `eval-mcp view` → pulls your logs + all project logs in the bucket
-- `eval-mcp share my-project` → copy your results to a shared project
-- `eval-mcp sync` → manual sync (up + down)
+- Every write (eval result, dataset, judge, config, PDF report) auto-replicates to `users/{you}/` in the background
+- Every list/read auto-pulls from S3 first (debounced, ~100ms) so your local state mirrors S3
+- `eval-mcp share my-project` → promote your stuff to a shared project prefix
+- `eval-mcp sync` → manual reconcile (used after long offline periods or on a fresh laptop)
 
 ### Create the bucket
 
@@ -102,6 +102,12 @@ cd infra/modules/eval-logs-bucket
 terraform init
 terraform apply -var="bucket_name=my-team-evals"
 ```
+
+## Self-host the MCP
+
+To run `eval-mcp` on a shared host (EC2, EKS, AgentCore, anywhere Python runs) so a team or CI pipeline points at one HTTP endpoint, see [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md). A `Dockerfile` is included at the repo root.
+
+This is the lightweight path — just the eval engine + viewer. For the full multi-user web app with chat, auth, and per-user isolation, see [Deploy Full Platform on EKS](#deploy-full-platform-on-eks) below.
 
 ## Agent Evaluation
 
@@ -123,9 +129,9 @@ with bedrock_capture():
 
 Works with Strands, LangChain, CrewAI, Claude Agent SDK, or any custom agent using boto3.
 
-## Deploy on AWS
+## Deploy Full Platform on EKS
 
-For multi-user deployment with authentication, run the full platform on EKS:
+For multi-user deployment with authentication and a polished web UI, run the full platform on EKS:
 
 ```bash
 ./deploy.sh
@@ -147,15 +153,9 @@ The script auto-installs Terraform, kubectl, and Helm, then deploys the complete
 ./destroy.sh
 ```
 
-## Alternative: Run Locally with Docker
+## Local Development
 
-For the full web UI locally (mirrors the production EKS topology in Docker Compose):
-
-```bash
-AWS_PROFILE=my-profile make dev
-```
-
-Opens at http://localhost:4001. See [local/README.md](local/README.md) for details.
+For working on the platform itself with hot reload (full web UI in Docker Compose), see [local/README.md](local/README.md).
 
 ## Acknowledgments
 

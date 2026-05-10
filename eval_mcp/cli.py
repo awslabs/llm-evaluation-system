@@ -13,7 +13,7 @@ def main(ctx):
     Run without subcommand to start as stdio MCP server (for Claude Code).
     """
     if ctx.invoked_subcommand is None:
-        from backend.mcp_servers.server import main as mcp_main
+        from eval_mcp.server import main as mcp_main
         mcp_main()
 
 
@@ -59,7 +59,7 @@ def serve(host, port):
     os.environ["EVAL_MCP_TRANSPORT"] = "http"
     os.environ["HOST"] = host
     os.environ["EVAL_MCP_PORT"] = str(port)
-    from backend.mcp_servers.server import main as mcp_main
+    from eval_mcp.server import main as mcp_main
     mcp_main()
 
 

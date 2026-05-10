@@ -9,15 +9,15 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 from mcp.types import TextContent
 
-from backend.core.bedrock_client import BedrockClient
-from backend.core.user_storage import (
+from eval_mcp.core.bedrock_client import BedrockClient
+from eval_mcp.core.user_storage import (
     get_user_documents_dir,
     get_document_content,
     save_dataset_to_db,
     MAX_DOCUMENTS,
 )
-from backend.core.logging_utils import get_logger, log_event
-from backend.core.document_chunking import (
+from eval_mcp.core.logging_utils import get_logger, log_event
+from eval_mcp.core.document_chunking import (
     needs_chunking,
     chunk_text,
     chunk_pdf,

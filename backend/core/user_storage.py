@@ -100,12 +100,22 @@ def get_user_log_dir(user_id: str) -> str:
 # ============== File save helpers (ephemeral, local only) ==============
 
 
+def _try_replicate(filepath: Path, user_id: str) -> None:
+    """Best-effort async replication to S3 (no-op if bucket isn't configured)."""
+    try:
+        from eval_mcp.s3_sync import replicate_async
+        replicate_async(filepath, user_id=user_id)
+    except Exception:
+        pass
+
+
 def save_dataset(user_id: str, filename: str, content: str) -> Path:
     safe_filename = os.path.basename(filename)
     if not safe_filename:
         raise ValueError("Invalid filename: empty after sanitization")
     filepath = get_user_datasets_dir(user_id) / safe_filename
     filepath.write_text(content)
+    _try_replicate(filepath, user_id)
     return filepath
 
 
@@ -115,6 +125,7 @@ def save_judge(user_id: str, filename: str, content: str) -> Path:
         raise ValueError("Invalid filename: empty after sanitization")
     filepath = get_user_judges_dir(user_id) / safe_filename
     filepath.write_text(content)
+    _try_replicate(filepath, user_id)
     return filepath
 
 
@@ -124,6 +135,7 @@ def save_config(user_id: str, filename: str, content: str) -> Path:
         raise ValueError("Invalid filename: empty after sanitization")
     filepath = get_user_configs_dir(user_id) / safe_filename
     filepath.write_text(content)
+    _try_replicate(filepath, user_id)
     return filepath
 
 
@@ -159,8 +171,10 @@ def _load_json_file(path: Path) -> Optional[dict[str, Any]]:
     return json.loads(path.read_text())
 
 
-def _save_json_file(path: Path, data: dict[str, Any]) -> None:
+def _save_json_file(path: Path, data: dict[str, Any], user_id: Optional[str] = None) -> None:
     path.write_text(json.dumps(data, indent=2))
+    if user_id:
+        _try_replicate(path, user_id)
 
 
 def _list_json_files(directory: Path) -> list[dict[str, Any]]:
@@ -251,7 +265,7 @@ def save_judge_to_db(user_id: str, name: str, config: dict[str, Any]) -> str:
         _s3_save_json(user_id, "judges", f"{judge_id}.json", data)
     else:
         store_dir = _get_json_store_dir(user_id, "judges")
-        _save_json_file(store_dir / f"{judge_id}.json", data)
+        _save_json_file(store_dir / f"{judge_id}.json", data, user_id)
 
     return judge_id
 
@@ -344,7 +358,7 @@ def save_eval_config_to_db(user_id: str, name: str, config: dict[str, Any]) -> s
         _s3_save_json(user_id, "eval_configs", f"{config_id}.json", data)
     else:
         store_dir = _get_json_store_dir(user_id, "eval_configs")
-        _save_json_file(store_dir / f"{config_id}.json", data)
+        _save_json_file(store_dir / f"{config_id}.json", data, user_id)
 
     return config_id
 
@@ -410,7 +424,7 @@ def save_dataset_to_db(user_id: str, name: str, tests: list[dict[str, Any]]) -> 
         _s3_save_json(user_id, "datasets", f"{dataset_id}.json", data)
     else:
         store_dir = _get_json_store_dir(user_id, "datasets")
-        _save_json_file(store_dir / f"{dataset_id}.json", data)
+        _save_json_file(store_dir / f"{dataset_id}.json", data, user_id)
 
     return dataset_id
 
@@ -481,7 +495,7 @@ def save_eval_groups(user_id: str, data: dict[str, Any]) -> None:
         _s3_save_json(user_id, "eval_results", "_groups.json", data)
     else:
         store_dir = _get_json_store_dir(user_id, "eval_results")
-        _save_json_file(store_dir / "_groups.json", data)
+        _save_json_file(store_dir / "_groups.json", data, user_id)
 
 
 def load_eval_groups(user_id: str) -> Optional[dict[str, Any]]:

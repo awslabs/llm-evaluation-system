@@ -14,7 +14,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Copy source and install dependencies
 COPY pyproject.toml uv.lock ./
 COPY backend/ ./backend/
-RUN uv sync --locked
+RUN uv sync --locked --extra k8s-sandbox --extra providers
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Create non-root user (uid 1000 to match k8s securityContext) and data directories

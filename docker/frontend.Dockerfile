@@ -19,7 +19,11 @@ COPY --from=deps /app/node_modules ./node_modules
 COPY frontend/ .
 
 # Build the Next.js app
+# NEXT_PUBLIC_SHOW_CHAT is baked in at build time; the EKS platform has chat,
+# so enable it. The standalone MCP viewer (eval_mcp/viewer_static) is built
+# separately via `npm run build:viewer` without this flag, so chat stays hidden.
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_PUBLIC_SHOW_CHAT=true
 RUN npm run build
 
 # Runner stage

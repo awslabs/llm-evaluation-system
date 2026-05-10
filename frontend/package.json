@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "BUILD_MODE=standalone next build",
+    "build:viewer": "BUILD_MODE=export next build && rm -rf ../eval_mcp/viewer_static && cp -r out ../eval_mcp/viewer_static",
     "start": "next start",
     "lint": "next lint"
   },

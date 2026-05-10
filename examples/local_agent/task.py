@@ -14,10 +14,15 @@ from inspect_ai.dataset import MemoryDataset, Sample
 from inspect_ai.scorer import Score, accuracy, scorer, stderr
 from inspect_ai.solver import Generate, TaskState, solver
 
-# Add eval_mcp to path
+# Add project root to path so eval_mcp is importable
+import os
 import sys
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "eval_mcp" / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 from eval_mcp.bedrock_capture import bedrock_capture
+
+# Default logs to ~/.eval-mcp/users/local/logs so `eval-mcp view` finds them
+if "INSPECT_LOG_DIR" not in os.environ:
+    os.environ["INSPECT_LOG_DIR"] = str(Path.home() / ".eval-mcp" / "users" / "local" / "logs")
 
 # Load agent
 _agent_path = Path(__file__).parent / "agent.py"

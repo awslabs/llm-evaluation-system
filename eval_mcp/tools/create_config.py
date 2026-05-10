@@ -15,8 +15,8 @@ from typing import Any, Dict, List, Optional
 
 from mcp.types import TextContent
 
-from backend.core.judge_config import JudgeConfig
-from backend.core.user_storage import (
+from eval_mcp.core.judge_config import JudgeConfig
+from eval_mcp.core.user_storage import (
     get_judge_by_name,
     get_dataset_by_name,
     get_user_dir,
@@ -264,10 +264,13 @@ def create_inspect_task_file(
 async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
     """Handle create_eval_config tool call."""
     try:
+        import time
         dataset_name = args.get("dataset")
         judge_name = args.get("judge")
         providers = args.get("providers")
-        config_name = args.get("configName", "evaluation")
+        # Auto-generated timestamp-based name. No agent-chosen names — that's
+        # how stale configs get reused by accident.
+        config_name = f"eval_{int(time.time() * 1000)}"
         description = args.get("description")
         user_id = args.get("user_id")
 

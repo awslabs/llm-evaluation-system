@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import signal
+import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -14,9 +15,13 @@ from botocore.config import Config
 from inspect_ai.log import read_eval_log_async
 from mcp.types import TextContent
 
-from backend.core.user_storage import get_user_dir, get_user_log_dir
+from eval_mcp.core.user_storage import get_user_dir, get_user_log_dir
 
 logger = logging.getLogger(__name__)
+
+# Invoke inspect-ai via the same interpreter that's running the MCP,
+# guaranteeing the right environment (no PATH resolution needed).
+_INSPECT_CMD = [sys.executable, "-m", "inspect_ai"]
 
 
 import re
@@ -210,7 +215,6 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
     try:
         config_name = args.get("configName")
         user_id = args.get("user_id")
-        max_concurrency = args.get("maxConcurrency", 16)
 
         # Validate required args
         if not user_id:
@@ -236,19 +240,6 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 TextContent(
                     type="text",
                     text=json.dumps({"success": False, "error": str(e)}),
-                )
-            ]
-
-        # Validate maxConcurrency is a bounded integer
-        try:
-            max_concurrency = int(max_concurrency)
-            if not 1 <= max_concurrency <= 64:
-                raise ValueError("out of range")
-        except (TypeError, ValueError):
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"success": False, "error": "maxConcurrency must be an integer between 1 and 64"}),
                 )
             ]
 
@@ -334,14 +325,13 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                     matches = _re.findall(r'"([^"]+/[^"]+)"', line)
                     models.extend(matches)
 
-        # Agent evals cap concurrency (each sample = separate K8s pod + LLM calls)
-        is_agent_eval = config_data.get("agent_image") if config_json_path.exists() else False
-        effective_concurrency = min(max_concurrency, 4) if is_agent_eval else max_concurrency
-
+        # Use Inspect's --adaptive-connections: auto-tunes parallelism based on
+        # actual provider throttling. Recommended by Inspect over a fixed value,
+        # and spares users from guessing a Bedrock quota they don't know.
         cmd: List[str] = [
-            "inspect", "eval",
+            *_INSPECT_CMD, "eval",
             relative_task,
-            "--max-connections", str(effective_concurrency),
+            "--adaptive-connections", "true",
             "--no-log-images",
             "--no-fail-on-error",
             "--log-shared", "10",
@@ -424,9 +414,9 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 if logs_to_retry:
                     logger.info(f"Retrying {len(logs_to_retry)} failed logs (run_id={this_run_id}) for user {user_id}")
                     retry_cmd = [
-                        "inspect", "eval-retry",
+                        *_INSPECT_CMD, "eval-retry",
                         *[str(l) for l in logs_to_retry],
-                        "--max-connections", str(effective_concurrency),
+                        "--adaptive-connections", "true",
                         "--no-log-images",
                         "--no-fail-on-error",
                     ]
@@ -445,7 +435,7 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
 
         # Pre-compute comparison JSON so the viewer reads instantly
         try:
-            from backend.core.eval_results import precompute_eval_results
+            from eval_mcp.core.eval_results import precompute_eval_results
             await precompute_eval_results(user_id)
         except Exception as e:
             logger.warning(f"Failed to pre-compute eval results: {e}")
@@ -492,18 +482,59 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                     "logFile": latest_log.name,
                 }
                 run_id = log.eval.run_id
+
+                # Replicate the new .eval log to S3 (no-op if bucket isn't set)
+                try:
+                    from eval_mcp.s3_sync import replicate_async
+                    log_uri = latest_log.name
+                    if log_uri.startswith("file://"):
+                        log_uri = log_uri[len("file://"):]
+                    replicate_async(Path(log_uri), user_id=user_id)
+                except Exception:
+                    pass
         except Exception as e:
             results_summary = {"error": f"Could not parse results: {str(e)}"}
+
+        viewer_path = f"/results?group={run_id}" if run_id else "/results"
+        viewer_url = f"http://localhost:4001{viewer_path}"
+
+        # Auto-open the viewer so the user doesn't have to run a separate
+        # command. On any failure we fall back to a manual-instructions string
+        # rather than lying that the browser opened successfully.
+        view_results_msg = f"Run `eval-mcp view` in your terminal, then open {viewer_url}"
+        try:
+            from eval_mcp.viewer import ensure_viewer_running
+            info = ensure_viewer_running(port=4001, open_path=viewer_path)
+            viewer_url = info["url"]
+            if info.get("browserOpened"):
+                if info.get("alreadyRunning"):
+                    view_results_msg = f"Viewer already running; opened {viewer_url}"
+                else:
+                    view_results_msg = f"Started viewer and opened {viewer_url}"
+            elif info.get("error"):
+                logger.warning(f"Viewer auto-start: {info['error']}")
+                view_results_msg = (
+                    f"Could not auto-start viewer ({info['error']}). "
+                    f"Run `eval-mcp view` manually, then open {viewer_url}"
+                )
+        except Exception as e:
+            logger.warning(f"Could not auto-start viewer: {e}")
 
         result = {
             "success": True,
             "evalId": eval_id,
             "configName": config_name,
             "runId": run_id,
-            "viewerUrl": f"/results?group={run_id}" if run_id else "/results",
+            "viewerUrl": viewer_url,
             "userDir": str(user_dir),
             "message": "Evaluation completed successfully",
             "summary": results_summary,
+            "viewResults": view_results_msg,
+            "nextStep": (
+                f"Call generate_report(group_id=\"{run_id}\") to create a PDF "
+                f"report for the user. Pass `context` describing what they "
+                f"were evaluating so the narrative is tailored."
+            ) if run_id else None,
         }
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
@@ -545,7 +576,6 @@ async def handle_retry_evaluation(args: Dict[str, Any]) -> List[TextContent]:
     """
     try:
         user_id = args.get("user_id")
-        max_concurrency = args.get("maxConcurrency", 16)
 
         if not user_id:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": "user_id is required"}))]
@@ -581,9 +611,9 @@ async def handle_retry_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         env["AWS_DEFAULT_REGION"] = region
 
         retry_cmd = [
-            "inspect", "eval-retry",
+            *_INSPECT_CMD, "eval-retry",
             *[str(l) for l in logs_to_retry],
-            "--max-connections", str(max_concurrency),
+            "--adaptive-connections", "true",
             "--no-log-images",
             "--no-fail-on-error",
         ]
@@ -620,7 +650,7 @@ async def handle_retry_evaluation(args: Dict[str, Any]) -> List[TextContent]:
 
         # Pre-compute results
         try:
-            from backend.core.eval_results import precompute_eval_results
+            from eval_mcp.core.eval_results import precompute_eval_results
             await precompute_eval_results(user_id)
         except Exception:
             pass

@@ -1,449 +1,297 @@
-"""Dataset analysis agent with its own tools and agentic loop."""
+"""Analyze QA dataset for structure and quality (CSV, JSON, JSONL)."""
 
+import csv
+import io
 import json
-import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from backend.core.bedrock_client import BedrockClient
-
-# Set up logging
-logger = logging.getLogger(__name__)
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+from mcp.types import TextContent
 
 
-# Internal tools for the dataset agent
-TOOLS = [
-    {
-        "name": "parse_csv",
-        "description": "Parse CSV content and extract headers, row count, and detect delimiter. Returns structure info.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "The raw CSV file content",
-                },
-            },
-            "required": ["content"],
-        },
-    },
-    {
-        "name": "get_sample_rows",
-        "description": "Get sample rows from the parsed CSV for inspection. Call parse_csv first.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "The raw CSV file content",
-                },
-                "first_n": {
-                    "type": "integer",
-                    "description": "Number of first rows to get (default: 5)",
-                    "default": 5,
-                },
-                "last_n": {
-                    "type": "integer",
-                    "description": "Number of last rows to get (default: 2)",
-                    "default": 2,
-                },
-            },
-            "required": ["content"],
-        },
-    },
-    {
-        "name": "check_column_mapping",
-        "description": "Validate that specific columns exist and check for empty values.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "content": {
-                    "type": "string",
-                    "description": "The raw CSV file content",
-                },
-                "question_column": {
-                    "type": "string",
-                    "description": "The column name to use as 'question'",
-                },
-                "answer_column": {
-                    "type": "string",
-                    "description": "The column name to use as 'golden_answer'",
-                },
-            },
-            "required": ["content", "question_column", "answer_column"],
-        },
-    },
-    {
-        "name": "submit_analysis",
-        "description": "Submit your final analysis. Call this when you've completed your assessment.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "valid": {
-                    "type": "boolean",
-                    "description": "Whether the dataset is valid and ready to use",
-                },
-                "column_mapping": {
-                    "type": "object",
-                    "description": "Mapping of detected columns: {question: 'col_name', golden_answer: 'col_name'}",
-                    "properties": {
-                        "question": {"type": ["string", "null"]},
-                        "golden_answer": {"type": ["string", "null"]},
-                    },
-                },
-                "issues": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of issues found (empty if none)",
-                },
-                "summary": {
-                    "type": "string",
-                    "description": "Brief summary of the dataset and its readiness",
-                },
-                "usable_rows": {
-                    "type": "integer",
-                    "description": "Number of rows that have both question and answer filled",
-                },
-            },
-            "required": ["valid", "column_mapping", "issues", "summary", "usable_rows"],
-        },
-    },
-]
-
-SYSTEM_PROMPT = """You are a dataset validation specialist. Your job is to analyze CSV files that will be used for LLM evaluation.
-
-The target format needs two key columns:
-- **question**: The input/prompt to test the LLM with
-- **golden_answer**: The ideal/expected answer to compare against
-
-Your workflow:
-1. First, call parse_csv to understand the structure
-2. Call get_sample_rows to see actual data
-3. Identify which columns map to question and golden_answer
-4. Call check_column_mapping to validate your mapping
-5. Call submit_analysis with your final assessment
-
-Be flexible with column names - users may use variations like:
-- For questions: q, input, prompt, query, text, user_input, user, question
-- For answers: answer, a, output, expected, response, golden, ideal, target, golden_answer, label
-
-If you can't find suitable columns, explain what's missing in your analysis.
-
-Always complete your analysis by calling submit_analysis."""
+# Common column/field name variations
+QUESTION_ALIASES = {"question", "q", "input", "prompt", "query", "text", "user_input", "user"}
+ANSWER_ALIASES = {"golden_answer", "answer", "a", "output", "expected", "response", "golden", "ideal", "target", "label"}
 
 
-class DatasetAgent:
-    """Agent specialized for dataset analysis."""
+def parse_csv(content: str) -> Tuple[List[str], List[Dict[str, str]], str]:
+    """Parse CSV content and return headers, rows, and any error.
 
-    def __init__(self, bedrock_client: BedrockClient):
-        self.bedrock = bedrock_client
-        self.conversation_history: List[Dict[str, Any]] = []
-        self._final_analysis: Optional[Dict[str, Any]] = None
+    Returns:
+        (headers, rows, error_message)
+    """
+    try:
+        # Try to detect delimiter
+        sample = content[:2048]
+        try:
+            dialect = csv.Sniffer().sniff(sample, delimiters=',;\t|')
+        except csv.Error:
+            dialect = csv.excel  # Default to comma-separated
 
-    def _execute_tool(self, tool_name: str, args: Dict[str, Any]) -> str:
-        """Execute an internal tool and return result."""
+        reader = csv.DictReader(io.StringIO(content), dialect=dialect)
+        headers = reader.fieldnames or []
 
-        if tool_name == "parse_csv":
-            return self._tool_parse_csv(args.get("content", ""))
+        if not headers:
+            return [], [], "CSV has no headers"
 
-        elif tool_name == "get_sample_rows":
-            return self._tool_get_sample_rows(
-                args.get("content", ""),
-                args.get("first_n", 5),
-                args.get("last_n", 2),
-            )
+        rows = list(reader)
+        return headers, rows, ""
 
-        elif tool_name == "check_column_mapping":
-            return self._tool_check_column_mapping(
-                args.get("content", ""),
-                args.get("question_column", ""),
-                args.get("answer_column", ""),
-            )
+    except Exception as e:
+        return [], [], f"CSV parsing error: {str(e)}"
 
-        elif tool_name == "submit_analysis":
-            self._final_analysis = {
-                "valid": args.get("valid", False),
-                "column_mapping": args.get("column_mapping", {}),
-                "issues": args.get("issues", []),
-                "summary": args.get("summary", ""),
-                "usable_rows": args.get("usable_rows", 0),
-            }
-            return "Analysis submitted successfully."
 
+def parse_json(content: str) -> Tuple[List[str], List[Dict[str, str]], str]:
+    """Parse JSON content (array of objects) and return fields, rows, and any error."""
+    try:
+        data = json.loads(content)
+
+        # Handle array at top level
+        if isinstance(data, list):
+            rows = data
+        # Handle object with array field
+        elif isinstance(data, dict):
+            array_fields = ["data", "items", "rows", "records", "questions", "examples", "dataset"]
+            rows = None
+            for field in array_fields:
+                if field in data and isinstance(data[field], list):
+                    rows = data[field]
+                    break
+            if rows is None:
+                for value in data.values():
+                    if isinstance(value, list) and len(value) > 0:
+                        rows = value
+                        break
+            if rows is None:
+                return [], [], "JSON must contain an array of objects"
         else:
-            return f"Unknown tool: {tool_name}"
+            return [], [], "JSON must be an array or object containing an array"
 
-    def _tool_parse_csv(self, content: str) -> str:
-        """Parse CSV and return structure info."""
-        import csv
-        import io
+        if not rows:
+            return [], [], "JSON array is empty"
 
-        try:
-            # Detect delimiter
-            sample = content[:2048]
+        if not all(isinstance(row, dict) for row in rows):
+            return [], [], "All items in JSON array must be objects"
+
+        fields = list(rows[0].keys()) if rows else []
+        string_rows = [{k: str(v) if v is not None else "" for k, v in row.items()} for row in rows]
+
+        return fields, string_rows, ""
+
+    except json.JSONDecodeError as e:
+        return [], [], f"JSON parsing error: {str(e)}"
+    except Exception as e:
+        return [], [], f"JSON processing error: {str(e)}"
+
+
+def parse_jsonl(content: str) -> Tuple[List[str], List[Dict[str, str]], str]:
+    """Parse JSONL content (one JSON object per line) and return fields, rows, and any error."""
+    try:
+        rows = []
+        fields = set()
+
+        for line_num, line in enumerate(content.strip().split("\n"), 1):
+            line = line.strip()
+            if not line:
+                continue
             try:
-                dialect = csv.Sniffer().sniff(sample, delimiters=',;\t|')
-                delimiter = dialect.delimiter
-            except csv.Error:
-                delimiter = ","
+                obj = json.loads(line)
+                if not isinstance(obj, dict):
+                    return [], [], f"Line {line_num}: Each line must be a JSON object"
+                fields.update(obj.keys())
+                string_row = {k: str(v) if v is not None else "" for k, v in obj.items()}
+                rows.append(string_row)
+            except json.JSONDecodeError as e:
+                return [], [], f"Line {line_num}: Invalid JSON - {str(e)}"
 
-            reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
-            headers = reader.fieldnames or []
+        if not rows:
+            return [], [], "JSONL file is empty"
 
-            if not headers:
-                return json.dumps({"error": "No headers found in CSV"})
+        return list(fields), rows, ""
 
-            rows = list(reader)
+    except Exception as e:
+        return [], [], f"JSONL processing error: {str(e)}"
 
-            # Count empty cells per column
-            empty_counts = {}
-            for col in headers:
-                empty_count = sum(1 for row in rows if not row.get(col, "").strip())
-                if empty_count > 0:
-                    empty_counts[col] = empty_count
 
-            return json.dumps({
-                "headers": headers,
-                "row_count": len(rows),
-                "delimiter": delimiter,
-                "empty_cells_per_column": empty_counts,
-            })
+def detect_column_mapping(headers: List[str]) -> Dict[str, Optional[str]]:
+    """Detect which columns map to question and golden_answer.
 
-        except Exception as e:
-            return json.dumps({"error": f"CSV parsing failed: {str(e)}"})
+    Returns:
+        {"question": column_name or None, "golden_answer": column_name or None}
+    """
+    headers_lower = {h.lower().strip(): h for h in headers}
 
-    def _tool_get_sample_rows(self, content: str, first_n: int, last_n: int) -> str:
-        """Get sample rows from CSV."""
-        import csv
-        import io
+    question_col = None
+    answer_col = None
 
-        try:
-            sample = content[:2048]
-            try:
-                dialect = csv.Sniffer().sniff(sample, delimiters=',;\t|')
-                delimiter = dialect.delimiter
-            except csv.Error:
-                delimiter = ","
+    # Find question column
+    for alias in QUESTION_ALIASES:
+        if alias in headers_lower:
+            question_col = headers_lower[alias]
+            break
 
-            reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
-            rows = list(reader)
+    # Find answer column
+    for alias in ANSWER_ALIASES:
+        if alias in headers_lower:
+            answer_col = headers_lower[alias]
+            break
 
-            first_rows = rows[:first_n]
-            last_rows = rows[-last_n:] if len(rows) > first_n + last_n else []
+    return {
+        "question": question_col,
+        "golden_answer": answer_col,
+    }
 
-            # Truncate long values for readability
-            def truncate_row(row):
-                return {k: v[:150] + "..." if len(v) > 150 else v for k, v in row.items()}
 
-            return json.dumps({
-                "first_rows": [truncate_row(r) for r in first_rows],
-                "last_rows": [truncate_row(r) for r in last_rows],
-                "total_rows": len(rows),
-            })
+def compute_stats(headers: List[str], rows: List[Dict[str, str]], mapping: Dict[str, Optional[str]]) -> Dict[str, Any]:
+    """Compute statistics about the dataset."""
+    stats = {
+        "total_rows": len(rows),
+        "columns": headers,
+        "empty_cells": {},
+        "usable_rows": 0,
+    }
 
-        except Exception as e:
-            return json.dumps({"error": f"Failed to get samples: {str(e)}"})
+    # Count empty cells per column
+    for col in headers:
+        empty_count = sum(1 for row in rows if not row.get(col, "").strip())
+        if empty_count > 0:
+            stats["empty_cells"][col] = empty_count
 
-    def _tool_check_column_mapping(self, content: str, question_col: str, answer_col: str) -> str:
-        """Check if column mapping is valid."""
-        import csv
-        import io
+    # Count usable rows (both question and answer present)
+    if mapping["question"] and mapping["golden_answer"]:
+        q_col = mapping["question"]
+        a_col = mapping["golden_answer"]
+        stats["usable_rows"] = sum(
+            1 for row in rows
+            if row.get(q_col, "").strip() and row.get(a_col, "").strip()
+        )
 
-        try:
-            sample = content[:2048]
-            try:
-                dialect = csv.Sniffer().sniff(sample, delimiters=',;\t|')
-                delimiter = dialect.delimiter
-            except csv.Error:
-                delimiter = ","
+    return stats
 
-            reader = csv.DictReader(io.StringIO(content), delimiter=delimiter)
-            headers = reader.fieldnames or []
-            rows = list(reader)
 
-            issues = []
+def sample_rows(
+    rows: List[Dict[str, str]],
+    mapping: Dict[str, Optional[str]],
+    first_n: int = 5,
+    last_n: int = 2,
+) -> List[Dict[str, str]]:
+    """Extract sample rows for preview, showing mapped columns."""
+    samples = []
 
-            # Check columns exist
-            if question_col not in headers:
-                issues.append(f"Column '{question_col}' not found. Available: {headers}")
-            if answer_col not in headers:
-                issues.append(f"Column '{answer_col}' not found. Available: {headers}")
+    # Get first N
+    for row in rows[:first_n]:
+        sample = {}
+        if mapping["question"]:
+            sample["question"] = row.get(mapping["question"], "")[:200]
+        if mapping["golden_answer"]:
+            sample["golden_answer"] = row.get(mapping["golden_answer"], "")[:200]
+        samples.append(sample)
 
-            if issues:
-                return json.dumps({"valid": False, "issues": issues})
+    # Get last N if there are more rows
+    if len(rows) > first_n + last_n:
+        samples.append({"_marker": f"... ({len(rows) - first_n - last_n} more rows) ..."})
+        for row in rows[-last_n:]:
+            sample = {}
+            if mapping["question"]:
+                sample["question"] = row.get(mapping["question"], "")[:200]
+            if mapping["golden_answer"]:
+                sample["golden_answer"] = row.get(mapping["golden_answer"], "")[:200]
+            samples.append(sample)
 
-            # Count usable rows
-            usable = 0
-            empty_questions = 0
-            empty_answers = 0
+    return samples
 
-            for row in rows:
-                q_val = row.get(question_col, "").strip()
-                a_val = row.get(answer_col, "").strip()
 
-                if q_val and a_val:
-                    usable += 1
-                if not q_val:
-                    empty_questions += 1
-                if not a_val:
-                    empty_answers += 1
+async def handle_analyze_dataset(args: Dict[str, Any]) -> List[TextContent]:
+    """Handle analyze_dataset tool call.
 
-            if empty_questions > 0:
-                issues.append(f"{empty_questions} rows have empty questions")
-            if empty_answers > 0:
-                issues.append(f"{empty_answers} rows have empty answers")
+    Args:
+        args: Tool arguments containing file_content, filename
 
-            return json.dumps({
-                "valid": usable > 0,
-                "usable_rows": usable,
-                "total_rows": len(rows),
-                "empty_questions": empty_questions,
-                "empty_answers": empty_answers,
-                "issues": issues,
-            })
+    Returns:
+        Analysis report as TextContent
+    """
+    file_content = args.get("file_content", "")
+    filename = args.get("filename", "dataset.csv")
 
-        except Exception as e:
-            return json.dumps({"error": f"Validation failed: {str(e)}"})
+    if not file_content:
+        return [TextContent(
+            type="text",
+            text=json.dumps({
+                "success": False,
+                "error": "No file content provided",
+            }),
+        )]
 
-    async def analyze(self, file_content: str, filename: str) -> Dict[str, Any]:
-        """
-        Run the analysis agent loop.
+    # Detect format and parse
+    ext = filename.lower().split(".")[-1] if "." in filename else "csv"
 
-        Args:
-            file_content: Raw CSV content
-            filename: Name of the file
+    if ext == "json":
+        headers, rows, error = parse_json(file_content)
+    elif ext in ("jsonl", "ndjson"):
+        headers, rows, error = parse_jsonl(file_content)
+    else:
+        headers, rows, error = parse_csv(file_content)
 
-        Returns:
-            Analysis result dict
-        """
-        import asyncio
+    if error:
+        return [TextContent(
+            type="text",
+            text=json.dumps({
+                "success": False,
+                "error": error,
+            }),
+        )]
 
-        logger.info(f"Starting analysis of '{filename}' ({len(file_content)} bytes)")
+    if not rows:
+        return [TextContent(
+            type="text",
+            text=json.dumps({
+                "success": False,
+                "error": "File is empty (no data rows)",
+            }),
+        )]
 
-        # Basic validation - check if content looks like text
-        try:
-            # Check for binary content (non-printable characters)
-            sample = file_content[:1000]
-            non_printable = sum(1 for c in sample if ord(c) < 32 and c not in '\n\r\t')
-            if non_printable > len(sample) * 0.1:  # More than 10% non-printable
-                logger.error(f"File appears to be binary, not CSV ({non_printable} non-printable chars in first 1000)")
-                return {
-                    "valid": False,
-                    "column_mapping": {"question": None, "golden_answer": None},
-                    "issues": ["File appears to be binary or corrupted, not a valid CSV text file"],
-                    "summary": "Invalid file format",
-                    "usable_rows": 0,
-                }
-        except Exception as e:
-            logger.error(f"Validation error: {e}")
-            return {
-                "valid": False,
-                "column_mapping": {"question": None, "golden_answer": None},
-                "issues": [f"File validation error: {str(e)}"],
-                "summary": "Could not validate file",
-                "usable_rows": 0,
-            }
+    # Detect column mapping
+    mapping = detect_column_mapping(headers)
 
-        # Initial message to the agent
-        user_message = f"""Analyze this CSV dataset file: "{filename}"
+    # Compute stats
+    stats = compute_stats(headers, rows, mapping)
 
-Here is the file content:
+    # Build issues list
+    issues = []
+    if not mapping["question"]:
+        issues.append(f"Could not detect question column. Available columns: {headers}. Expected one of: {sorted(QUESTION_ALIASES)}")
+    if not mapping["golden_answer"]:
+        issues.append(f"Could not detect answer column. Available columns: {headers}. Expected one of: {sorted(ANSWER_ALIASES)}")
 
-```csv
-{file_content[:10000]}
-```
+    if mapping["question"] and mapping["golden_answer"]:
+        q_empty = stats["empty_cells"].get(mapping["question"], 0)
+        a_empty = stats["empty_cells"].get(mapping["golden_answer"], 0)
+        if q_empty > 0:
+            issues.append(f"{q_empty} rows have empty questions")
+        if a_empty > 0:
+            issues.append(f"{a_empty} rows have empty answers")
 
-{"(File truncated - showing first 10000 characters)" if len(file_content) > 10000 else ""}
+    # Get samples
+    samples = sample_rows(rows, mapping)
 
-Please analyze this dataset and determine:
-1. What columns are available
-2. Which columns should map to "question" and "golden_answer"
-3. Data quality issues (empty cells, etc.)
-4. Whether this dataset is ready for use
+    # Determine validity
+    valid = bool(mapping["question"] and mapping["golden_answer"] and stats["usable_rows"] > 0)
 
-Use your tools to analyze, then submit your final analysis."""
+    # Build response
+    result = {
+        "success": True,
+        "format": ext,
+        "valid": valid,
+        "filename": filename,
+        "column_mapping": mapping,
+        "stats": stats,
+        "issues": issues,
+        "samples": samples,
+        "fields": headers,  # All field names for Claude fallback
+    }
 
-        self.conversation_history = [{"role": "user", "content": user_message}]
-        self._final_analysis = None
+    # Include raw sample for Claude fallback when auto-detect fails
+    if not valid:
+        # First 3 rows as raw data for LLM analysis
+        result["raw_sample"] = rows[:3] if len(rows) >= 3 else rows
 
-        max_iterations = 10
-
-        for iteration in range(max_iterations):
-            logger.info(f"[{filename}] Iteration {iteration + 1}/{max_iterations}")
-
-            try:
-                response = await asyncio.to_thread(
-                    self.bedrock.create_message,
-                    messages=self.conversation_history,
-                    tools=TOOLS,
-                    system=SYSTEM_PROMPT,
-                    max_tokens=4096,
-                )
-            except Exception as e:
-                logger.error(f"[{filename}] Bedrock API error: {e}")
-                return {
-                    "valid": False,
-                    "column_mapping": {"question": None, "golden_answer": None},
-                    "issues": [f"LLM API error: {str(e)}"],
-                    "summary": "Analysis failed due to API error",
-                    "usable_rows": 0,
-                }
-
-            stop_reason = response.get("stop_reason")
-
-            if stop_reason == "end_turn":
-                logger.info(f"[{filename}] Done (no submission)")
-                if self._final_analysis:
-                    return self._final_analysis
-                return {
-                    "valid": False,
-                    "column_mapping": {"question": None, "golden_answer": None},
-                    "issues": ["Agent did not complete analysis"],
-                    "summary": self.bedrock.extract_text_from_response(response),
-                    "usable_rows": 0,
-                }
-
-            elif stop_reason == "tool_use":
-                tool_uses = self.bedrock.extract_tool_uses(response)
-                tool_names = [t['name'] for t in tool_uses]
-                logger.info(f"[{filename}] Tools: {tool_names}")
-
-                self.conversation_history.append({
-                    "role": "assistant",
-                    "content": response.get("content", []),
-                })
-
-                tool_results = []
-                for tool_use in tool_uses:
-                    result = self._execute_tool(tool_use["name"], tool_use["input"])
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use["id"],
-                        "content": result,
-                    })
-
-                    if tool_use["name"] == "submit_analysis" and self._final_analysis:
-                        logger.info(f"[{filename}] Analysis complete: valid={self._final_analysis.get('valid')}")
-                        return self._final_analysis
-
-                self.conversation_history.append({"role": "user", "content": tool_results})
-
-            else:
-                logger.warning(f"[{filename}] Unexpected stop_reason: {stop_reason}")
-                break
-
-        # Max iterations or unexpected exit
-        logger.warning(f"[{filename}] Max iterations reached")
-        if self._final_analysis:
-            return self._final_analysis
-
-        return {
-            "valid": False,
-            "column_mapping": {"question": None, "golden_answer": None},
-            "issues": ["Analysis did not complete within iteration limit"],
-            "summary": "Analysis incomplete",
-            "usable_rows": 0,
-        }
+    return [TextContent(type="text", text=json.dumps(result, indent=2))]

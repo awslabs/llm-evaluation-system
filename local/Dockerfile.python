@@ -16,7 +16,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --extra dev
+RUN uv sync --locked --extra dev --extra backend --extra k8s-sandbox --extra providers
 ENV PATH="/app/.venv/bin:$PATH"
 
 COPY backend/ ./backend/

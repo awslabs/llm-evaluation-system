@@ -12,16 +12,21 @@ interface ResultsHeaderProps {
 export default function ResultsHeader({ groupId, sessionId }: ResultsHeaderProps) {
   const { user, logoutUrl } = useAuth();
   const router = useRouter();
-  const [generating, setGenerating] = useState(false);
+  const [downloading, setDownloading] = useState(false);
 
   const handleDownloadReport = async () => {
     if (!groupId) return;
-    setGenerating(true);
+    setDownloading(true);
     try {
-      const params = new URLSearchParams({ group_id: groupId });
-      if (sessionId) params.set("session_id", sessionId);
-      const response = await fetch(`/api/compare/report/pdf?${params.toString()}`);
-      if (!response.ok) throw new Error("Failed to generate report");
+      const response = await fetch(`/api/compare/report/${encodeURIComponent(groupId)}`);
+      if (response.status === 404) {
+        alert(
+          "No report has been generated yet for this evaluation.\n\n" +
+          "Ask the AI assistant to generate one — e.g., 'Generate a report for this eval'."
+        );
+        return;
+      }
+      if (!response.ok) throw new Error(`Failed to load report: ${response.status}`);
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -30,9 +35,9 @@ export default function ResultsHeader({ groupId, sessionId }: ResultsHeaderProps
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
-      console.error("Report generation failed:", err);
+      console.error("Report download failed:", err);
     } finally {
-      setGenerating(false);
+      setDownloading(false);
     }
   };
 
@@ -59,18 +64,18 @@ export default function ResultsHeader({ groupId, sessionId }: ResultsHeaderProps
           {groupId && (
             <button
               onClick={handleDownloadReport}
-              disabled={generating}
+              disabled={downloading}
               className="rounded-lg border border-claude-border px-4 py-2 text-sm text-claude-text hover:bg-claude-surface disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {generating ? "Generating..." : "Download Report"}
+              {downloading ? "Downloading..." : "Download Report"}
             </button>
           )}
-          {user?.name && (
+          {process.env.NEXT_PUBLIC_SHOW_CHAT === "true" && user?.name && (
             <div className="text-sm text-claude-muted">
               Signed in as <span className="text-claude-text font-medium">{user.name}</span>
             </div>
           )}
-          {process.env.NEXT_PUBLIC_SHOW_CHAT !== "false" && (
+          {process.env.NEXT_PUBLIC_SHOW_CHAT === "true" && (
             <button
               onClick={() => router.push("/chat")}
               className="rounded-lg bg-claude-accent px-4 py-2 text-sm font-semibold text-white hover:bg-claude-hover"
@@ -78,7 +83,7 @@ export default function ResultsHeader({ groupId, sessionId }: ResultsHeaderProps
               Back to Chat
             </button>
           )}
-          {process.env.NEXT_PUBLIC_SHOW_CHAT !== "false" && (
+          {process.env.NEXT_PUBLIC_SHOW_CHAT === "true" && (
             <button
               onClick={() => { window.location.href = logoutUrl; }}
               className="rounded-lg border border-claude-border px-4 py-2 text-sm text-claude-text hover:bg-claude-surface"

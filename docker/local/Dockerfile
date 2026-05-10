@@ -19,6 +19,7 @@ COPY --from=frontend-deps /app/node_modules ./node_modules
 COPY frontend/ .
 ENV BACKEND_URL=http://127.0.0.1:8080
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV NEXT_PUBLIC_SHOW_CHAT=true
 RUN npm run build
 
 # ============================================================
@@ -35,7 +36,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 # Python dependencies (separate from source for caching)
 WORKDIR /app
 COPY pyproject.toml uv.lock ./
-RUN uv sync --locked --extra dev
+RUN uv sync --locked --extra dev --extra backend --extra k8s-sandbox --extra providers
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Copy backend source

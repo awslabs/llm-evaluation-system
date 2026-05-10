@@ -6,9 +6,9 @@ from typing import Any, Dict, List
 
 from mcp.types import TextContent
 
-from backend.core.bedrock_client import BedrockClient
-from backend.core.user_storage import save_judge_to_db, get_dataset_by_name
-from backend.core.judge_config import MAX_CRITERIA, DEFAULT_CRITERIA
+from eval_mcp.core.bedrock_client import BedrockClient
+from eval_mcp.core.user_storage import save_judge_to_db, get_dataset_by_name
+from eval_mcp.core.judge_config import MAX_CRITERIA, DEFAULT_CRITERIA
 
 # Tool schema for structured criteria output
 CRITERIA_TOOL = {

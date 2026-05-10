@@ -653,88 +653,6 @@ wheels = [
 ]
 
 [[package]]
-name = "eval-platform"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "anyio" },
-    { name = "boto3" },
-    { name = "click" },
-    { name = "fastapi" },
-    { name = "fpdf2" },
-    { name = "httpx" },
-    { name = "inspect-ai" },
-    { name = "mcp" },
-    { name = "opentelemetry-instrumentation-botocore" },
-    { name = "opentelemetry-sdk" },
-    { name = "prompt-toolkit" },
-    { name = "pydantic" },
-    { name = "pypdf" },
-    { name = "rich" },
-    { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-backend = [
-    { name = "asyncpg" },
-]
-dev = [
-    { name = "black" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-    { name = "watchfiles" },
-]
-k8s-sandbox = [
-    { name = "inspect-k8s-sandbox" },
-]
-providers = [
-    { name = "anthropic" },
-    { name = "azure-ai-inference" },
-    { name = "azure-identity" },
-    { name = "google-genai" },
-    { name = "groq" },
-    { name = "mistralai" },
-    { name = "openai" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "anthropic", marker = "extra == 'providers'", specifier = ">=0.80.0" },
-    { name = "anyio", specifier = ">=4.0.0" },
-    { name = "asyncpg", marker = "extra == 'backend'", specifier = ">=0.30.0" },
-    { name = "azure-ai-inference", marker = "extra == 'providers'" },
-    { name = "azure-identity", marker = "extra == 'providers'" },
-    { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
-    { name = "boto3", specifier = ">=1.35.0" },
-    { name = "click", specifier = ">=8.1.7" },
-    { name = "fastapi", specifier = ">=0.104.1" },
-    { name = "fpdf2", specifier = ">=2.8.0" },
-    { name = "google-genai", marker = "extra == 'providers'", specifier = ">=1.69.0" },
-    { name = "groq", marker = "extra == 'providers'", specifier = ">=0.28.0" },
-    { name = "httpx", specifier = ">=0.27.0" },
-    { name = "inspect-ai", specifier = ">=0.3.0" },
-    { name = "inspect-k8s-sandbox", marker = "extra == 'k8s-sandbox'", specifier = ">=0.4.0" },
-    { name = "mcp", specifier = ">=1.0.0" },
-    { name = "mistralai", marker = "extra == 'providers'", specifier = ">=2.0.0" },
-    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.5.0" },
-    { name = "openai", marker = "extra == 'providers'", specifier = ">=2.26.0" },
-    { name = "opentelemetry-instrumentation-botocore", specifier = ">=0.50b0" },
-    { name = "opentelemetry-sdk", specifier = ">=1.30" },
-    { name = "prompt-toolkit", specifier = ">=3.0.43" },
-    { name = "pydantic", specifier = ">=2.0.0" },
-    { name = "pypdf", specifier = ">=4.0.0" },
-    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
-    { name = "rich", specifier = ">=13.7.0" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
-    { name = "uvicorn", extras = ["standard"], specifier = ">=0.24.0" },
-    { name = "watchfiles", marker = "extra == 'dev'", specifier = ">=1.0.0" },
-]
-provides-extras = ["providers", "k8s-sandbox", "backend", "dev"]
-
-[[package]]
 name = "eval-type-backport"
 version = "0.3.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1466,6 +1384,88 @@ sdist = { url = "https://files.pythonhosted.org/packages/2e/c9/06ea13676ef354f0a
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b4/de/88b3be5c31b22333b3ca2f6ff1de4e863d8fe45aaea7485f591970ec1d3e/linkify_it_py-2.1.0-py3-none-any.whl", hash = "sha256:0d252c1594ecba2ecedc444053db5d3a9b7ec1b0dd929c8f1d74dce89f86c05e", size = 19878, upload-time = "2026-03-01T07:48:46.098Z" },
 ]
+
+[[package]]
+name = "llm-evaluation-system"
+version = "0.1.1"
+source = { editable = "." }
+dependencies = [
+    { name = "anyio" },
+    { name = "boto3" },
+    { name = "click" },
+    { name = "fastapi" },
+    { name = "fpdf2" },
+    { name = "httpx" },
+    { name = "inspect-ai" },
+    { name = "mcp" },
+    { name = "opentelemetry-instrumentation-botocore" },
+    { name = "opentelemetry-sdk" },
+    { name = "prompt-toolkit" },
+    { name = "pydantic" },
+    { name = "pypdf" },
+    { name = "rich" },
+    { name = "uvicorn", extra = ["standard"] },
+]
+
+[package.optional-dependencies]
+backend = [
+    { name = "asyncpg" },
+]
+dev = [
+    { name = "black" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+    { name = "watchfiles" },
+]
+k8s-sandbox = [
+    { name = "inspect-k8s-sandbox" },
+]
+providers = [
+    { name = "anthropic" },
+    { name = "azure-ai-inference" },
+    { name = "azure-identity" },
+    { name = "google-genai" },
+    { name = "groq" },
+    { name = "mistralai" },
+    { name = "openai" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "anthropic", marker = "extra == 'providers'", specifier = ">=0.80.0" },
+    { name = "anyio", specifier = ">=4.0.0" },
+    { name = "asyncpg", marker = "extra == 'backend'", specifier = ">=0.30.0" },
+    { name = "azure-ai-inference", marker = "extra == 'providers'" },
+    { name = "azure-identity", marker = "extra == 'providers'" },
+    { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
+    { name = "boto3", specifier = ">=1.35.0" },
+    { name = "click", specifier = ">=8.1.7" },
+    { name = "fastapi", specifier = ">=0.104.1" },
+    { name = "fpdf2", specifier = ">=2.8.0" },
+    { name = "google-genai", marker = "extra == 'providers'", specifier = ">=1.69.0" },
+    { name = "groq", marker = "extra == 'providers'", specifier = ">=0.28.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
+    { name = "inspect-ai", specifier = ">=0.3.0" },
+    { name = "inspect-k8s-sandbox", marker = "extra == 'k8s-sandbox'", specifier = ">=0.4.0" },
+    { name = "mcp", specifier = ">=1.0.0" },
+    { name = "mistralai", marker = "extra == 'providers'", specifier = ">=2.0.0" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.5.0" },
+    { name = "openai", marker = "extra == 'providers'", specifier = ">=2.26.0" },
+    { name = "opentelemetry-instrumentation-botocore", specifier = ">=0.50b0" },
+    { name = "opentelemetry-sdk", specifier = ">=1.30" },
+    { name = "prompt-toolkit", specifier = ">=3.0.43" },
+    { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pypdf", specifier = ">=4.0.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=9.0.3" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.21.0" },
+    { name = "rich", specifier = ">=13.7.0" },
+    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.24.0" },
+    { name = "watchfiles", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+]
+provides-extras = ["providers", "k8s-sandbox", "backend", "dev"]
 
 [[package]]
 name = "markdown-it-py"

@@ -55,6 +55,8 @@ args = ["--from", "llm-evaluation-system", "eval-mcp"]
 code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}'
 ```
 
+Using a coding agent to install? Point it at [INSTALL.md](INSTALL.md) — it handles the config edit, warms the uvx cache, and asks about optional S3 team sharing.
+
 ### Use
 
 Ask your AI assistant:
@@ -81,7 +83,7 @@ Share datasets, judges, configs, and eval results across your team via a shared 
 ### Setup
 
 ```bash
-uvx --from llm-evaluation-system eval-mcp config set bucket my-team-evals
+uvx --from llm-evaluation-system eval-mcp init my-team-evals
 ```
 
 User identity is auto-detected from your AWS credentials. Projects are auto-discovered from the bucket.

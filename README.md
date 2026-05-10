@@ -1,6 +1,6 @@
 # Agentic AI-Guided Evaluation Platform
 
-An LLM evaluation platform that works as an MCP server in your IDE. An expert AI agent guides you through the entire evaluation process via natural conversation: describe what you want to evaluate, upload documents, and the agent handles dataset generation, judge configuration, execution, and analysis.
+An LLM evaluation platform that plugs into your IDE as an MCP server. Describe what you want to evaluate — the AI assistant handles dataset generation, judge configuration, execution, and analysis through natural conversation.
 
 ## Features
 
@@ -10,29 +10,25 @@ An LLM evaluation platform that works as an MCP server in your IDE. An expert AI
 - **Document-grounded synthetic data** — Upload PDFs, knowledge bases, or product docs and generate QA pairs grounded in your actual content, reflecting real customer scenarios.
 - **Agentic eval support** — Evaluate any agent calling Bedrock (Strands, LangChain, custom boto3) with zero code modification via OpenTelemetry instrumentation.
 
-## Quick Start (MCP)
+## Quick Start
 
 ### Prerequisites
 
-- Python 3.11+
 - AWS credentials with Bedrock model access
-- Claude Code, Cursor, Kiro, or any MCP-compatible IDE
+- [`uv`](https://docs.astral.sh/uv/getting-started/installation/) installed
+- Claude Code, Cursor, Kiro, VS Code, or any MCP-compatible IDE
 
 ### Install
 
-```bash
-git clone https://github.com/awslabs/llm-evaluation-system.git && cd llm-evaluation-system
-uv pip install -e .
-```
-
-### Add to your IDE
+Add this to your IDE's MCP config — nothing else to install. `uvx` pulls the package from PyPI on first run and caches it.
 
 **Claude Code** — add to `.claude/settings.json`:
 ```json
 {
   "mcpServers": {
     "eval": {
-      "command": "eval-mcp"
+      "command": "uvx",
+      "args": ["--from", "llm-evaluation-system", "eval-mcp"]
     }
   }
 }
@@ -42,17 +38,19 @@ uv pip install -e .
 ```json
 {
   "eval": {
-    "command": "eval-mcp"
+    "command": "uvx",
+    "args": ["--from", "llm-evaluation-system", "eval-mcp"]
   }
 }
 ```
 
-**Kiro** — add to `.kiro/settings/mcp.json` (or your user-level Kiro MCP config):
+**Kiro** — add to `.kiro/settings/mcp.json`:
 ```json
 {
   "mcpServers": {
     "eval": {
-      "command": "eval-mcp"
+      "command": "uvx",
+      "args": ["--from", "llm-evaluation-system", "eval-mcp"]
     }
   }
 }
@@ -60,22 +58,22 @@ uv pip install -e .
 
 ### Use
 
-Just ask your AI assistant:
+Ask your AI assistant:
 
 - "Evaluate my RAG pipeline on these documents"
-- "Generate a QA dataset from this PDF"
-- "Compare Claude Sonnet vs Nova Pro on my test cases"
-- "Run an agent eval on my Strands agent"
+- "Generate a QA dataset from this PDF and compare Claude Sonnet vs Nova Pro"
+- "Run an agent eval on `./my_agent.py`"
+- "Compare these three prompt templates"
 
-The agent handles the rest.
+The agent picks the right eval mode, auto-generates whatever's missing (dataset, judge, criteria), runs it, and gives you a PDF report.
 
 ### View Results
 
 ```bash
-eval-mcp view
+uvx --from llm-evaluation-system eval-mcp view
 ```
 
-Opens the comparison viewer at http://localhost:4001.
+Opens the comparison viewer at http://localhost:4001. The viewer auto-opens after every eval run — this command is only for re-opening past results.
 
 ## Team Sharing (S3)
 
@@ -84,7 +82,7 @@ Share datasets, judges, configs, and eval results across your team via a shared 
 ### Setup
 
 ```bash
-eval-mcp config set bucket my-team-evals
+uvx --from llm-evaluation-system eval-mcp config set bucket my-team-evals
 ```
 
 User identity is auto-detected from your AWS credentials. Projects are auto-discovered from the bucket.
@@ -100,29 +98,26 @@ s3://my-team-evals/
 ```
 
 - Every write (eval result, dataset, judge, config, PDF report) auto-replicates to `users/{you}/` in the background
-- Every list/read auto-pulls from S3 first (debounced, ~100ms) so your local state mirrors S3
+- Every list/read auto-pulls from S3 first (debounced) so your local state mirrors S3
 - `eval-mcp share my-project` → promote your stuff to a shared project prefix
 - `eval-mcp sync` → manual reconcile (used after long offline periods or on a fresh laptop)
 
 ### Create the bucket
 
+One person on the team runs this once:
+
 ```bash
-cd infra/modules/eval-logs-bucket
+git clone https://github.com/awslabs/llm-evaluation-system.git
+cd llm-evaluation-system/infra/modules/eval-logs-bucket
 terraform init
 terraform apply -var="bucket_name=my-team-evals"
 ```
-
-## Self-host the MCP
-
-To run `eval-mcp` on a shared host (EC2, EKS, AgentCore, anywhere Python runs) so a team or CI pipeline points at one HTTP endpoint, see [docs/SELF_HOSTING.md](docs/SELF_HOSTING.md). A `Dockerfile` is included at the repo root.
-
-This is the lightweight path — just the eval engine + viewer. For the full multi-user web app with chat, auth, and per-user isolation, see [Deploy Full Platform on EKS](#deploy-full-platform-on-eks) below.
 
 ## Agent Evaluation
 
 Evaluate any agent that calls Bedrock via boto3 — no code modification needed.
 
-The platform uses OpenTelemetry to intercept all Bedrock API calls at the botocore layer. Your agent runs unmodified; the instrumentation captures every LLM interaction (messages, tool calls, token usage) and feeds them into Inspect AI for scoring.
+OpenTelemetry intercepts Bedrock API calls at the botocore layer. Your agent runs unmodified; the instrumentation captures every LLM interaction (messages, tool calls, token usage) and feeds them into Inspect AI for scoring.
 
 ```python
 # Your agent — completely unmodified
@@ -130,45 +125,27 @@ def my_agent(prompt):
     client = boto3.client("bedrock-runtime")
     response = client.converse(modelId="us.anthropic.claude-sonnet-4-6", ...)
     return response
-
-# Eval wraps it transparently
-with bedrock_capture():
-    result = my_agent("What is 2+2?")
 ```
 
-Works with Strands, LangChain, CrewAI, Claude Agent SDK, or any custom agent using boto3.
+Works with Strands, LangChain, CrewAI, Claude Agent SDK, or any custom agent using boto3. Just point the agent at the eval:
+
+> Evaluate the agent at `./my_agent.py` on 10 test cases.
+
+The AI assistant analyzes the agent code, generates test cases, designs pipeline stages (routing → tool selection → argument quality → final output), runs the eval, and returns a scored report.
 
 ## Deploy Full Platform on EKS
 
-For multi-user deployment with authentication and a polished web UI, run the full platform on EKS:
+For a multi-user web app with Cognito auth, chat UI, and per-user isolation, the repo also ships an EKS deployment. This is the heavyweight path — for most users the MCP above is enough.
 
-```bash
-./deploy.sh
-```
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the full deployment.
 
-The script auto-installs Terraform, kubectl, and Helm, then deploys the complete platform with Cognito auth, CloudFront, WAF, and per-user isolation. See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for details.
+## Contributing / Local Development
 
-### User Management
-
-```bash
-./manage-users.sh create user@example.com
-./manage-users.sh list
-./manage-users.sh delete user@example.com
-```
-
-### Teardown
-
-```bash
-./destroy.sh
-```
-
-## Local Development
-
-For working on the platform itself with hot reload (full web UI in Docker Compose), see [local/README.md](local/README.md).
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for how to clone, run from source, rebuild the viewer frontend, and contribute.
 
 ## Acknowledgments
 
-This platform is built on [Inspect AI](https://github.com/UKGovernmentBEIS/inspect_ai) by the UK AI Security Institute, an open-source framework for large language model evaluations.
+Built on [Inspect AI](https://github.com/UKGovernmentBEIS/inspect_ai) by the UK AI Security Institute.
 
 ## Legal Disclaimer
 

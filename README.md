@@ -106,26 +106,6 @@ terraform init
 terraform apply -var="bucket_name=my-team-evals"
 ```
 
-## Agent Evaluation
-
-Evaluate any agent that calls Bedrock via boto3 — no code modification needed.
-
-OpenTelemetry intercepts Bedrock API calls at the botocore layer. Your agent runs unmodified; the instrumentation captures every LLM interaction (messages, tool calls, token usage) and feeds them into Inspect AI for scoring.
-
-```python
-# Your agent — completely unmodified
-def my_agent(prompt):
-    client = boto3.client("bedrock-runtime")
-    response = client.converse(modelId="us.anthropic.claude-sonnet-4-6", ...)
-    return response
-```
-
-Works with Strands, LangChain, CrewAI, Claude Agent SDK, or any custom agent using boto3. Just point the agent at the eval:
-
-> Evaluate the agent at `./my_agent.py` on 10 test cases.
-
-The AI assistant analyzes the agent code, generates test cases, designs pipeline stages (routing → tool selection → argument quality → final output), runs the eval, and returns a scored report.
-
 ## Deploy Full Platform on EKS
 
 For a multi-user web app with Cognito auth, chat UI, and per-user isolation, the repo also ships an EKS deployment. This is the heavyweight path — for most users the MCP above is enough.

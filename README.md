@@ -9,8 +9,6 @@ An LLM evaluation platform that works as an MCP server in your IDE. An expert AI
 - **Adaptable binary scoring** — Binary pass/fail per criteria rather than subjective numeric scales, shown to produce more reliable results across judges ([Chiang et al., 2025](https://arxiv.org/abs/2503.23339v2)). Criteria are tailored by the agent to what you're evaluating.
 - **Document-grounded synthetic data** — Upload PDFs, knowledge bases, or product docs and generate QA pairs grounded in your actual content, reflecting real customer scenarios.
 - **Agentic eval support** — Evaluate any agent calling Bedrock (Strands, LangChain, custom boto3) with zero code modification via OpenTelemetry instrumentation.
-- **Shared results via S3** — Team members sync eval logs, datasets, judges, and configs to a shared S3 bucket. Each user has a personal prefix; projects provide shared access.
-- **Local viewer** — Browse and compare evaluation results locally in your browser.
 
 ## Quick Start (MCP)
 

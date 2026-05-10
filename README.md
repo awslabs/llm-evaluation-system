@@ -18,7 +18,7 @@ An LLM evaluation platform that works as an MCP server in your IDE. An expert AI
 
 - Python 3.11+
 - AWS credentials with Bedrock model access
-- Claude Code, Cursor, or any MCP-compatible IDE
+- Claude Code, Cursor, Kiro, or any MCP-compatible IDE
 
 ### Install
 
@@ -45,6 +45,17 @@ uv pip install -e .
 {
   "eval": {
     "command": "eval-mcp"
+  }
+}
+```
+
+**Kiro** — add to `.kiro/settings/mcp.json` (or your user-level Kiro MCP config):
+```json
+{
+  "mcpServers": {
+    "eval": {
+      "command": "eval-mcp"
+    }
   }
 }
 ```

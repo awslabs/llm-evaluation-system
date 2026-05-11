@@ -54,29 +54,33 @@ def safe_user_path(user_id: str, *parts: str) -> Path:
     """Resolve a path under the user's base directory, rejecting any traversal.
 
     All callers that build filesystem paths from user-derived input (user_id,
-    group_id, filenames, config names) should go through this helper. It
-    resolves symlinks and `..` segments, then verifies the final path stays
-    within `get_user_base_dir()`. This is the pattern CodeQL's `py/path-injection`
-    rule recognizes as safe.
+    group_id, filenames, config names) should go through this helper. Uses
+    the OWASP-canonical ``os.path.realpath`` + ``startswith`` pattern:
+    realpath resolves ``..`` segments *and* symlinks on both sides, and the
+    startswith(base + os.sep) check confirms containment without the
+    ``/var/data-evil`` sibling-prefix bypass. Also rejects user_ids with
+    path separators or ``..``, and prevents `parts` from walking out of
+    the user's own subtree even if the final path happens to land under
+    base. Equivalent defense-in-depth to pathlib's resolve+is_relative_to,
+    but written in the form CodeQL's ``py/path-injection`` rule recognizes.
     """
     if not user_id:
         raise ValueError("user_id is required")
-    # Reject user_id values that could escape the user's own directory even
-    # when the final resolved path happens to land under base.
     if '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
         raise ValueError(f"invalid user_id: {user_id!r}")
 
-    base = get_user_base_dir().resolve()
-    base.mkdir(parents=True, exist_ok=True)
-    target = base.joinpath(user_id, *parts).resolve()
-    if not target.is_relative_to(base):
-        raise ValueError(f"path escape attempt: {target}")
-    # Also require the path to be under {base}/{user_id} — prevents a malicious
-    # `parts` from walking out of the user's subtree but staying under base.
-    user_root = base.joinpath(user_id).resolve()
-    if not target.is_relative_to(user_root):
-        raise ValueError(f"path escape attempt outside user root: {target}")
-    return target
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    os.makedirs(base_real, exist_ok=True)
+
+    user_root_real = os.path.realpath(os.path.join(base_real, user_id))
+    if not (user_root_real == base_real or user_root_real.startswith(base_real + os.sep)):
+        raise ValueError(f"path escape attempt (user_root): {user_root_real}")
+
+    target_real = os.path.realpath(os.path.join(user_root_real, *parts))
+    if not (target_real == user_root_real or target_real.startswith(user_root_real + os.sep)):
+        raise ValueError(f"path escape attempt outside user root: {target_real}")
+
+    return Path(target_real)
 
 
 def get_user_dir(user_id: str) -> Path:
@@ -192,12 +196,12 @@ def _generate_id(prefix: str) -> str:
 
 
 def _ensure_under_base(path: Path) -> Path:
-    """Resolve `path` and verify it stays within get_user_base_dir()."""
-    base = get_user_base_dir().resolve()
-    resolved = path.resolve()
-    if not resolved.is_relative_to(base):
+    """Verify `path` stays within get_user_base_dir() using realpath+startswith."""
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    resolved = os.path.realpath(str(path))
+    if not (resolved == base_real or resolved.startswith(base_real + os.sep)):
         raise ValueError(f"path escape attempt: {resolved}")
-    return resolved
+    return Path(resolved)
 
 
 def _load_json_file(path: Path) -> Optional[dict[str, Any]]:

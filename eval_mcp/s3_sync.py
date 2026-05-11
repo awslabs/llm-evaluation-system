@@ -46,15 +46,16 @@ def _user_root(user_id: Optional[str] = None) -> Path:
 
 
 def _is_syncable(path: Path, root: Path) -> bool:
-    resolved = path.resolve()
-    root_resolved = root.resolve()
-    if not resolved.is_relative_to(root_resolved):
+    root_real = os.path.realpath(str(root))
+    path_real = os.path.realpath(str(path))
+    if not (path_real == root_real or path_real.startswith(root_real + os.sep)):
         return False
+    resolved = Path(path_real)
     if not resolved.is_file():
         return False
     if resolved.name in _SKIP_NAMES or resolved.name.endswith(".pyc"):
         return False
-    rel = resolved.relative_to(root_resolved)
+    rel = resolved.relative_to(Path(root_real))
     return not any(part in _SKIP_PARTS for part in rel.parts)
 
 
@@ -128,12 +129,14 @@ def replicate_async(local_path: Path, user_id: Optional[str] = None) -> None:
         return
 
     try:
-        root = _user_root(user_id).resolve()
-        local_path = Path(local_path).resolve()
+        root_real = os.path.realpath(str(_user_root(user_id)))
+        local_real = os.path.realpath(str(local_path))
         # Path must live under the user root for the key to mirror correctly.
-        if not local_path.is_relative_to(root):
-            logger.debug("skipping replicate; path outside user root: %s", local_path)
+        if not (local_real == root_real or local_real.startswith(root_real + os.sep)):
+            logger.debug("skipping replicate; path outside user root: %s", local_real)
             return
+        local_path = Path(local_real)
+        root = Path(root_real)
         if not local_path.exists() or not local_path.is_file():
             return
         if not _is_syncable(local_path, root):

@@ -1,11 +1,7 @@
 {
   "mcpServers": {
-    "synthetic-eval": {
-      "command": "python",
-      "args": ["-m", "backend.mcp_servers.synthetic.server_http"],
-      "env": {
-        "PYTHONPATH": "."
-      }
+    "eval": {
+      "command": "eval-mcp"
     }
   }
 }

@@ -1,25 +1,46 @@
 [project]
-name = "eval-platform"
-version = "0.1.0"
-description = "CLI tool for LLM evaluation and testing using Inspect AI"
+name = "llm-evaluation-system"
+version = "0.1.2"
+description = "MCP server for agentic LLM evaluation: jury scoring, agent tracing via OpenTelemetry, document-grounded QA generation, PDF reports."
 readme = "README.md"
 requires-python = ">=3.12"
+license = { text = "Apache-2.0" }
+authors = [{ name = "AWS" }]
+keywords = ["mcp", "llm", "evaluation", "inspect-ai", "bedrock", "opentelemetry", "claude-code"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
+    # Core MCP + eval engine
     "mcp>=1.0.0",
+    "inspect-ai>=0.3.0",
+    "boto3>=1.35.0",
     "click>=8.1.7",
     "rich>=13.7.0",
     "prompt-toolkit>=3.0.43",
     "pydantic>=2.0.0",
     "anyio>=4.0.0",
-    "boto3>=1.35.0",
-    "asyncpg>=0.30.0",
+    # OpenTelemetry — required for capturing Bedrock calls in agentic evals
+    "opentelemetry-instrumentation-botocore>=0.50b0",
+    "opentelemetry-sdk>=1.30",
+    # Local viewer + HTTP MCP transport
     "fastapi>=0.104.1",
     "uvicorn[standard]>=0.24.0",
     "httpx>=0.27.0",
+    # PDF reports + document QA generation
     "pypdf>=4.0.0",
-    "inspect-ai>=0.3.0",
-    "inspect-k8s-sandbox>=0.4.0",
-    # Model provider SDKs (optional deps of inspect-ai, needed at runtime)
+    "fpdf2>=2.8.0",
+]
+
+[project.optional-dependencies]
+# Non-Bedrock model provider SDKs. Inspect AI imports each one lazily, so
+# only install the extra if you plan to evaluate models from those providers.
+providers = [
     "openai>=2.26.0",
     "anthropic>=0.80.0",
     "google-genai>=1.69.0",
@@ -27,15 +48,15 @@ dependencies = [
     "azure-ai-inference",
     "groq>=0.28.0",
     "mistralai>=2.0.0",
-    # Agent frameworks for evaluation (ARM compatible)
-    "strands-agents[bedrock]>=1.22.0",
-    "langgraph>=1.0.6",
-    "langchain-aws>=0.2.0",
-    # crewai excluded: chromadb/onnxruntime has no ARM + Python 3.12 wheels
-    # Authentication handled by oauth2-proxy (no auth libs needed in backend)
 ]
 
-[project.optional-dependencies]
+# Container-sandbox path for evaluating containerized agents on Kubernetes.
+k8s-sandbox = ["inspect-k8s-sandbox>=0.4.0"]
+
+# Postgres-backed chat history for the EKS web app. Not used by the MCP
+# itself — only needed by the FastAPI chat backend in `backend/api/`.
+backend = ["asyncpg>=0.30.0"]
+
 dev = [
     "watchfiles>=1.0.0",
     "pytest>=9.0.3",
@@ -46,6 +67,7 @@ dev = [
 ]
 
 [project.scripts]
+eval-mcp = "eval_mcp.cli:main"
 eval-chat = "backend.core.main:main"
 
 [build-system]
@@ -54,7 +76,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["backend*"]
+include = ["backend*", "eval_mcp*"]
+
+[tool.setuptools.package-data]
+eval_mcp = ["viewer_static/**/*", "provider_pricing.json", "INSTALL.md"]
+"eval_mcp.core" = ["provider_pricing.json"]
 
 [tool.black]
 line-length = 100

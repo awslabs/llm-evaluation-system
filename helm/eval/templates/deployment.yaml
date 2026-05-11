@@ -48,7 +48,7 @@ spec:
             capabilities:
               drop:
                 - ALL
-          command: ["/usr/bin/tini", "--", "python", "-m", "backend.mcp_servers.server"]
+          command: ["/usr/bin/tini", "--", "python", "-m", "eval_mcp"]
           ports:
             - containerPort: 8002
           env:

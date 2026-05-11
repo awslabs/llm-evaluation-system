@@ -4,7 +4,7 @@ Generates judge prompts dynamically from JudgeConfig criteria.
 Prompts instruct judges to output binary scores (0 or 1) for each criterion.
 """
 
-from backend.core.judge_config import JudgeConfig
+from eval_mcp.core.judge_config import JudgeConfig
 
 
 JUDGE_PROMPT_TEMPLATE = """Evaluate the AI answer against the reference. For each criterion, provide a binary score (0 or 1) and a brief reason.

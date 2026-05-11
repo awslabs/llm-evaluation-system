@@ -25,7 +25,7 @@ except ImportError:
 
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_DIR = SCRIPT_DIR.parent
-PRICING_FILE = PROJECT_DIR / "backend" / "core" / "provider_pricing.json"
+PRICING_FILE = PROJECT_DIR / "eval_mcp" / "core" / "provider_pricing.json"
 
 # Models to include per provider. Add new models here as they're released.
 OPENAI_MODELS = [
@@ -42,6 +42,7 @@ OPENAI_MODELS = [
 ]
 
 ANTHROPIC_MODELS = [
+    "claude-opus-4-7",
     "claude-opus-4-6",
     "claude-sonnet-4-6",
     "claude-opus-4-5",

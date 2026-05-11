@@ -5,11 +5,13 @@ completes (see backend.core.eval_results.precompute_eval_results).
 """
 
 import logging
+from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import Response
 
-from backend.core.eval_results import precompute_eval_results
-from backend.core.user_storage import get_user_log_dir, load_eval_detail, load_eval_groups
+from eval_mcp.core.eval_results import precompute_eval_results
+from eval_mcp.core.user_storage import get_user_log_dir, load_eval_detail, load_eval_groups
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,7 @@ async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
     Serves from pre-computed cache (fast). Merges in running evals
     from log headers so they appear without waiting for completion.
     """
-    from backend.core.eval_results import _read_log_headers, _build_groups_from_headers
+    from eval_mcp.core.eval_results import _read_log_headers, _build_groups_from_headers
 
     # Serve cached completed evals (instant)
     cached = load_eval_groups(user_id)
@@ -61,7 +63,7 @@ async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
 @router.get("/detail")
 async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_id)):
     """Get full comparison data for a specific evaluation group."""
-    from backend.core.eval_results import _read_log_headers, _build_groups_from_headers
+    from eval_mcp.core.eval_results import _read_log_headers, _build_groups_from_headers
 
     # For running evals, read partial results directly (skip cache)
     log_dir = get_user_log_dir(user_id)
@@ -187,8 +189,8 @@ async def get_sample_detail(
     user_id: str = Depends(_get_user_id),
 ):
     """Get full detail for a single sample including judge reasoning."""
-    from backend.core.eval_results import _read_full_logs
-    from backend.core.user_storage import get_user_log_dir
+    from eval_mcp.core.eval_results import _read_full_logs
+    from eval_mcp.core.user_storage import get_user_log_dir
 
     log_dir = get_user_log_dir(user_id)
     if not log_file.startswith(log_dir) and f"/users/{user_id}/" not in log_file:
@@ -267,3 +269,86 @@ async def get_eval_progress(user_id: str = Depends(_get_user_id)):
         "running": len(running_evals) > 0,
         "evals": running_evals,
     }
+
+
+@router.get("/report/pdf")
+async def generate_report_pdf(
+    group_id: str,
+    session_id: Optional[str] = Query(None),
+    monthly_volume: int = Query(10000, ge=100, le=10_000_000),
+    user_id: str = Depends(_get_user_id),
+):
+    """Generate a PDF report for an evaluation group.
+
+    Combines LLM-generated narrative (neutral analysis) with programmatic
+    data tables. Optionally includes chat transcript context for the narrative.
+
+    Args:
+        group_id: Evaluation group to report on.
+        session_id: Optional chat session ID to pull transcript for context.
+        monthly_volume: Projected monthly call volume for cost projections.
+    """
+    from eval_mcp.core.bedrock_client import BedrockClient
+    from eval_mcp.core.pdf_report import generate_pdf_report
+
+    # Load evaluation data
+    detail = load_eval_detail(user_id, group_id)
+    if not detail:
+        await precompute_eval_results(user_id)
+        detail = load_eval_detail(user_id, group_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Evaluation group not found")
+
+    # Load chat transcript if session_id provided
+    transcript = None
+    if session_id:
+        try:
+            from backend.api.main import db
+            if db:
+                messages = await db.get_session_messages(session_id)
+                transcript = messages
+        except Exception as e:
+            logger.warning(f"Failed to load transcript for session {session_id}: {e}")
+
+    # Generate PDF
+    bedrock = BedrockClient()
+    pdf_bytes = await generate_pdf_report(
+        detail=detail,
+        bedrock=bedrock,
+        transcript=transcript,
+        monthly_volume=monthly_volume,
+    )
+
+    # Store the PDF for later access
+    import os
+    from eval_mcp.core.user_storage import _s3_enabled, _get_s3_client, DATA_BUCKET, get_user_base_dir
+
+    safe_id = group_id.replace("/", "_").replace("\\", "_")
+    filename = f"report_{safe_id}.pdf"
+
+    if _s3_enabled():
+        key = f"users/{user_id}/store/reports/{filename}"
+        _get_s3_client().put_object(
+            Bucket=DATA_BUCKET,
+            Key=key,
+            Body=pdf_bytes,
+            ContentType="application/pdf",
+        )
+    else:
+        if not user_id or '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
+            raise ValueError(f"invalid user_id: {user_id!r}")
+        base_real = os.path.realpath(str(get_user_base_dir()))
+        pdf_real = os.path.realpath(os.path.join(base_real, user_id, "store", "reports", filename))
+        if not pdf_real.startswith(base_real + os.sep):
+            raise ValueError(f"path escape attempt: {pdf_real}")
+        os.makedirs(os.path.dirname(pdf_real), exist_ok=True)
+        with open(pdf_real, "wb") as f:
+            f.write(pdf_bytes)
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": f'attachment; filename="eval_report_{safe_id}.pdf"',
+        },
+    )

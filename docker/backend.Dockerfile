@@ -19,12 +19,15 @@ WORKDIR /app
 # Copy dependency files first (for layer caching)
 COPY pyproject.toml uv.lock ./
 
-# Install dependencies with locked versions
-RUN uv sync --locked
+# Install dependencies with locked versions.
+# The EKS web app needs Postgres (`backend`), the k8s container-agent path
+# (`k8s-sandbox`), and non-Bedrock model SDKs (`providers`).
+RUN uv sync --locked --extra backend --extra k8s-sandbox --extra providers
 ENV PATH="/app/.venv/bin:$PATH"
 
 # Copy source code
 COPY backend/ ./backend/
+COPY eval_mcp/ ./eval_mcp/
 
 # Create non-root user (uid 1000) with home directory
 RUN groupadd --gid 1000 appuser && useradd --uid 1000 --gid appuser --create-home appuser \

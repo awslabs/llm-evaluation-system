@@ -6,7 +6,7 @@ from typing import Any, Dict, List
 
 from rich.console import Console
 
-from .bedrock_client import BedrockClient
+from eval_mcp.core.bedrock_client import BedrockClient
 from .mcp_client import MultiMCPClient
 
 console = Console()

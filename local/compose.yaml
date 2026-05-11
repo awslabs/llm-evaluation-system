@@ -29,10 +29,11 @@ services:
         while ! python3 -c \"import socket; socket.create_connection(('127.0.0.1',8002),1)\" 2>/dev/null; do sleep 1; done &&
         echo 'MCP server ready, starting backend...' &&
         uvicorn local.entrypoint:app --host 0.0.0.0 --port 8080 --log-level info
-          --reload --reload-dir /app/backend/api --reload-dir /app/backend/core --reload-dir /app/local
+          --reload --reload-dir /app/backend/api --reload-dir /app/backend/core --reload-dir /app/eval_mcp --reload-dir /app/local
       "
     volumes:
       - ../backend:/app/backend
+      - ../eval_mcp:/app/eval_mcp
       - ../local:/app/local
       - userdata:/data/users
     environment:
@@ -70,9 +71,10 @@ services:
       context: ..
       dockerfile: local/Dockerfile.python
     network_mode: "service:backend"
-    command: watchfiles "python -m backend.mcp_servers.server" /app/backend/mcp_servers
+    command: watchfiles "python -m eval_mcp" /app/eval_mcp
     volumes:
       - ../backend:/app/backend
+      - ../eval_mcp:/app/eval_mcp
       - userdata:/data/users
       - /var/run/docker.sock:/var/run/docker.sock
     environment:

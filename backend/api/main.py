@@ -17,16 +17,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from backend.core.agent import Agent
-from backend.core.bedrock_client import BedrockClient
+from eval_mcp.core.bedrock_client import BedrockClient
 from backend.core.database import Database
 from backend.core.mcp_client import MultiMCPClient
-from backend.core.s3_client import (
+from eval_mcp.core.s3_client import (
     is_s3_enabled,
     generate_presigned_upload_url,
     list_user_s3_documents,
     get_s3_document_content,
 )
-from backend.core.user_storage import save_document
+from eval_mcp.core.user_storage import save_document
 
 # Configure logging at module level (runs when uvicorn loads the app)
 logging.basicConfig(
@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI):
 
         # Wait for running evaluations to complete
         try:
-            from backend.mcp_servers.synthetic.tools.run_evaluation import (
+            from eval_mcp.tools.run_eval import (
                 _running_evaluations,
                 cancel_user_evaluation,
             )
@@ -455,8 +455,8 @@ async def process_qa_dataset_content(
         - rows_saved: int (if successful)
         - error: str (if failed)
     """
-    from backend.core.user_storage import save_dataset_to_db
-    from backend.mcp_servers.dataset.tools.save_dataset import parse_content_to_rows, rows_to_test_cases, generate_dataset_name
+    from eval_mcp.core.user_storage import save_dataset_to_db
+    from eval_mcp.tools.save_dataset import parse_content_to_rows, rows_to_test_cases, generate_dataset_name
 
     logger = logging.getLogger(__name__)
     logger.info(f"Processing QA dataset: {filename} for user {user_id}")
@@ -1261,7 +1261,7 @@ async def list_documents(user_id: str = Depends(get_current_user_id)):
         documents = list_user_s3_documents(user_id)
         return {"documents": documents, "storage": "s3"}
     else:
-        from backend.core.user_storage import list_user_document_paths
+        from eval_mcp.core.user_storage import list_user_document_paths
         paths = list_user_document_paths(user_id)
         documents = [{"path": p} for p in paths]
         return {"documents": documents, "storage": "disk"}

@@ -2,6 +2,95 @@
 
 Technical reference for developers working on the LLM Evaluation Platform.
 
+## Working on the MCP locally
+
+If you're changing eval_mcp code (tools, server, viewer) and want to run your changes against your own IDE:
+
+### 1. Clone and install editable
+
+```bash
+git clone https://github.com/awslabs/llm-evaluation-system.git
+cd llm-evaluation-system
+uv venv
+uv pip install -e .
+```
+
+`-e` installs editable — edits in `eval_mcp/` take effect on next MCP restart without reinstalling.
+
+### 2. Point your IDE at the local build
+
+Instead of the uvx snippet from the README, use the venv's direct binary so your IDE runs the code you're editing:
+
+```json
+{
+  "mcpServers": {
+    "eval": {
+      "command": "/absolute/path/to/llm-evaluation-system/.venv/bin/eval-mcp",
+      "timeout": 120000
+    }
+  }
+}
+```
+
+Restart the IDE after every meaningful change (MCP tools are loaded at session start).
+
+### 3. Rebuild the viewer frontend
+
+The viewer is a pre-built Next.js export served by the Python viewer app. When you change `frontend/` source:
+
+```bash
+cd frontend
+npm install         # first time only
+npm run build:viewer
+```
+
+This compiles the frontend and copies the static output into `eval_mcp/viewer_static/`. The viewer picks it up on next `eval-mcp view`.
+
+### 4. Running evals against your changes
+
+```bash
+.venv/bin/eval-mcp view              # results viewer on :4001
+.venv/bin/inspect eval <task.py>     # run an eval directly via Inspect AI CLI
+```
+
+### 5. Publishing a new version
+
+```bash
+# Bump version in pyproject.toml, then
+uv lock              # keep uv.lock in sync (EKS build requires --locked)
+rm -rf dist && uv build
+uv publish           # uses UV_PUBLISH_TOKEN env var
+```
+
+Verify from a clean venv:
+```bash
+uvx --refresh --from 'llm-evaluation-system==<new-version>' eval-mcp --help
+```
+
+### 6. Running the MCP in Docker (optional)
+
+The repo root `Dockerfile` builds a slim container that runs `eval-mcp serve` as an HTTP MCP (for self-hosting on EC2/ECS/AgentCore). Local dev rarely needs this — use the editable install above.
+
+```bash
+docker build -t eval-mcp .
+docker run -p 8002:8002 \
+  -e AWS_REGION=us-west-2 \
+  -v ~/.aws:/root/.aws:ro \
+  eval-mcp
+```
+
+MCP listens at `http://localhost:8002/mcp`.
+
+## Full web app locally (Docker Compose)
+
+If you're changing the EKS web app (FastAPI + Next.js chat) and want hot reload for all services:
+
+```bash
+AWS_PROFILE=my-profile make dev    # from repo root
+```
+
+Opens http://localhost:4001. Each service hot-reloads independently; see [`local/README.md`](../local/README.md) for commands (`make logs`, `make restart s=backend`, etc.) and the architecture diagram.
+
 ## Architecture
 
 ```
@@ -53,29 +142,38 @@ Internet → CloudFront (HTTPS + WAF) → VPC Origin → Internal ALB → Pods
 
 ## Project Structure
 
+The repo hosts two deployable things that share some code:
+
+- **`eval_mcp/`** — the MCP package published to PyPI as `llm-evaluation-system`. This is what the README's Install section wires up. Self-contained; no database or web app.
+- **`backend/` + `frontend/`** — the full EKS web app (FastAPI + Next.js chat UI + Cognito auth). `./deploy.sh` is its entry point.
+
 ```
 llm-evaluation-system/
-├── backend/
-│   ├── api/           # FastAPI backend (main.py)
-│   ├── core/          # Core modules (agent, bedrock_client, database, etc.)
-│   └── mcp_servers/   # MCP servers
-│       ├── synthetic/ # QA generation, evaluations
-│       ├── providers/ # Bedrock model discovery
-│       └── dataset/   # Dataset management
-├── frontend/          # Next.js chat interface
-├── inspect/       # Inspect AI configuration
-├── docker/            # Dockerfiles
-├── helm/
-│   ├── eval/                      # App Helm chart
-│   └── external-secrets-config/   # External Secrets configuration
+├── eval_mcp/                     # MCP package (published to PyPI)
+│   ├── cli.py                    # `eval-mcp` CLI entry point
+│   ├── server.py                 # FastMCP server registering all tools
+│   ├── core/                     # Shared utilities (bedrock client, storage, pricing, ...)
+│   ├── tools/                    # MCP tool handlers (run_eval, generate_qa, ...)
+│   ├── bedrock_capture.py        # OTel-based Bedrock call capture for agent evals
+│   ├── s3_sync.py                # Optional team-sharing via S3
+│   ├── viewer.py                 # Local results viewer (FastAPI)
+│   └── viewer_static/            # Pre-built Next.js static export (rebuilt via `npm run build:viewer`)
+├── backend/                      # EKS web app (not used by the MCP)
+│   ├── api/                      # FastAPI routes (chat, compare, auth)
+│   └── core/                     # Chat agent, database, mcp_client
+├── frontend/                     # Next.js source for both the web app AND the viewer static export
+├── docker/                       # Dockerfiles (web app + MCP serve mode)
+├── helm/                         # EKS Helm chart + external-secrets config
 ├── infra/
-│   ├── data/          # Terraform: persistent layer (VPC, RDS, S3)
-│   └── platform/      # Terraform: compute layer (EKS, CloudFront, ALB, etc.)
-├── deploy.sh          # One-command deployment
-├── destroy.sh         # Teardown preserving data
-└── docs/
-    └── DEVELOPMENT.md # This file
+│   ├── data/                     # Terraform: persistent layer (VPC, RDS, S3) for the web app
+│   ├── platform/                 # Terraform: compute layer (EKS, CloudFront, ALB) for the web app
+│   └── modules/eval-logs-bucket/ # Terraform: optional S3 bucket for MCP team sharing
+├── deploy.sh / destroy.sh        # Web-app deployment
+├── manage-users.sh               # Web-app Cognito user admin
+└── docs/DEVELOPMENT.md           # This file
 ```
+
+The EKS/web-app content below is the heavyweight deployment path. For the MCP, the section above ("Working on the MCP locally") is what you want.
 
 ## Infrastructure Layout
 

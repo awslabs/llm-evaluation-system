@@ -8,8 +8,8 @@ Users interact through a chat interface. The agent uses MCP tools in this order:
 ## Adding a new model
 
 Update both files:
-1. `backend/mcp_servers/providers/server_http.py` — add to `PROMPTFOO_SUPPORTED_MODELS`
-2. `backend/core/bedrock_pricing.json` — add pricing (per 1M tokens)
+1. `eval_mcp/tools/server_http.py` — add to `SUPPORTED_MODELS`
+2. `eval_mcp/provider_pricing.json` — add pricing (per 1M tokens)
 
 ## Key files
 
@@ -17,8 +17,8 @@ Update both files:
 |------|---------|
 | `backend/core/agent.py` | Agent system prompt and loop |
 | `backend/core/bedrock_client.py` | Bedrock client + API key auth helper |
-| `backend/core/bedrock_pricing.json` | Single source of truth for model pricing |
-| `backend/core/judge_config.py` | Default judge models and criteria |
-| `backend/mcp_servers/providers/server_http.py` | Model allowlist and discovery |
-| `backend/mcp_servers/synthetic/server_http.py` | Eval tools (QA gen, judge, config, run) |
+| `eval_mcp/server.py` | Unified MCP server (all eval tools) |
+| `eval_mcp/tools/` | Eval tools (QA gen, judge, config, run, …) |
+| `eval_mcp/provider_pricing.json` | Source of truth for model pricing |
+| `eval_mcp/core/judge_config.py` | Default judge models and criteria |
 | `Makefile` | Local dev commands (`make dev`, `make run`, `make stop`) |

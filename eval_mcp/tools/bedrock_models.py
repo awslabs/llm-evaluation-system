@@ -1,27 +1,24 @@
-#!/usr/bin/env python3
 """
-Providers MCP Server - HTTP implementation.
+Canonical model discovery for Bedrock + external providers.
 
-Provides model discovery across Bedrock and external providers (OpenAI, Anthropic, Google, etc.).
-External providers are detected based on API key environment variables.
+Single source of truth — the MCP tool wrappers in eval_mcp/server.py just
+delegate here. Do not re-fork this logic into other modules.
+
+Why a curated SUPPORTED_MODELS allowlist: new Bedrock models occasionally
+ship without Converse-API support or with payload quirks that break the
+eval pipeline. Keeping the set explicit means a human acknowledges each
+new model before agents start selecting it. Maintenance cost is real but
+intentional — add new entries below when validating a new release.
 """
 
-import json
 import os
-from mcp.server import FastMCP
 from eval_mcp.core.bedrock_client import create_boto3_bedrock_client
 from eval_mcp.tools.external_providers import (
     detect_available_providers,
     get_external_models,
 )
 
-# Get configuration
 region = os.environ.get("AWS_REGION", "us-west-2")
-port = int(os.environ.get("PROVIDERS_MCP_SERVER_PORT", "8004"))
-host = os.environ.get("HOST", "127.0.0.1")
-
-# Initialize FastMCP server
-mcp = FastMCP("providers-server", port=port, host=host)
 
 # Curated models supported for evaluations. Updated Mar 2026.
 # Base IDs for models invokable directly + us. prefixed IDs for models
@@ -117,35 +114,16 @@ SUPPORTED_MODELS = {
 }
 
 
-@mcp.tool()
 def list_bedrock_models(
     provider: str = "all",
     limit: int = 0,
-    text_only: bool = True
-) -> str:
+    text_only: bool = True,
+) -> dict:
     """
-    Get list of AWS Bedrock models available for evaluations.
+    Discover Bedrock models, dedup'd across inference profiles and foundation models.
 
-    Queries both inference profiles (cross-region) and foundation models to return
-    all models you have access to. Returns models with correct format (bedrock/*) ready to use.
-
-    Args:
-        provider: Filter by provider name (case-insensitive):
-            - "all" (default): All providers
-            - "anthropic": Anthropic Claude models
-            - "meta": Meta Llama models
-            - "mistral": Mistral AI models
-            - "amazon": Amazon Nova models
-            - "deepseek": DeepSeek models
-            - "nvidia": NVIDIA Nemotron models
-            - Or any provider name
-
-        limit: Maximum number of models to return (default: 0 = unlimited)
-
-        text_only: If True (default), exclude image/embedding models
-
-    Returns:
-        JSON with available model IDs in bedrock:* format, sorted by provider
+    Returns a dict (callers JSON-encode). Filtered against SUPPORTED_MODELS
+    so only entries a human has validated for the eval pipeline are surfaced.
     """
     bedrock_client = create_boto3_bedrock_client('bedrock', region)
 
@@ -192,26 +170,30 @@ def list_bedrock_models(
 
         return True
 
-    # 1. Query inference profiles (cross-region endpoints)
+    # 1. Query inference profiles (cross-region endpoints) — PAGINATED.
+    # Earlier versions fetched a single page, which silently dropped newer
+    # models (claude-sonnet-4-6, opus-4-7, ...) once AWS shipped enough
+    # profiles to overflow the first response.
     try:
-        profiles_response = bedrock_client.list_inference_profiles()
-        for profile in profiles_response.get('inferenceProfileSummaries', []):
-            profile_id = profile.get('inferenceProfileId', '')
-            profile_name = profile.get('inferenceProfileName', '')
+        paginator = bedrock_client.get_paginator('list_inference_profiles')
+        for page in paginator.paginate(typeEquals='SYSTEM_DEFINED'):
+            for profile in page.get('inferenceProfileSummaries', []):
+                profile_id = profile.get('inferenceProfileId', '')
+                profile_name = profile.get('inferenceProfileName', '')
 
-            if not should_include(profile_id, profile_name, provider):
-                continue
+                if not should_include(profile_id, profile_name, provider):
+                    continue
 
-            # Mark base ID as seen so foundation model won't duplicate
-            seen_base_ids.add(strip_regional_prefix(profile_id))
-            models.append({
-                'id': f"bedrock/{profile_id}",
-                'modelId': profile_id,
-                'name': profile_name,
-                'provider': extract_provider_name(profile_id),
-                'type': 'inference_profile',
-            })
-    except Exception as e:
+                # Mark base ID as seen so foundation model won't duplicate
+                seen_base_ids.add(strip_regional_prefix(profile_id))
+                models.append({
+                    'id': f"bedrock/{profile_id}",
+                    'modelId': profile_id,
+                    'name': profile_name,
+                    'provider': extract_provider_name(profile_id),
+                    'type': 'inference_profile',
+                })
+    except Exception:
         pass  # Continue to foundation models even if profiles fail
 
     # 2. Query foundation models (includes models without inference profiles like Nemotron)
@@ -241,75 +223,54 @@ def list_bedrock_models(
         pass  # Return whatever we have
 
     if not models:
-        return json.dumps({
+        return {
+            "models": [],
+            "count": 0,
             "error": "Failed to list models",
-            "note": "Check AWS credentials and permissions"
-        })
+            "note": "Check AWS credentials and bedrock:ListInferenceProfiles / bedrock:ListFoundationModels permissions.",
+        }
 
-    # Sort by provider, then by name
     models.sort(key=lambda x: (x['provider'], x['name']))
 
-    # Apply limit
+    truncated = False
     if limit > 0 and limit < len(models):
         models = models[:limit]
         truncated = True
-    else:
-        truncated = False
 
-    return json.dumps({
+    return {
         "models": models,
         "count": len(models),
         "truncated": truncated,
         "filters": {
             "provider": provider,
             "limit": limit,
-            "text_only": text_only
+            "text_only": text_only,
         },
-        "note": "Shows inference profiles and foundation models. Use text_only=false to include image/embedding models."
-    }, indent=2)
+        "note": "Shows inference profiles and foundation models. Use text_only=false to include image/embedding models.",
+    }
 
 
-@mcp.tool()
 def list_available_models(
     provider: str = "all",
     source: str = "all",
-) -> str:
+) -> dict:
     """
-    List all models available for evaluations, across Bedrock and external providers.
+    Combine Bedrock + external-provider models into one list.
 
-    Combines AWS Bedrock models with any external providers that have API keys configured
-    (OpenAI, Anthropic direct, Google Gemini, etc.).
-
-    Args:
-        provider: Filter by provider name (case-insensitive):
-            - "all" (default): All providers
-            - "openai": OpenAI models (requires OPENAI_API_KEY)
-            - "anthropic": Anthropic models (Bedrock + direct API if key set)
-            - "google": Google Gemini models (requires GOOGLE_API_KEY)
-            - Or any Bedrock provider name (amazon, meta, mistral, etc.)
-
-        source: Filter by source:
-            - "all" (default): Bedrock + external providers
-            - "bedrock": Only AWS Bedrock models
-            - "external": Only external provider models (OpenAI, Anthropic direct, Google, etc.)
-
-    Returns:
-        JSON with available models from all configured providers, sorted by source then provider
+    Returns a dict (callers JSON-encode). External providers appear only when
+    their API key env var is set (see external_providers.EXTERNAL_PROVIDERS).
     """
     all_models = []
 
-    # 1. Get Bedrock models (unless filtered to external only)
     if source in ("all", "bedrock"):
         try:
-            bedrock_result = json.loads(list_bedrock_models(provider=provider))
-            if "models" in bedrock_result:
-                for m in bedrock_result["models"]:
-                    m["source"] = "bedrock"
-                all_models.extend(bedrock_result["models"])
+            bedrock_result = list_bedrock_models(provider=provider)
+            for m in bedrock_result.get("models", []):
+                m["source"] = "bedrock"
+                all_models.append(m)
         except Exception:
-            pass  # Bedrock may not be available
+            pass
 
-    # 2. Get external models (unless filtered to bedrock only)
     if source in ("all", "external"):
         external = get_external_models(provider=provider)
         for m in external:
@@ -317,25 +278,19 @@ def list_available_models(
             m["type"] = "external"
         all_models.extend(external)
 
-    # Detect which external providers are configured
     available_providers = detect_available_providers()
 
     if not all_models:
-        return json.dumps({
+        return {
             "models": [],
             "count": 0,
             "available_providers": available_providers,
-            "note": "No models found. Check AWS credentials for Bedrock, or configure API keys for external providers (make keys / deploy.sh --keys)."
-        })
+            "note": "No models found. Check AWS credentials for Bedrock, or configure API keys for external providers (make keys / deploy.sh --keys).",
+        }
 
-    return json.dumps({
+    return {
         "models": all_models,
         "count": len(all_models),
         "available_providers": available_providers,
-        "note": "Models from Bedrock and external providers. Use source='bedrock' or source='external' to filter."
-    }, indent=2)
-
-
-if __name__ == "__main__":
-    print(f"✓ Starting Providers MCP Server on http://{host}:{port}/mcp")
-    mcp.run(transport="streamable-http")
+        "note": "Models from Bedrock and external providers. Use source='bedrock' or source='external' to filter.",
+    }

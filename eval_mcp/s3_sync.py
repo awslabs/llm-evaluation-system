@@ -50,13 +50,13 @@ def _is_syncable(path: Path, root: Path) -> bool:
     path_real = os.path.realpath(str(path))
     if not (path_real == root_real or path_real.startswith(root_real + os.sep)):
         return False
-    resolved = Path(path_real)
-    if not resolved.is_file():
+    if not os.path.isfile(path_real):
         return False
-    if resolved.name in _SKIP_NAMES or resolved.name.endswith(".pyc"):
+    name = os.path.basename(path_real)
+    if name in _SKIP_NAMES or name.endswith(".pyc"):
         return False
-    rel = resolved.relative_to(Path(root_real))
-    return not any(part in _SKIP_PARTS for part in rel.parts)
+    rel_parts = os.path.relpath(path_real, root_real).split(os.sep)
+    return not any(part in _SKIP_PARTS for part in rel_parts)
 
 
 def _iter_local_files(root: Path):
@@ -135,11 +135,9 @@ def replicate_async(local_path: Path, user_id: Optional[str] = None) -> None:
         if not (local_real == root_real or local_real.startswith(root_real + os.sep)):
             logger.debug("skipping replicate; path outside user root: %s", local_real)
             return
-        local_path = Path(local_real)
-        root = Path(root_real)
-        if not local_path.exists() or not local_path.is_file():
+        if not os.path.isfile(local_real):
             return
-        if not _is_syncable(local_path, root):
+        if not _is_syncable(Path(local_real), Path(root_real)):
             return
     except Exception as e:
         logger.warning("replicate_async preflight failed for %s: %s", local_path, e)
@@ -147,14 +145,14 @@ def replicate_async(local_path: Path, user_id: Optional[str] = None) -> None:
 
     user = user_id or get_user()
     prefix = f"users/{user}/"
-    key = _key_for(local_path, root, prefix)
+    key = _key_for(Path(local_real), Path(root_real), prefix)
 
     def _do_upload():
         try:
-            _get_s3_client().upload_file(str(local_path), bucket, key)
-            logger.debug("replicated %s -> s3://%s/%s", local_path.name, bucket, key)
+            _get_s3_client().upload_file(local_real, bucket, key)
+            logger.debug("replicated %s -> s3://%s/%s", os.path.basename(local_real), bucket, key)
         except Exception as e:
-            logger.warning("replicate failed for %s: %s", local_path, e)
+            logger.warning("replicate failed for %s: %s", local_real, e)
 
     _get_pool().submit(_do_upload)
 

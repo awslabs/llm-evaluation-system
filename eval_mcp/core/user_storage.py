@@ -89,27 +89,50 @@ def get_user_dir(user_id: str) -> Path:
     In production, this is an emptyDir volume for temporary task files.
     In local dev, this is also where the JSON store and logs live.
     """
-    user_dir = safe_user_path(user_id)
-    user_dir.mkdir(parents=True, exist_ok=True)
-    return user_dir
+    # Inlined realpath+startswith (CodeQL py/path-injection requires the
+    # sanitizer check in the same function as the filesystem sink).
+    if not user_id or '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
+        raise ValueError(f"invalid user_id: {user_id!r}")
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    os.makedirs(base_real, exist_ok=True)
+    target_real = os.path.realpath(os.path.join(base_real, user_id))
+    if not (target_real == base_real or target_real.startswith(base_real + os.sep)):
+        raise ValueError(f"path escape attempt: {target_real}")
+    os.makedirs(target_real, exist_ok=True)
+    return Path(target_real)
 
 
 def get_user_datasets_dir(user_id: str) -> Path:
-    datasets_dir = get_user_dir(user_id) / "datasets"
-    datasets_dir.mkdir(parents=True, exist_ok=True)
-    return datasets_dir
+    if not user_id or '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
+        raise ValueError(f"invalid user_id: {user_id!r}")
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    target_real = os.path.realpath(os.path.join(base_real, user_id, "datasets"))
+    if not target_real.startswith(base_real + os.sep):
+        raise ValueError(f"path escape attempt: {target_real}")
+    os.makedirs(target_real, exist_ok=True)
+    return Path(target_real)
 
 
 def get_user_judges_dir(user_id: str) -> Path:
-    judges_dir = get_user_dir(user_id) / "judges"
-    judges_dir.mkdir(parents=True, exist_ok=True)
-    return judges_dir
+    if not user_id or '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
+        raise ValueError(f"invalid user_id: {user_id!r}")
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    target_real = os.path.realpath(os.path.join(base_real, user_id, "judges"))
+    if not target_real.startswith(base_real + os.sep):
+        raise ValueError(f"path escape attempt: {target_real}")
+    os.makedirs(target_real, exist_ok=True)
+    return Path(target_real)
 
 
 def get_user_configs_dir(user_id: str) -> Path:
-    configs_dir = get_user_dir(user_id) / "configs"
-    configs_dir.mkdir(parents=True, exist_ok=True)
-    return configs_dir
+    if not user_id or '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
+        raise ValueError(f"invalid user_id: {user_id!r}")
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    target_real = os.path.realpath(os.path.join(base_real, user_id, "configs"))
+    if not target_real.startswith(base_real + os.sep):
+        raise ValueError(f"path escape attempt: {target_real}")
+    os.makedirs(target_real, exist_ok=True)
+    return Path(target_real)
 
 
 def get_user_log_dir(user_id: str) -> str:
@@ -119,9 +142,14 @@ def get_user_log_dir(user_id: str) -> str:
     """
     if _s3_enabled():
         return f"s3://{DATA_BUCKET}/users/{user_id}/logs"
-    log_dir = safe_user_path(user_id, "logs")
-    log_dir.mkdir(parents=True, exist_ok=True)
-    return str(log_dir)
+    if not user_id or '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
+        raise ValueError(f"invalid user_id: {user_id!r}")
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    target_real = os.path.realpath(os.path.join(base_real, user_id, "logs"))
+    if not target_real.startswith(base_real + os.sep):
+        raise ValueError(f"path escape attempt: {target_real}")
+    os.makedirs(target_real, exist_ok=True)
+    return target_real
 
 
 # ============== File save helpers (ephemeral, local only) ==============
@@ -183,12 +211,17 @@ def _s3_store_prefix(user_id: str, store_type: str) -> str:
 
 def _get_json_store_dir(user_id: str, store_type: str) -> Path:
     """Get local JSON store directory (used only when S3 is not configured)."""
+    if not user_id or '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
+        raise ValueError(f"invalid user_id: {user_id!r}")
     safe_type = os.path.basename(store_type)
     if not safe_type or safe_type != store_type:
         raise ValueError(f"Invalid store_type: {store_type!r}")
-    store_dir = safe_user_path(user_id, "store", safe_type)
-    store_dir.mkdir(parents=True, exist_ok=True)
-    return store_dir
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    target_real = os.path.realpath(os.path.join(base_real, user_id, "store", safe_type))
+    if not target_real.startswith(base_real + os.sep):
+        raise ValueError(f"path escape attempt: {target_real}")
+    os.makedirs(target_real, exist_ok=True)
+    return Path(target_real)
 
 
 def _generate_id(prefix: str) -> str:
@@ -205,17 +238,25 @@ def _ensure_under_base(path: Path) -> Path:
 
 
 def _load_json_file(path: Path) -> Optional[dict[str, Any]]:
-    safe = _ensure_under_base(path)
-    if not safe.exists():
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    safe = os.path.realpath(str(path))
+    if not (safe == base_real or safe.startswith(base_real + os.sep)):
+        raise ValueError(f"path escape attempt: {safe}")
+    if not os.path.exists(safe):
         return None
-    return json.loads(safe.read_text())
+    with open(safe, "r") as f:
+        return json.loads(f.read())
 
 
 def _save_json_file(path: Path, data: dict[str, Any], user_id: Optional[str] = None) -> None:
-    safe = _ensure_under_base(path)
-    safe.write_text(json.dumps(data, indent=2))
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    safe = os.path.realpath(str(path))
+    if not (safe == base_real or safe.startswith(base_real + os.sep)):
+        raise ValueError(f"path escape attempt: {safe}")
+    with open(safe, "w") as f:
+        f.write(json.dumps(data, indent=2))
     if user_id:
-        _try_replicate(safe, user_id)
+        _try_replicate(Path(safe), user_id)
 
 
 def _list_json_files(directory: Path) -> list[dict[str, Any]]:

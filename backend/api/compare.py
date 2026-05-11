@@ -320,8 +320,8 @@ async def generate_report_pdf(
     )
 
     # Store the PDF for later access
-    from eval_mcp.core.user_storage import _s3_enabled, _get_s3_client, DATA_BUCKET
-    from eval_mcp.core.user_storage import safe_user_path
+    import os
+    from eval_mcp.core.user_storage import _s3_enabled, _get_s3_client, DATA_BUCKET, get_user_base_dir
 
     safe_id = group_id.replace("/", "_").replace("\\", "_")
     filename = f"report_{safe_id}.pdf"
@@ -335,9 +335,15 @@ async def generate_report_pdf(
             ContentType="application/pdf",
         )
     else:
-        pdf_path = safe_user_path(user_id, "store", "reports", filename)
-        pdf_path.parent.mkdir(parents=True, exist_ok=True)
-        pdf_path.write_bytes(pdf_bytes)
+        if not user_id or '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
+            raise ValueError(f"invalid user_id: {user_id!r}")
+        base_real = os.path.realpath(str(get_user_base_dir()))
+        pdf_real = os.path.realpath(os.path.join(base_real, user_id, "store", "reports", filename))
+        if not pdf_real.startswith(base_real + os.sep):
+            raise ValueError(f"path escape attempt: {pdf_real}")
+        os.makedirs(os.path.dirname(pdf_real), exist_ok=True)
+        with open(pdf_real, "wb") as f:
+            f.write(pdf_bytes)
 
     return Response(
         content=pdf_bytes,

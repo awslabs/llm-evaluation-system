@@ -6,6 +6,7 @@ comparison API can serve directly without re-parsing.
 
 import json
 import logging
+import os
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,7 @@ from inspect_ai.log import read_eval_log_async
 
 from eval_mcp.core.pricing import calculate_cost
 from eval_mcp.core.user_storage import (
-    _ensure_under_base,
+    get_user_base_dir,
     get_user_dir,
     get_user_log_dir,
     load_eval_detail,
@@ -136,12 +137,19 @@ def _load_criteria_descriptions(user_dir: Path, task_name: str, criteria_names: 
     Supports both standard configs (top-level `criteria`) and pipeline agent
     configs (nested under `pipeline_stages.stages[].criteria`).
     """
-    configs_dir = _ensure_under_base(user_dir / "configs")
-    if not configs_dir.exists():
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    configs_real = os.path.realpath(str(user_dir / "configs"))
+    if not configs_real.startswith(base_real + os.sep):
+        raise ValueError(f"path escape attempt: {configs_real}")
+    if not os.path.isdir(configs_real):
         return {}
-    for json_file in configs_dir.glob("*.json"):
+    for json_file in Path(configs_real).glob("*.json"):
+        json_real = os.path.realpath(str(json_file))
+        if not json_real.startswith(base_real + os.sep):
+            raise ValueError(f"path escape attempt: {json_real}")
         try:
-            data = json.loads(_ensure_under_base(json_file).read_text())
+            with open(json_real, "r") as f:
+                data = json.loads(f.read())
             # Collect all {name: description} from either layout
             merged: dict[str, str] = {}
             for c in data.get("criteria", []) or []:
@@ -444,19 +452,27 @@ def _build_detail_from_logs(
     # For agent evals, replace model name with agent image name
     agent_image = None
     config_data = None
-    configs_dir = _ensure_under_base(user_dir / "configs")
-    if configs_dir.exists():
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    configs_real = os.path.realpath(str(user_dir / "configs"))
+    if not configs_real.startswith(base_real + os.sep):
+        raise ValueError(f"path escape attempt: {configs_real}")
+    if os.path.isdir(configs_real):
         task_file = group_logs[0].get("task_file") if group_logs else None
         if task_file:
             config_filename = Path(task_file).with_suffix(".json").name
         else:
             config_filename = f"{config_name}.json"
         # Filename is user-derived (from log metadata / config name); strip any
-        # path components before joining to keep the path under configs_dir.
-        config_json = _ensure_under_base(configs_dir / Path(config_filename).name)
-        if config_json.exists():
+        # path components via basename before joining so the result stays under
+        # configs_real.
+        config_basename = os.path.basename(config_filename)
+        config_json_real = os.path.realpath(os.path.join(configs_real, config_basename))
+        if not config_json_real.startswith(configs_real + os.sep):
+            raise ValueError(f"path escape attempt: {config_json_real}")
+        if os.path.isfile(config_json_real):
             try:
-                config_data = json.loads(config_json.read_text())
+                with open(config_json_real, "r") as f:
+                    config_data = json.loads(f.read())
                 if config_data.get("agent_image"):
                     agent_image = config_data["agent_image"]
             except Exception:

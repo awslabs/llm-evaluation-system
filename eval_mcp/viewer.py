@@ -72,20 +72,27 @@ def create_viewer_app() -> FastAPI:
     @app.get("/api/compare/report/{group_id}")
     async def download_report(group_id: str):
         """Serve pre-generated PDF report for a group."""
-        from eval_mcp.core.user_storage import safe_user_path
+        from eval_mcp.core.user_storage import get_user_base_dir
 
         user_id = os.environ.get("EVAL_MCP_USER", "local")
+        if not user_id or '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
+            raise HTTPException(status_code=400, detail="invalid user_id")
         safe_id = group_id.replace("/", "_").replace("\\", "_")
-        pdf_path = safe_user_path(user_id, "reports", f"report_{safe_id}.pdf")
+        filename = f"report_{safe_id}.pdf"
 
-        if not pdf_path.exists():
+        base_real = os.path.realpath(str(get_user_base_dir()))
+        pdf_real = os.path.realpath(os.path.join(base_real, user_id, "reports", filename))
+        if not pdf_real.startswith(base_real + os.sep):
+            raise HTTPException(status_code=400, detail="invalid path")
+
+        if not os.path.isfile(pdf_real):
             raise HTTPException(
                 status_code=404,
                 detail="Report not generated yet. Ask the agent to call generate_report.",
             )
 
         return FileResponse(
-            path=str(pdf_path),
+            path=pdf_real,
             media_type="application/pdf",
             filename=f"eval_report_{safe_id}.pdf",
         )

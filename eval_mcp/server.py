@@ -15,14 +15,10 @@ from pathlib import Path
 
 from mcp.server import FastMCP
 
-from eval_mcp.core.bedrock_client import BedrockClient, create_boto3_bedrock_client
+from eval_mcp.core.bedrock_client import BedrockClient
 from eval_mcp.core.user_storage import list_user_document_paths
 from eval_mcp.tools.agent import DatasetAgent
 from eval_mcp.tools.save_dataset import handle_save_dataset
-from eval_mcp.tools.external_providers import (
-    detect_available_providers,
-    get_external_models,
-)
 from eval_mcp.tools.generate_qa import handle_generate_qa_pairs
 from eval_mcp.tools.generate_judge import handle_generate_judge
 from eval_mcp.tools.create_config import handle_create_eval_config
@@ -159,8 +155,10 @@ async def save_dataset(
 # Provider/model discovery tools
 # ============================================================
 
-# Import supported models list from providers module
-from eval_mcp.tools.server_http import SUPPORTED_MODELS
+from eval_mcp.tools.bedrock_models import (
+    list_bedrock_models as _list_bedrock_models,
+    list_available_models as _list_available_models,
+)
 
 
 @mcp.tool()
@@ -172,65 +170,19 @@ def list_bedrock_models(
     """
     Get list of AWS Bedrock models available for evaluations.
 
-    Queries both inference profiles (cross-region) and foundation models to return
-    all models you have access to. Returns models with correct format (bedrock/*) ready to use.
+    Queries inference profiles (paginated) and foundation models, dedupes, and
+    returns entries in bedrock/* form ready to pass to eval configs.
 
     Args:
-        provider: Filter by provider name (case-insensitive):
-            - "all" (default): All providers
-            - "anthropic", "meta", "mistral", "amazon", "deepseek", "nvidia", etc.
-        limit: Maximum number of models to return (default: 0 = unlimited)
-        text_only: If True (default), only return text generation models
-
-    Returns:
-        JSON list of available model IDs in bedrock/* format
+        provider: Filter by provider name (case-insensitive): "all", "anthropic",
+            "meta", "mistral", "amazon", "deepseek", "nvidia", etc.
+        limit: Max models to return (0 = unlimited).
+        text_only: If True (default), exclude image/embedding models.
     """
-    try:
-        client = create_boto3_bedrock_client("bedrock", region)
-        available = []
-
-        # Check inference profiles
-        try:
-            import re
-            response = client.list_inference_profiles(maxResults=100, typeEquals="SYSTEM_DEFINED")
-            for profile in response.get("inferenceProfileSummaries", []):
-                model_id = profile.get("inferenceProfileId", "")
-                # Strip version suffix (e.g., -20250514-v1:0) — Converse API needs short form
-                model_id = re.sub(r"-\d{8}-v\d+:\d+$", "", model_id)
-                model_id = re.sub(r"-v\d+:\d+$", "", model_id)
-                full_id = f"bedrock/{model_id}"
-                if full_id not in available:
-                    available.append(full_id)
-        except Exception:
-            pass
-
-        # Check foundation models
-        try:
-            params = {}
-            if provider != "all":
-                params["byProvider"] = provider
-            if text_only:
-                params["byOutputModality"] = "TEXT"
-            response = client.list_foundation_models(**params)
-            for model in response.get("modelSummaries", []):
-                model_id = model.get("modelId", "")
-                full_id = f"bedrock/{model_id}"
-                if full_id in SUPPORTED_MODELS and full_id not in available:
-                    available.append(full_id)
-        except Exception:
-            pass
-
-        # Filter by provider
-        if provider != "all":
-            provider_lower = provider.lower()
-            available = [m for m in available if provider_lower in m.lower()]
-
-        if limit > 0:
-            available = available[:limit]
-
-        return json.dumps({"models": available, "count": len(available)}, indent=2)
-    except Exception as e:
-        return json.dumps({"error": str(e), "models": []})
+    return json.dumps(
+        _list_bedrock_models(provider=provider, limit=limit, text_only=text_only),
+        indent=2,
+    )
 
 
 @mcp.tool()
@@ -241,57 +193,17 @@ def list_available_models(
     """
     List all models available for evaluations, across Bedrock and external providers.
 
-    Combines AWS Bedrock models with any external providers that have API keys configured
-    (OpenAI, Anthropic direct, Google Gemini, etc.).
+    External providers appear only when their API key env var is set
+    (OPENAI_API_KEY, ANTHROPIC_API_KEY, GOOGLE_API_KEY).
 
     Args:
-        provider: Filter by provider name (case-insensitive):
-            - "all" (default): All providers
-            - "openai": OpenAI models (requires OPENAI_API_KEY)
-            - "anthropic": Anthropic models (Bedrock + direct API if key set)
-            - "google": Google Gemini models (requires GOOGLE_API_KEY)
-            - Or any Bedrock provider name (amazon, meta, mistral, etc.)
-
-        source: Filter by source:
-            - "all" (default): Bedrock + external providers
-            - "bedrock": Only AWS Bedrock models
-            - "external": Only external provider models (OpenAI, Anthropic direct, Google, etc.)
-
-    Returns:
-        JSON with available models from all configured providers
+        provider: Filter by provider name (case-insensitive).
+        source: "all" | "bedrock" | "external".
     """
-    all_models = []
-
-    if source in ("all", "bedrock"):
-        try:
-            bedrock_result = json.loads(list_bedrock_models(provider=provider))
-            if "models" in bedrock_result:
-                for m in bedrock_result["models"]:
-                    all_models.append({"id": m, "source": "bedrock"})
-        except Exception:
-            pass
-
-    if source in ("all", "external"):
-        external = get_external_models(provider=provider)
-        for m in external:
-            m["source"] = "external"
-            all_models.extend([m] if isinstance(m, dict) else [{"id": m, "source": "external"}])
-
-    available_providers = detect_available_providers()
-
-    if not all_models:
-        return json.dumps({
-            "models": [],
-            "count": 0,
-            "available_providers": available_providers,
-            "note": "No models found. Check AWS credentials for Bedrock, or configure API keys for external providers.",
-        })
-
-    return json.dumps({
-        "models": all_models,
-        "count": len(all_models),
-        "available_providers": available_providers,
-    }, indent=2)
+    return json.dumps(
+        _list_available_models(provider=provider, source=source),
+        indent=2,
+    )
 
 
 # ============================================================
@@ -676,10 +588,12 @@ async def run_evaluation(
     user_id: str = None,
 ) -> str:
     """
-    Run an evaluation with automatic jury multi-judge scoring.
+    Low-level runner for an already-built config. Most callers should use
+    `run_evaluation_and_report` instead — that's the one-shot path that
+    auto-generates dataset/judge/config and writes a PDF report.
 
-    Configs created by create_eval_config include scoring logic that
-    automatically computes jury scores from multiple LLM judges.
+    Only reach for this tool when you already have a configName from a
+    prior `create_eval_config` call and specifically do NOT want the report step.
 
     Flow:
     1. Runs target model(s) via Inspect AI
@@ -689,10 +603,10 @@ async def run_evaluation(
     Concurrency is auto-tuned by Inspect based on provider throttling.
 
     Args:
-        configName: Name of the evaluation config from create_eval_config
+        configName: Name of an existing eval config (from create_eval_config).
 
     Returns:
-        JSON with evaluation results including scores
+        JSON with evaluation results including scores.
     """
     args = {
         "configName": configName,
@@ -724,10 +638,17 @@ async def run_evaluation_and_report(
     monthly_volume: int = 10000,
 ) -> str:
     """
-    The one-shot eval tool — auto-fills missing pieces, runs, writes a PDF report.
+    DEFAULT entry point for running an eval. Use this for any "run an eval" request.
 
-    There are four modes — you only pass what makes the mode distinct;
-    dataset/judge auto-generate when omitted (modes B/C):
+    Pass `providers=["bedrock/..."]` and, optionally, `dataset` / `judge`.
+    Anything you omit is auto-generated: QA pairs, judge, config. Writes a
+    PDF report at the end. One call — no need to chain list_datasets +
+    list_judges + create_eval_config + run_evaluation.
+
+    Minimal call for a sample eval:
+        run_evaluation_and_report(providers=["bedrock/us.anthropic.claude-sonnet-4-6"])
+
+    Modes (reference — you only pass what distinguishes the mode):
 
     A. Agent eval:
          agent_path (+ agent_entry, num_samples, context)

@@ -295,9 +295,14 @@ def _build_detail_from_logs(
                     score_data["criteriaResults"] = all_criteria
                 else:
                     for scorer_name, score in scorers.items():
-                        score_data["passed"] = score["value"] == "C"
                         metadata = score.get("metadata", {})
-                        score_data["score"] = metadata.get("jury_score", 1.0 if score["value"] == "C" else 0.0)
+                        raw_value = score.get("value")
+                        if isinstance(raw_value, (int, float)):
+                            sample_score = float(raw_value)
+                        else:
+                            sample_score = metadata.get("jury_score", 1.0 if raw_value == "C" else 0.0)
+                        score_data["score"] = sample_score
+                        score_data["passed"] = sample_score > 0.5
                         score_data["explanation"] = score.get("explanation", "")
                         criteria_results = metadata.get("criteria_results", [])
                         score_data["criteriaResults"] = criteria_results
@@ -335,12 +340,18 @@ def _build_detail_from_logs(
 
         by_criterion: dict[str, float] = {}
         for criterion in criteria_set:
-            criterion_passed = 0
+            crit_values: list[float] = []
             for s in model_samples:
                 for cr in s.get("criteriaResults", []):
-                    if cr["name"] == criterion and cr["passed"]:
-                        criterion_passed += 1
-            by_criterion[criterion] = criterion_passed / max(total, 1)
+                    if cr["name"] != criterion:
+                        continue
+                    if "score" in cr:
+                        crit_values.append(float(cr["score"]))
+                    elif cr.get("total", 0) > 0:
+                        crit_values.append(cr["votes_for"] / cr["total"])
+                    else:
+                        crit_values.append(1.0 if cr.get("passed") else 0.0)
+            by_criterion[criterion] = sum(crit_values) / len(crit_values) if crit_values else 0.0
 
         by_stage: dict[str, float] = {}
         if is_pipeline and pipeline_stages:

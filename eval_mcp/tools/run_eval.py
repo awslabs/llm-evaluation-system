@@ -16,6 +16,7 @@ from inspect_ai.log import read_eval_log_async
 from mcp.types import TextContent
 
 from eval_mcp.core.user_storage import get_user_dir, get_user_log_dir
+from eval_mcp.tools.external_providers import _refresh_keys_from_file
 
 logger = logging.getLogger(__name__)
 
@@ -297,6 +298,7 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             Path(log_dir_str).mkdir(parents=True, exist_ok=True)
 
         # Set up environment
+        _refresh_keys_from_file()
         env = os.environ.copy()
         env["INSPECT_LOG_DIR"] = log_dir_str
         # Ensure AWS region is set for Bedrock
@@ -612,6 +614,7 @@ async def handle_retry_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             }))]
 
         # Set up environment
+        _refresh_keys_from_file()
         env = os.environ.copy()
         env["INSPECT_LOG_DIR"] = log_dir_str
         region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))

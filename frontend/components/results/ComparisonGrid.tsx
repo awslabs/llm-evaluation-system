@@ -43,6 +43,20 @@ function getPromptIndex(columnKey: string): number | null {
   return null;
 }
 
+// Continuous red -> yellow -> green gradient for a 0-1 score.
+function scoreColor(score: number): string {
+  const clamped = Math.max(0, Math.min(1, score));
+  const hue = Math.round(clamped * 120);
+  return `hsl(${hue}, 70%, 55%)`;
+}
+
+function scoreBgColor(score: number): string {
+  const clamped = Math.max(0, Math.min(1, score));
+  const hue = Math.round(clamped * 120);
+  // Low saturation + very low lightness so tinted cells stay legible on dark bg.
+  return `hsla(${hue}, 55%, 30%, 0.25)`;
+}
+
 function getModelFromKey(columnKey: string): string {
   if (columnKey.startsWith("eval_")) {
     const sep = columnKey.indexOf("/");
@@ -168,17 +182,11 @@ export default function ComparisonGrid({
                         isSelected
                           ? "ring-2 ring-inset ring-claude-accent"
                           : "hover:bg-claude-surface"
-                      } ${
-                        result.passed
-                          ? "bg-green-950/20"
-                          : "bg-red-950/20"
                       }`}
+                      style={{ backgroundColor: scoreBgColor(result.score) }}
                     >
-                      <div className="flex items-center justify-center gap-1.5">
-                        <span className={`text-lg ${result.passed ? "text-green-400" : "text-red-400"}`}>
-                          {result.passed ? "✓" : "✗"}
-                        </span>
-                        <span className="text-xs text-claude-muted">
+                      <div className="flex items-center justify-center">
+                        <span className="text-sm font-medium" style={{ color: scoreColor(result.score) }}>
                           {(result.score * 100).toFixed(0)}%
                         </span>
                       </div>

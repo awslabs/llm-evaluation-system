@@ -53,6 +53,14 @@ function formatCriterion(name: string): string {
   return name.replace(/_/g, " ");
 }
 
+// Continuous red -> yellow -> green gradient for a score in [0, 1].
+// HSL: 0° red, 60° yellow, 120° green. Saturation/lightness tuned for dark UI.
+function scoreColor(score: number): string {
+  const clamped = Math.max(0, Math.min(1, score));
+  const hue = Math.round(clamped * 120); // 0 = red, 120 = green
+  return `hsl(${hue}, 70%, 55%)`;
+}
+
 interface PipelineStage {
   name: string;
   displayName: string;
@@ -137,7 +145,7 @@ export default function AggregateMetrics({
                 )}
               </div>
               <div className="mt-2 flex items-end gap-2">
-                <span className={`text-3xl font-bold ${overall >= 0.7 ? "text-green-400" : overall >= 0.4 ? "text-yellow-400" : "text-red-400"}`}>
+                <span className="text-3xl font-bold" style={{ color: scoreColor(overall) }}>
                   {(overall * 100).toFixed(0)}%
                 </span>
                 <span className="mb-1 text-xs text-claude-muted">score</span>
@@ -204,11 +212,11 @@ export default function AggregateMetrics({
           <div className="flex items-center gap-2 overflow-x-auto">
             {pipeline.sort((a, b) => a.order - b.order).map((stage, i) => {
               const passRate = aggregate[models[0]]?.byStage?.[stage.name] ?? 0;
-              const color = passRate >= 0.7 ? "border-green-500 text-green-400" : passRate >= 0.4 ? "border-yellow-500 text-yellow-400" : "border-red-500 text-red-400";
+              const color = scoreColor(passRate);
               return (
                 <div key={stage.name} className="flex items-center gap-2">
                   {i > 0 && <span className="text-claude-muted">→</span>}
-                  <div className={`rounded-md border px-3 py-2 ${color}`}>
+                  <div className="rounded-md border px-3 py-2" style={{ borderColor: color, color }}>
                     <div className="text-sm font-medium">{stage.displayName}</div>
                     <div className="flex items-center gap-2 mt-0.5">
                       <span className="text-lg font-bold">{(passRate * 100).toFixed(0)}%</span>
@@ -227,7 +235,7 @@ export default function AggregateMetrics({
         <div className="space-y-3">
           {pipeline.sort((a, b) => a.order - b.order).map((stage) => {
             const stagePassRate = aggregate[models[0]]?.byStage?.[stage.name] ?? 0;
-            const stageColor = stagePassRate >= 0.7 ? "text-green-400" : stagePassRate >= 0.4 ? "text-yellow-400" : "text-red-400";
+            const stageColor = scoreColor(stagePassRate);
             return (
               <div key={stage.name} className="rounded-lg border border-claude-border bg-claude-surface p-4">
                 <div className="flex items-center justify-between mb-2">
@@ -237,7 +245,7 @@ export default function AggregateMetrics({
                       {stage.scorerType === "deterministic" ? "auto" : "judge"}
                     </span>
                   </div>
-                  <span className={`text-sm font-bold ${stageColor}`}>
+                  <span className="text-sm font-bold" style={{ color: stageColor }}>
                     {(stagePassRate * 100).toFixed(0)}%
                   </span>
                 </div>
@@ -250,7 +258,7 @@ export default function AggregateMetrics({
                     <tbody>
                       {(stage.criteria && stage.criteria.length > 0 ? stage.criteria : criteria).map((criterion) => {
                         const value = aggregate[models[0]]?.byCriterion?.[criterion] ?? 0;
-                        const color = value >= 0.7 ? "text-green-400" : value >= 0.4 ? "text-yellow-400" : "text-red-400";
+                        const color = scoreColor(value);
                         const description = criteriaDescriptions?.[criterion];
                         const isExpanded = expandedCriteria.has(criterion);
                         return (
@@ -276,7 +284,7 @@ export default function AggregateMetrics({
                               )}
                             </td>
                             <td className="py-1.5 text-right align-top">
-                              <span className={`text-sm font-medium ${color}`}>{(value * 100).toFixed(0)}%</span>
+                              <span className="text-sm font-medium" style={{ color }}>{(value * 100).toFixed(0)}%</span>
                             </td>
                           </tr>
                         );
@@ -339,7 +347,7 @@ export default function AggregateMetrics({
                       const value = aggregate[model]?.byCriterion?.[criterion] ?? 0;
                       return (
                         <td key={model} className="py-2 text-right">
-                          <span className={`text-sm font-medium ${value >= 0.7 ? "text-green-400" : value >= 0.4 ? "text-yellow-400" : "text-red-400"}`}>
+                          <span className="text-sm font-medium" style={{ color: scoreColor(value) }}>
                             {(value * 100).toFixed(0)}%
                           </span>
                         </td>

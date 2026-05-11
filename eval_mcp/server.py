@@ -546,13 +546,17 @@ async def list_evaluations(
     """
     List completed evaluations.
 
-    Returns a list of previous evaluation runs with IDs, descriptions, and timestamps.
+    Each entry returns a `score` object with:
+      - metrics.overall: the same 0.0-1.0 rubric average shown in the UI
+        (mean of per-criterion scores, no pass/fail threshold)
+      - byCriterion: per-criterion 0.0-1.0 breakdown (Core Claim, Terminology,
+        Factual, Coverage, Reasoning — whatever the judge emitted)
 
     Args:
         limit: Maximum number of evaluations to return (default: 20)
 
     Returns:
-        JSON with list of evaluations and their metadata
+        JSON with list of evaluations and their aggregated scores.
     """
     _auto_pull(user_id)
     args = {"user_id": _user(user_id), "limit": limit}

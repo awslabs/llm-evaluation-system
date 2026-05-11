@@ -70,7 +70,7 @@ from pathlib import Path
 from inspect_ai import Task, task
 from inspect_ai.dataset import json_dataset, FieldSpec
 from inspect_ai.model import ChatMessageUser, ChatMessageSystem, get_model
-from inspect_ai.scorer import Score, accuracy, scorer, stderr
+from inspect_ai.scorer import Score, mean, scorer, stderr
 from inspect_ai.solver import generate, prompt_template
 
 from inspect_ai.tool._tool_info import ToolInfo
@@ -130,12 +130,12 @@ def _extract_scores(output, criteria_names):
     return scores, args.get("reason", ""), None
 
 
-@scorer(metrics=[accuracy(), stderr()])
+@scorer(metrics=[mean(), stderr()])
 def jury_scorer():
     async def score(state, target):
         output = state.output.completion if state.output else ""
         if not output:
-            return Score(value="I", answer="", explanation="No output generated")
+            return Score(value=0.0, answer="", explanation="No output generated")
 
         question = str(state.input)
         golden = target.text if target else ""
@@ -176,30 +176,28 @@ def jury_scorer():
         for n in criteria_names:
             v = votes[n]
             if not v:
-                results.append({{"name": n, "votes_for": 0, "total": 0, "passed": False, "note": "no valid responses"}})
+                results.append({{"name": n, "votes_for": 0, "total": 0, "score": 0.0, "note": "no valid responses"}})
             else:
                 vf = sum(v)
-                results.append({{"name": n, "votes_for": vf, "total": len(v), "passed": vf > len(v) / 2}})
+                results.append({{"name": n, "votes_for": vf, "total": len(v), "score": vf / len(v)}})
 
-        n_passed = sum(1 for r in results if r["passed"])
-        n_total = len(criteria_names)
-        jury_score = n_passed / max(n_total, 1)
-        passed = jury_score > 0.5
+        # Sample score = mean of per-criterion judge-fractions. No thresholds.
+        scored = [r for r in results if "note" not in r]
+        jury_score = sum(r["score"] for r in scored) / len(scored) if scored else 0.0
 
-        lines = [f"Jury: {{'PASS' if passed else 'FAIL'}} ({{n_passed}}/{{n_total}} criteria)", ""]
+        lines = [f"Jury score: {{jury_score:.2f}} ({{len(scored)}}/{{len(criteria_names)}} criteria graded)", ""]
         for r in results:
-            s = "PASS" if r["passed"] else "FAIL"
             extra = f" - {{r['note']}}" if "note" in r else ""
-            lines.append(f"  {{r['name']}}: {{s}} ({{r['votes_for']}}/{{r['total']}}){{extra}}")
+            lines.append(f"  {{r['name']}}: {{r['score']:.2f}} ({{r['votes_for']}}/{{r['total']}} judges){{extra}}")
         lines += ["", "Judges:"] + details
         if errors:
             lines += ["", "Errors:"] + errors
 
         return Score(
-            value="C" if passed else "I",
+            value=jury_score,
             answer=output[:200],
             explanation="\\n".join(lines),
-            metadata={{"jury_score": jury_score, "criteria_passed": n_passed, "criteria_total": n_total, "criteria_results": results}},
+            metadata={{"jury_score": jury_score, "criteria_results": results}},
         )
 
     return score

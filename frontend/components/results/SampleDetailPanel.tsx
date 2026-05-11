@@ -3,6 +3,13 @@
 import { useState } from "react";
 import type { Sample } from "./ComparisonView";
 
+// Continuous red -> yellow -> green gradient for a 0-1 score.
+function scoreColor(score: number): string {
+  const clamped = Math.max(0, Math.min(1, score));
+  const hue = Math.round(clamped * 120);
+  return `hsl(${hue}, 70%, 55%)`;
+}
+
 function formatModel(model: string): string {
   const providers: Record<string, string> = {
     bedrock: "Bedrock",
@@ -76,18 +83,19 @@ export default function SampleDetailPanel({
       </div>
 
       <div className="p-4 space-y-4">
-        {/* Overall verdict */}
-        <div className={`rounded-lg p-3 ${result.passed ? "bg-green-950/30 border border-green-800/50" : "bg-red-950/30 border border-red-800/50"}`}>
-          <div className="flex items-center gap-2">
-            <span className={`text-lg ${result.passed ? "text-green-400" : "text-red-400"}`}>
-              {result.passed ? "✓" : "✗"}
+        {/* Overall score */}
+        <div
+          className="rounded-lg p-3 border"
+          style={{
+            borderColor: scoreColor(result.score),
+            backgroundColor: `hsla(${Math.round(result.score * 120)}, 55%, 30%, 0.20)`,
+          }}
+        >
+          <div className="flex items-baseline gap-2">
+            <span className="text-2xl font-bold" style={{ color: scoreColor(result.score) }}>
+              {(result.score * 100).toFixed(0)}%
             </span>
-            <span className={`font-medium ${result.passed ? "text-green-300" : "text-red-300"}`}>
-              {result.passed ? "PASS" : "FAIL"}
-            </span>
-            <span className="text-sm text-claude-muted">
-              ({(result.score * 100).toFixed(0)}% criteria passed)
-            </span>
+            <span className="text-sm text-claude-muted">rubric score</span>
           </div>
         </div>
 
@@ -95,31 +103,40 @@ export default function SampleDetailPanel({
         {criteriaResults.length > 0 && (
           <div>
             <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-claude-muted">
-              Criteria Votes
+              Per-Criterion Scores
             </h4>
             <div className="space-y-2">
-              {criteriaResults.map((cr) => (
-                <div
-                  key={cr.name}
-                  className="flex items-center justify-between rounded bg-claude-bg px-3 py-2"
-                >
-                  <span className="text-sm capitalize text-claude-text">
-                    {cr.name}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <span
-                      className={`text-xs font-medium ${
-                        cr.passed ? "text-green-400" : "text-red-400"
-                      }`}
-                    >
-                      {cr.passed ? "PASS" : "FAIL"}
+              {criteriaResults.map((cr) => {
+                const critScore =
+                  typeof (cr as { score?: number }).score === "number"
+                    ? (cr as { score: number }).score
+                    : cr.total > 0
+                      ? cr.votes_for / cr.total
+                      : cr.passed
+                        ? 1
+                        : 0;
+                return (
+                  <div
+                    key={cr.name}
+                    className="flex items-center justify-between rounded bg-claude-bg px-3 py-2"
+                  >
+                    <span className="text-sm capitalize text-claude-text">
+                      {cr.name}
                     </span>
-                    <span className="text-xs text-claude-muted">
-                      ({cr.votes_for}/{cr.total} judges)
-                    </span>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className="text-xs font-medium"
+                        style={{ color: scoreColor(critScore) }}
+                      >
+                        {(critScore * 100).toFixed(0)}%
+                      </span>
+                      <span className="text-xs text-claude-muted">
+                        ({cr.votes_for}/{cr.total} judges)
+                      </span>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         )}

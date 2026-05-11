@@ -9,7 +9,11 @@ interface CriteriaResult {
   name: string;
   votes_for: number;
   total: number;
-  passed: boolean;
+  // Old logs emit `passed` (majority-vote boolean); new logs emit `score`
+  // (raw judge fraction). Readers should prefer `score` when present and
+  // fall back to `votes_for/total` or `passed` for backwards compatibility.
+  score?: number;
+  passed?: boolean;
   note?: string;
 }
 

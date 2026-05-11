@@ -10,7 +10,66 @@ To add a new provider:
 """
 
 import os
+from pathlib import Path
 from typing import Any
+
+
+# ---------------------------------------------------------------------------
+# .env.keys live-reload
+#
+# The MCP server is long-lived; users may add provider keys to .env.keys
+# after the process starts. We re-read the file on each external-provider
+# lookup (mtime-gated) so keys become usable without a server restart.
+# ---------------------------------------------------------------------------
+
+_KEYS_CACHE: dict[str, Any] = {"path": None, "mtime": None}
+
+
+def _candidate_keys_files() -> list[Path]:
+    paths: list[Path] = []
+    override = os.environ.get("EVAL_MCP_KEYS_FILE")
+    if override:
+        paths.append(Path(override))
+    paths.append(Path.cwd() / ".env.keys")
+    paths.append(Path.home() / ".eval-mcp" / ".env.keys")
+    return paths
+
+
+def _parse_env_file(path: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    try:
+        for raw_line in path.read_text().splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key:
+                result[key] = value
+    except OSError:
+        return {}
+    return result
+
+
+def _refresh_keys_from_file() -> None:
+    """Merge .env.keys entries into os.environ if the file has changed."""
+    allowed = {cfg["env_var"] for cfg in EXTERNAL_PROVIDERS.values()}
+    for path in _candidate_keys_files():
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        if _KEYS_CACHE["path"] == str(path) and _KEYS_CACHE["mtime"] == mtime:
+            return
+        for key, value in _parse_env_file(path).items():
+            if key in allowed and value:
+                os.environ[key] = value
+        _KEYS_CACHE["path"] = str(path)
+        _KEYS_CACHE["mtime"] = mtime
+        return
 
 # Registry of external providers. Each entry maps a provider name to:
 #   env_var:      environment variable that must be set to enable this provider
@@ -103,6 +162,7 @@ def detect_available_providers() -> list[dict[str, Any]]:
 
     Returns a list of dicts with: name, display_name, model_count
     """
+    _refresh_keys_from_file()
     available = []
     for name, config in EXTERNAL_PROVIDERS.items():
         key = os.environ.get(config["env_var"], "")
@@ -125,6 +185,7 @@ def get_external_models(provider: str = "all") -> list[dict[str, Any]]:
     Returns:
         List of model dicts with: id, name, provider
     """
+    _refresh_keys_from_file()
     models = []
     for name, config in EXTERNAL_PROVIDERS.items():
         # Skip if provider filter doesn't match

@@ -9,7 +9,7 @@ from mcp.types import TextContent
 from inspect_ai._view.common import list_eval_logs_async
 from inspect_ai.log import read_eval_log_async
 
-from eval_mcp.core.user_storage import get_user_log_dir
+from eval_mcp.core.user_storage import get_user_log_dir, load_eval_detail
 
 
 async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
@@ -41,26 +41,48 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
+        # Cache pre-computed details per group so multi-model groups only
+        # deserialize once (same summary UI/PDF consume).
+        detail_cache: Dict[str, Dict[str, Any] | None] = {}
+
+        def _detail_for(run_id: str) -> Dict[str, Any] | None:
+            if run_id not in detail_cache:
+                try:
+                    detail_cache[run_id] = load_eval_detail(user_id, run_id)
+                except Exception:
+                    detail_cache[run_id] = None
+            return detail_cache[run_id]
+
         evaluations = []
         for info in eval_log_infos[:limit]:
             try:
                 log = await read_eval_log_async(info.name, header_only=True)
 
-                scores_summary = []
-                if log.results and log.results.scores:
+                run_id = log.eval.run_id
+                model_id = log.eval.model
+                detail = _detail_for(run_id)
+                aggregate = (detail or {}).get("aggregate", {}).get(model_id) or {}
+
+                score_summary: Dict[str, Any] = {"scorer": "jury_scorer", "metrics": {}}
+                if "overall" in aggregate:
+                    score_summary["metrics"]["overall"] = aggregate["overall"]
+                if "byCriterion" in aggregate:
+                    score_summary["byCriterion"] = aggregate["byCriterion"]
+
+                # Fall back to raw Inspect metrics only if the aggregate is missing
+                # (e.g. detail pre-computation failed).
+                if not score_summary["metrics"] and log.results and log.results.scores:
                     for s in log.results.scores:
-                        metrics = {}
                         for name, m in s.metrics.items():
-                            metrics[name] = m.value
-                        scores_summary.append({"scorer": s.name, "metrics": metrics})
+                            score_summary["metrics"][name] = m.value
 
                 eval_data = {
-                    "id": log.eval.run_id,
+                    "id": run_id,
                     "createdAt": str(log.eval.created),
                     "task": log.eval.task,
-                    "model": log.eval.model,
+                    "model": model_id,
                     "totalSamples": log.eval.dataset.samples if log.eval.dataset else 0,
-                    "scores": scores_summary,
+                    "score": score_summary,
                     "status": log.status,
                     "logFile": info.name,
                 }

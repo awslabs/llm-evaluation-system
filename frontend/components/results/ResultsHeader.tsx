@@ -50,12 +50,12 @@ export default function ResultsHeader({ groupId, sessionId }: ResultsHeaderProps
           </h1>
           <span className="text-claude-muted">|</span>
           {groupId ? (
-            <button
-              onClick={() => router.push("/results")}
+            <a
+              href="/results"
               className="text-sm text-claude-accent hover:text-claude-hover"
             >
               &larr; All Evaluations
-            </button>
+            </a>
           ) : (
             <span className="text-sm text-claude-muted">Results</span>
           )}

@@ -26,41 +26,30 @@ def create_viewer_app() -> FastAPI:
 
     @app.get("/api/compare/groups")
     async def get_groups():
-        from eval_mcp.core.eval_results import _read_log_headers, _build_groups_from_headers
-        from eval_mcp.core.user_storage import get_user_log_dir
+        from eval_mcp.core.eval_results import precompute_eval_results
+        from eval_mcp.core.user_storage import load_eval_groups
 
         user_id = os.environ.get("EVAL_MCP_USER", "local")
-        log_dir = get_user_log_dir(user_id)
-
-        headers = await _read_log_headers(log_dir)
-        if not headers:
-            return {"groups": []}
-        return _build_groups_from_headers(headers)
+        cached = load_eval_groups(user_id)
+        if cached:
+            return cached
+        await precompute_eval_results(user_id)
+        return load_eval_groups(user_id) or {"groups": []}
 
     @app.get("/api/compare/detail")
     async def get_detail(group_id: str):
-        from eval_mcp.core.eval_results import (
-            _read_log_headers,
-            _read_full_logs,
-            _build_detail_from_logs,
-        )
-        from eval_mcp.core.user_storage import get_user_dir, get_user_log_dir
+        from eval_mcp.core.eval_results import precompute_eval_results
+        from eval_mcp.core.user_storage import load_eval_detail
 
         user_id = os.environ.get("EVAL_MCP_USER", "local")
-        log_dir = get_user_log_dir(user_id)
-        user_dir = get_user_dir(user_id)
-
-        headers = await _read_log_headers(log_dir)
-        group_logs = [h for h in headers if (h.get("run_id") or h["file"]) == group_id]
-        if not group_logs:
-            raise HTTPException(status_code=404, detail="Group not found")
-
-        log_files = [l["file"] for l in group_logs]
-        full_logs = await _read_full_logs(log_files)
-        if not full_logs:
-            raise HTTPException(status_code=404, detail="No logs found")
-
-        return _build_detail_from_logs(group_id, group_logs, full_logs, user_dir)
+        data = load_eval_detail(user_id, group_id)
+        if data:
+            return data
+        await precompute_eval_results(user_id)
+        data = load_eval_detail(user_id, group_id)
+        if data:
+            return data
+        raise HTTPException(status_code=404, detail="Group not found")
 
     @app.post("/api/compare/rebuild")
     async def rebuild():

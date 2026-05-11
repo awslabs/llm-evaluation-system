@@ -501,24 +501,31 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         # Auto-open the viewer so the user doesn't have to run a separate
         # command. On any failure we fall back to a manual-instructions string
         # rather than lying that the browser opened successfully.
+        # The one-shot `run_evaluation_and_report` path passes openViewer=False
+        # so it can open the viewer after the PDF report is written; otherwise
+        # the page loads before the report exists and shows "no report yet".
         view_results_msg = f"Run `eval-mcp view` in your terminal, then open {viewer_url}"
-        try:
-            from eval_mcp.viewer import ensure_viewer_running
-            info = ensure_viewer_running(port=4001, open_path=viewer_path)
-            viewer_url = info["url"]
-            if info.get("browserOpened"):
-                if info.get("alreadyRunning"):
-                    view_results_msg = f"Viewer already running; opened {viewer_url}"
-                else:
-                    view_results_msg = f"Started viewer and opened {viewer_url}"
-            elif info.get("error"):
-                logger.warning(f"Viewer auto-start: {info['error']}")
-                view_results_msg = (
-                    f"Could not auto-start viewer ({info['error']}). "
-                    f"Run `eval-mcp view` manually, then open {viewer_url}"
-                )
-        except Exception as e:
-            logger.warning(f"Could not auto-start viewer: {e}")
+        open_viewer = args.get("openViewer", True)
+        if open_viewer:
+            try:
+                from eval_mcp.viewer import ensure_viewer_running
+                info = ensure_viewer_running(port=4001, open_path=viewer_path)
+                viewer_url = info["url"]
+                if info.get("browserOpened"):
+                    if info.get("alreadyRunning"):
+                        view_results_msg = f"Viewer already running; opened {viewer_url}"
+                    else:
+                        view_results_msg = f"Started viewer and opened {viewer_url}"
+                elif info.get("error"):
+                    logger.warning(f"Viewer auto-start: {info['error']}")
+                    view_results_msg = (
+                        f"Could not auto-start viewer ({info['error']}). "
+                        f"Run `eval-mcp view` manually, then open {viewer_url}"
+                    )
+            except Exception as e:
+                logger.warning(f"Could not auto-start viewer: {e}")
+        else:
+            view_results_msg = None
 
         result = {
             "success": True,
@@ -529,13 +536,14 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             "userDir": str(user_dir),
             "message": "Evaluation completed successfully",
             "summary": results_summary,
-            "viewResults": view_results_msg,
             "nextStep": (
                 f"Call generate_report(group_id=\"{run_id}\") to create a PDF "
                 f"report for the user. Pass `context` describing what they "
                 f"were evaluating so the narrative is tailored."
             ) if run_id else None,
         }
+        if view_results_msg is not None:
+            result["viewResults"] = view_results_msg
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 

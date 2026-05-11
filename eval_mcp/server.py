@@ -809,9 +809,13 @@ async def run_evaluation_and_report(
 
         config_name = create_data["configName"]
 
+    # Suppress the eval's auto-open: the viewer would load before the PDF
+    # is written and show "no report has been generated yet". We open it
+    # ourselves once the report is on disk.
     eval_result = await handle_run_evaluation({
         "configName": config_name,
         "user_id": uid,
+        "openViewer": False,
     })
     eval_data = json.loads(eval_result[0].text)
     eval_data["configName"] = config_name
@@ -835,6 +839,29 @@ async def run_evaluation_and_report(
     report_data = json.loads(report_result[0].text)
 
     eval_data["report"] = report_data
+
+    viewer_path = f"/results?group={run_id}"
+    try:
+        from eval_mcp.viewer import ensure_viewer_running
+        info = ensure_viewer_running(port=4001, open_path=viewer_path)
+        eval_data["viewerUrl"] = info["url"]
+        if info.get("browserOpened"):
+            eval_data["viewResults"] = (
+                f"Viewer already running; opened {info['url']}"
+                if info.get("alreadyRunning")
+                else f"Started viewer and opened {info['url']}"
+            )
+        elif info.get("error"):
+            eval_data["viewResults"] = (
+                f"Could not auto-start viewer ({info['error']}). "
+                f"Run `eval-mcp view` manually, then open {info['url']}"
+            )
+    except Exception as e:
+        eval_data["viewResults"] = (
+            f"Run `eval-mcp view` in your terminal, then open "
+            f"http://localhost:4001{viewer_path} ({e})"
+        )
+
     return json.dumps(eval_data, indent=2)
 
 

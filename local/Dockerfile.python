@@ -20,6 +20,7 @@ RUN uv sync --locked --extra dev --extra backend --extra k8s-sandbox --extra pro
 ENV PATH="/app/.venv/bin:$PATH"
 
 COPY backend/ ./backend/
+COPY eval_mcp/ ./eval_mcp/
 COPY local/ ./local/
 
 ENV PYTHONPATH=/app

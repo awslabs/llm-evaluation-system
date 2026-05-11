@@ -163,7 +163,7 @@ async def lifespan(app: FastAPI):
 
         # Wait for running evaluations to complete
         try:
-            from backend.mcp_servers.synthetic.tools.run_evaluation import (
+            from eval_mcp.tools.run_eval import (
                 _running_evaluations,
                 cancel_user_evaluation,
             )
@@ -456,7 +456,7 @@ async def process_qa_dataset_content(
         - error: str (if failed)
     """
     from backend.core.user_storage import save_dataset_to_db
-    from backend.mcp_servers.dataset.tools.save_dataset import parse_content_to_rows, rows_to_test_cases, generate_dataset_name
+    from eval_mcp.tools.save_dataset import parse_content_to_rows, rows_to_test_cases, generate_dataset_name
 
     logger = logging.getLogger(__name__)
     logger.info(f"Processing QA dataset: {filename} for user {user_id}")

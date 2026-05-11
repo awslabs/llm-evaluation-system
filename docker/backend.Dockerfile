@@ -27,6 +27,7 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 # Copy source code
 COPY backend/ ./backend/
+COPY eval_mcp/ ./eval_mcp/
 
 # Create non-root user (uid 1000) with home directory
 RUN groupadd --gid 1000 appuser && useradd --uid 1000 --gid appuser --create-home appuser \

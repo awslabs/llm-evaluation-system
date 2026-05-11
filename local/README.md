@@ -38,10 +38,8 @@ Open **http://127.0.0.1:4001** when ready (~2 minutes first build, ~30 seconds a
 │    ├── /inspect/* → backend (Inspect AI viewer)              │
 │    └── /* → frontend                                         │
 │                                                              │
-│  backend (:8080)         ─┐                                  │
-│  synthetic-mcp (:8002)    │ shared network (127.0.0.1)       │
-│  providers-mcp (:8004)    │ like K8s pod sidecars            │
-│  dataset-mcp (:8005)     ─┘                                  │
+│  backend  (:8080)        ─┐ shared network (127.0.0.1)       │
+│  eval-mcp (:8002)        ─┘ like a K8s pod sidecar            │
 │                                                              │
 │  frontend (:3000)          separate network                  │
 │  postgres (:5432)          separate network                  │
@@ -52,7 +50,7 @@ Open **http://127.0.0.1:4001** when ready (~2 minutes first build, ~30 seconds a
 
 Each service reloads independently:
 - Edit `backend/api/` or `backend/core/` → only backend restarts
-- Edit `backend/mcp_servers/synthetic/` → only synthetic-mcp restarts
+- Edit `eval_mcp/` → only eval-mcp restarts
 - Edit `frontend/` → only frontend reloads
 - No cascade crashes
 
@@ -85,10 +83,10 @@ make dev
 ```
 
 **Backend won't start (MCP connection error):**
-MCP servers need to be up first. The backend waits for them, but if they fail:
+The MCP server needs to be up first. The backend waits for it, but if it fails:
 ```bash
-make logs s=synthetic-mcp   # check what's wrong
-make restart s=backend       # retry after MCP is up
+make logs s=eval-mcp        # check what's wrong
+make restart s=backend      # retry after MCP is up
 ```
 
 **Credentials expired:**

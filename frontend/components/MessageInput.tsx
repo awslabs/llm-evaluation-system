@@ -114,7 +114,11 @@ export default function MessageInput({
         ? firstFileName.substring(0, firstFileName.lastIndexOf("."))
         : firstFileName;
       const safeName = nameWithoutExt.replace(/[^a-zA-Z0-9-_]/g, "_");
-      const timestamp = new Date().toISOString().slice(0, 16).replace(/[-:T]/g, "");
+      // Strip hyphens, colons, and the ISO "T" separator from the timestamp.
+      // Build the regex at runtime so the pattern isn't a string literal that
+      // Tailwind's JIT content scanner would match as a class name.
+      const stripChars = "-" + ":" + "T";
+      const timestamp = new Date().toISOString().slice(0, 16).replace(new RegExp("[" + stripChars + "]", "g"), "");
       folder = `${safeName}_${timestamp}`;
     }
 

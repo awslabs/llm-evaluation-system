@@ -72,11 +72,11 @@ def create_viewer_app() -> FastAPI:
     @app.get("/api/compare/report/{group_id}")
     async def download_report(group_id: str):
         """Serve pre-generated PDF report for a group."""
-        from eval_mcp.core.user_storage import get_user_dir
+        from eval_mcp.core.user_storage import safe_user_path
 
         user_id = os.environ.get("EVAL_MCP_USER", "local")
         safe_id = group_id.replace("/", "_").replace("\\", "_")
-        pdf_path = get_user_dir(user_id) / "reports" / f"report_{safe_id}.pdf"
+        pdf_path = safe_user_path(user_id, "reports", f"report_{safe_id}.pdf")
 
         if not pdf_path.exists():
             raise HTTPException(

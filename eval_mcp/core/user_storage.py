@@ -50,19 +50,42 @@ def get_user_base_dir() -> Path:
     return Path(base)
 
 
+def safe_user_path(user_id: str, *parts: str) -> Path:
+    """Resolve a path under the user's base directory, rejecting any traversal.
+
+    All callers that build filesystem paths from user-derived input (user_id,
+    group_id, filenames, config names) should go through this helper. It
+    resolves symlinks and `..` segments, then verifies the final path stays
+    within `get_user_base_dir()`. This is the pattern CodeQL's `py/path-injection`
+    rule recognizes as safe.
+    """
+    if not user_id:
+        raise ValueError("user_id is required")
+    # Reject user_id values that could escape the user's own directory even
+    # when the final resolved path happens to land under base.
+    if '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
+        raise ValueError(f"invalid user_id: {user_id!r}")
+
+    base = get_user_base_dir().resolve()
+    base.mkdir(parents=True, exist_ok=True)
+    target = base.joinpath(user_id, *parts).resolve()
+    if not target.is_relative_to(base):
+        raise ValueError(f"path escape attempt: {target}")
+    # Also require the path to be under {base}/{user_id} — prevents a malicious
+    # `parts` from walking out of the user's subtree but staying under base.
+    user_root = base.joinpath(user_id).resolve()
+    if not target.is_relative_to(user_root):
+        raise ValueError(f"path escape attempt outside user root: {target}")
+    return target
+
+
 def get_user_dir(user_id: str) -> Path:
     """Get the local directory for a specific user's ephemeral files.
 
     In production, this is an emptyDir volume for temporary task files.
     In local dev, this is also where the JSON store and logs live.
     """
-    if not user_id:
-        raise ValueError("user_id is required")
-
-    if '..' in user_id or '/' in user_id or '\\' in user_id:
-        raise ValueError(f"Invalid user_id: contains path traversal characters")
-
-    user_dir = get_user_base_dir() / user_id
+    user_dir = safe_user_path(user_id)
     user_dir.mkdir(parents=True, exist_ok=True)
     return user_dir
 
@@ -92,7 +115,7 @@ def get_user_log_dir(user_id: str) -> str:
     """
     if _s3_enabled():
         return f"s3://{DATA_BUCKET}/users/{user_id}/logs"
-    log_dir = get_user_dir(user_id) / "logs"
+    log_dir = safe_user_path(user_id, "logs")
     log_dir.mkdir(parents=True, exist_ok=True)
     return str(log_dir)
 
@@ -156,7 +179,10 @@ def _s3_store_prefix(user_id: str, store_type: str) -> str:
 
 def _get_json_store_dir(user_id: str, store_type: str) -> Path:
     """Get local JSON store directory (used only when S3 is not configured)."""
-    store_dir = get_user_dir(user_id) / "store" / store_type
+    safe_type = os.path.basename(store_type)
+    if not safe_type or safe_type != store_type:
+        raise ValueError(f"Invalid store_type: {store_type!r}")
+    store_dir = safe_user_path(user_id, "store", safe_type)
     store_dir.mkdir(parents=True, exist_ok=True)
     return store_dir
 
@@ -165,16 +191,27 @@ def _generate_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
 
+def _ensure_under_base(path: Path) -> Path:
+    """Resolve `path` and verify it stays within get_user_base_dir()."""
+    base = get_user_base_dir().resolve()
+    resolved = path.resolve()
+    if not resolved.is_relative_to(base):
+        raise ValueError(f"path escape attempt: {resolved}")
+    return resolved
+
+
 def _load_json_file(path: Path) -> Optional[dict[str, Any]]:
-    if not path.exists():
+    safe = _ensure_under_base(path)
+    if not safe.exists():
         return None
-    return json.loads(path.read_text())
+    return json.loads(safe.read_text())
 
 
 def _save_json_file(path: Path, data: dict[str, Any], user_id: Optional[str] = None) -> None:
-    path.write_text(json.dumps(data, indent=2))
+    safe = _ensure_under_base(path)
+    safe.write_text(json.dumps(data, indent=2))
     if user_id:
-        _try_replicate(path, user_id)
+        _try_replicate(safe, user_id)
 
 
 def _list_json_files(directory: Path) -> list[dict[str, Any]]:

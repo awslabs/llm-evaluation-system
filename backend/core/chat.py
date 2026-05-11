@@ -7,7 +7,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from .mcp_client import MultiMCPClient
-from .bedrock_client import BedrockClient
+from eval_mcp.core.bedrock_client import BedrockClient
 from .agent import Agent
 
 console = Console()

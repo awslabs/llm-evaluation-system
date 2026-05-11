@@ -15,6 +15,7 @@ from inspect_ai.log import read_eval_log_async
 
 from eval_mcp.core.pricing import calculate_cost
 from eval_mcp.core.user_storage import (
+    _ensure_under_base,
     get_user_dir,
     get_user_log_dir,
     load_eval_detail,
@@ -135,12 +136,12 @@ def _load_criteria_descriptions(user_dir: Path, task_name: str, criteria_names: 
     Supports both standard configs (top-level `criteria`) and pipeline agent
     configs (nested under `pipeline_stages.stages[].criteria`).
     """
-    configs_dir = user_dir / "configs"
+    configs_dir = _ensure_under_base(user_dir / "configs")
     if not configs_dir.exists():
         return {}
     for json_file in configs_dir.glob("*.json"):
         try:
-            data = json.loads(json_file.read_text())
+            data = json.loads(_ensure_under_base(json_file).read_text())
             # Collect all {name: description} from either layout
             merged: dict[str, str] = {}
             for c in data.get("criteria", []) or []:
@@ -443,13 +444,16 @@ def _build_detail_from_logs(
     # For agent evals, replace model name with agent image name
     agent_image = None
     config_data = None
-    configs_dir = user_dir / "configs"
+    configs_dir = _ensure_under_base(user_dir / "configs")
     if configs_dir.exists():
         task_file = group_logs[0].get("task_file") if group_logs else None
         if task_file:
-            config_json = configs_dir / Path(task_file).with_suffix(".json").name
+            config_filename = Path(task_file).with_suffix(".json").name
         else:
-            config_json = configs_dir / f"{config_name}.json"
+            config_filename = f"{config_name}.json"
+        # Filename is user-derived (from log metadata / config name); strip any
+        # path components before joining to keep the path under configs_dir.
+        config_json = _ensure_under_base(configs_dir / Path(config_filename).name)
         if config_json.exists():
             try:
                 config_data = json.loads(config_json.read_text())

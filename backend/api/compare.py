@@ -10,8 +10,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 
-from backend.core.eval_results import precompute_eval_results
-from backend.core.user_storage import get_user_log_dir, load_eval_detail, load_eval_groups
+from eval_mcp.core.eval_results import precompute_eval_results
+from eval_mcp.core.user_storage import get_user_log_dir, load_eval_detail, load_eval_groups
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,7 @@ async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
     Serves from pre-computed cache (fast). Merges in running evals
     from log headers so they appear without waiting for completion.
     """
-    from backend.core.eval_results import _read_log_headers, _build_groups_from_headers
+    from eval_mcp.core.eval_results import _read_log_headers, _build_groups_from_headers
 
     # Serve cached completed evals (instant)
     cached = load_eval_groups(user_id)
@@ -63,7 +63,7 @@ async def get_comparison_groups(user_id: str = Depends(_get_user_id)):
 @router.get("/detail")
 async def get_comparison_detail(group_id: str, user_id: str = Depends(_get_user_id)):
     """Get full comparison data for a specific evaluation group."""
-    from backend.core.eval_results import _read_log_headers, _build_groups_from_headers
+    from eval_mcp.core.eval_results import _read_log_headers, _build_groups_from_headers
 
     # For running evals, read partial results directly (skip cache)
     log_dir = get_user_log_dir(user_id)
@@ -189,8 +189,8 @@ async def get_sample_detail(
     user_id: str = Depends(_get_user_id),
 ):
     """Get full detail for a single sample including judge reasoning."""
-    from backend.core.eval_results import _read_full_logs
-    from backend.core.user_storage import get_user_log_dir
+    from eval_mcp.core.eval_results import _read_full_logs
+    from eval_mcp.core.user_storage import get_user_log_dir
 
     log_dir = get_user_log_dir(user_id)
     if not log_file.startswith(log_dir) and f"/users/{user_id}/" not in log_file:
@@ -288,8 +288,8 @@ async def generate_report_pdf(
         session_id: Optional chat session ID to pull transcript for context.
         monthly_volume: Projected monthly call volume for cost projections.
     """
-    from backend.core.bedrock_client import BedrockClient
-    from backend.core.pdf_report import generate_pdf_report
+    from eval_mcp.core.bedrock_client import BedrockClient
+    from eval_mcp.core.pdf_report import generate_pdf_report
 
     # Load evaluation data
     detail = load_eval_detail(user_id, group_id)
@@ -320,8 +320,8 @@ async def generate_report_pdf(
     )
 
     # Store the PDF for later access
-    from backend.core.user_storage import _s3_enabled, _get_s3_client, DATA_BUCKET
-    from backend.core.user_storage import _get_json_store_dir
+    from eval_mcp.core.user_storage import _s3_enabled, _get_s3_client, DATA_BUCKET
+    from eval_mcp.core.user_storage import safe_user_path
 
     safe_id = group_id.replace("/", "_").replace("\\", "_")
     filename = f"report_{safe_id}.pdf"
@@ -335,8 +335,9 @@ async def generate_report_pdf(
             ContentType="application/pdf",
         )
     else:
-        reports_dir = _get_json_store_dir(user_id, "reports")
-        (reports_dir / filename).write_bytes(pdf_bytes)
+        pdf_path = safe_user_path(user_id, "store", "reports", filename)
+        pdf_path.parent.mkdir(parents=True, exist_ok=True)
+        pdf_path.write_bytes(pdf_bytes)
 
     return Response(
         content=pdf_bytes,

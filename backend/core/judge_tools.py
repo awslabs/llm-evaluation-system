@@ -6,7 +6,7 @@ Using tool_use ensures reliable JSON output matching the schema.
 
 from typing import Any, Dict
 
-from backend.core.judge_config import JudgeConfig
+from eval_mcp.core.judge_config import JudgeConfig
 
 
 def build_judge_tool_schema(config: JudgeConfig | None = None) -> Dict[str, Any]:

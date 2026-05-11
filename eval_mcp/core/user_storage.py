@@ -95,8 +95,11 @@ def get_user_dir(user_id: str) -> Path:
         raise ValueError(f"invalid user_id: {user_id!r}")
     base_real = os.path.realpath(str(get_user_base_dir()))
     os.makedirs(base_real, exist_ok=True)
+    # Anchor the user_id with os.sep so a sibling prefix (/var/data-evil vs
+    # /var/data) can't pass; the trailing os.sep on user_id eliminates the
+    # need for an equality fallback.
     target_real = os.path.realpath(os.path.join(base_real, user_id))
-    if not (target_real == base_real or target_real.startswith(base_real + os.sep)):
+    if not target_real.startswith(base_real + os.sep):
         raise ValueError(f"path escape attempt: {target_real}")
     os.makedirs(target_real, exist_ok=True)
     return Path(target_real)
@@ -240,7 +243,10 @@ def _ensure_under_base(path: Path) -> Path:
 def _load_json_file(path: Path) -> Optional[dict[str, Any]]:
     base_real = os.path.realpath(str(get_user_base_dir()))
     safe = os.path.realpath(str(path))
-    if not (safe == base_real or safe.startswith(base_real + os.sep)):
+    # The JSON store never writes directly at base; every valid path lives
+    # under {base}/{user_id}/..., so a strict startswith(base + sep) check
+    # is tight enough and matches CodeQL's StartswithCall barrier.
+    if not safe.startswith(base_real + os.sep):
         raise ValueError(f"path escape attempt: {safe}")
     if not os.path.exists(safe):
         return None
@@ -251,7 +257,7 @@ def _load_json_file(path: Path) -> Optional[dict[str, Any]]:
 def _save_json_file(path: Path, data: dict[str, Any], user_id: Optional[str] = None) -> None:
     base_real = os.path.realpath(str(get_user_base_dir()))
     safe = os.path.realpath(str(path))
-    if not (safe == base_real or safe.startswith(base_real + os.sep)):
+    if not safe.startswith(base_real + os.sep):
         raise ValueError(f"path escape attempt: {safe}")
     with open(safe, "w") as f:
         f.write(json.dumps(data, indent=2))

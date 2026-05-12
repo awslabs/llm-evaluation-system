@@ -117,5 +117,11 @@ terraform.tfvars
 .tools/
 .claude/
 
+# Project-scope MCP config — must not be committed: it shadows users' user-scope
+# eval-mcp install for anyone who cd's into this repo (Claude Code scope
+# precedence: local > project > user). Contributors who want to dogfood from
+# source can create one locally; see docs/DEVELOPMENT.md.
+.mcp.json
+
 # Local eval log artifacts (synced via S3)
 logs/

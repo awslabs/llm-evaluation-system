@@ -26,7 +26,7 @@ Pick your IDE and paste / click.
 
 **Claude Code** — one CLI command:
 ```bash
-claude mcp add-json eval '{"type":"stdio","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}' --scope user
+claude mcp add eval -s user -- uvx --from llm-evaluation-system eval-mcp
 ```
 
 **Cursor** — one-click deeplink: [Install eval-mcp in Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=eval&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJsbG0tZXZhbHVhdGlvbi1zeXN0ZW0iLCJldmFsLW1jcCJdfQ==)

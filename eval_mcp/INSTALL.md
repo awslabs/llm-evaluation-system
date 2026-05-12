@@ -24,7 +24,7 @@ If multiple, ask the user which.
 
 Run the one-command install for that IDE:
 
-- **Claude Code**: `claude mcp add-json eval '{"type":"stdio","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}' --scope user`
+- **Claude Code**: `claude mcp add eval -s user -- uvx --from llm-evaluation-system eval-mcp`
 - **Cursor**: open `cursor://anysphere.cursor-deeplink/mcp/install?name=eval&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJsbG0tZXZhbHVhdGlvbi1zeXN0ZW0iLCJldmFsLW1jcCJdfQ==` (or edit `~/.cursor/mcp.json`)
 - **VS Code**: `code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}'`
 - **Kiro**: merge into `~/.kiro/settings/mcp.json` under `mcpServers.eval` — same JSON shape as Cursor. Back up first, atomic write.

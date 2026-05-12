@@ -1,7 +1,0 @@
-{
-  "mcpServers": {
-    "eval": {
-      "command": "eval-mcp"
-    }
-  }
-}

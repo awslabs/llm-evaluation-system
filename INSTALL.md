@@ -24,11 +24,11 @@ If multiple, ask the user which.
 
 Run the one-command install for that IDE:
 
-- **Claude Code**: `claude mcp add eval -s user -- uvx --from llm-evaluation-system eval-mcp`
-- **Cursor**: open `cursor://anysphere.cursor-deeplink/mcp/install?name=eval&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJsbG0tZXZhbHVhdGlvbi1zeXN0ZW0iLCJldmFsLW1jcCJdfQ==` (or edit `~/.cursor/mcp.json`)
-- **VS Code**: `code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}'`
+- **Claude Code**: `claude mcp add eval -s user -- uvx --from llm-evaluation-system@latest eval-mcp`
+- **Cursor**: open `cursor://anysphere.cursor-deeplink/mcp/install?name=eval&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJsbG0tZXZhbHVhdGlvbi1zeXN0ZW1AbGF0ZXN0IiwiZXZhbC1tY3AiXX0=` (or edit `~/.cursor/mcp.json`)
+- **VS Code**: `code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-system@latest","eval-mcp"]}'`
 - **Kiro**: merge into `~/.kiro/settings/mcp.json` under `mcpServers.eval` — same JSON shape as Cursor. Back up first, atomic write.
-- **Codex**: append to `~/.codex/config.toml`: `[mcp_servers.eval]\ncommand = "uvx"\nargs = ["--from", "llm-evaluation-system", "eval-mcp"]`
+- **Codex**: append to `~/.codex/config.toml`: `[mcp_servers.eval]\ncommand = "uvx"\nargs = ["--from", "llm-evaluation-system@latest", "eval-mcp"]`
 
 For any manual JSON/TOML edit: back up first, merge — never clobber, atomic write.
 
@@ -37,7 +37,7 @@ For any manual JSON/TOML edit: back up first, merge — never clobber, atomic wr
 Run this so the user's first IDE launch is instant instead of waiting ~60s for uvx to fetch the package:
 
 ```bash
-uvx --from llm-evaluation-system eval-mcp --help >/dev/null
+uvx --from llm-evaluation-system@latest eval-mcp --help >/dev/null
 ```
 
 ## 5. Ask about S3 team sharing
@@ -46,7 +46,7 @@ uvx --from llm-evaluation-system eval-mcp --help >/dev/null
 
 If **yes, team already has a bucket**:
 ```bash
-uvx --from llm-evaluation-system eval-mcp init <bucket-name>
+uvx --from llm-evaluation-system@latest eval-mcp init <bucket-name>
 ```
 
 If **yes, creating a new bucket** (first on the team):
@@ -56,7 +56,7 @@ cd /tmp/eval-mcp-infra/infra/modules/eval-logs-bucket
 terraform init
 terraform apply -var="bucket_name=<bucket-name>"
 ```
-Then `uvx --from llm-evaluation-system eval-mcp init <bucket-name>`. Tell the user: teammates just run `eval-mcp init <bucket-name>` — no Terraform needed.
+Then `uvx --from llm-evaluation-system@latest eval-mcp init <bucket-name>`. Tell the user: teammates just run `eval-mcp init <bucket-name>` — no Terraform needed.
 
 Suggested bucket name if they don't have a preference: `eval-mcp-$(aws sts get-caller-identity --query Account --output text)` — globally unique, easy to remember.
 

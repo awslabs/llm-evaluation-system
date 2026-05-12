@@ -50,35 +50,63 @@ def build_command(
     otlp_endpoint: str,
     sample_id: str,
     requirements_path: Optional[str] = None,
+    venv_python: Optional[str] = None,
 ) -> Tuple[list[str], dict[str, str]]:
     """Assemble the argv + env for spawning one agent invocation.
+
+    Two modes:
+
+      User-venv mode (venv_python is set):
+          They already have a working environment with OTel installed.
+          We spawn via their venv's opentelemetry-instrument + python.
+          No uv ceremony. Their env is the source of truth.
+
+      Managed-mirror mode (venv_python is None):
+          We build an ephemeral uv venv from their requirements.txt (if
+          any) plus our OTel injections. The agent runs inside that.
+          Their actual env is never touched.
 
     Split out as a pure function so its shape can be regression-tested
     without touching the filesystem or running a real process.
     """
-    # Every agent invocation goes through `uv run --no-project` so it ALWAYS
-    # gets an isolated ephemeral venv — there is no host-venv fallback path.
-    # That guarantees the harness's installed packages are unreachable from
-    # the agent, which is the only way to permanently rule out dep skew.
-    uv_args: list[str] = ["uv", "run", "--no-project"]
-    if requirements_path:
-        uv_args += ["--with-requirements", requirements_path]
-    for pkg in _OTEL_AGENT_DEPS:
-        uv_args += ["--with", pkg]
+    if venv_python:
+        # Their venv has opentelemetry-instrument already (via the 3 OTel
+        # packages they installed). Use it directly. No uv, no overlay,
+        # no managed mirror — just their setup + our env vars.
+        venv_bin = Path(venv_python).parent
+        argv = [
+            str(venv_bin / "opentelemetry-instrument"),
+            venv_python,
+            _LAUNCHER_PATH,
+            agent_path,
+            agent_entry,
+            prompt,
+        ]
+    else:
+        # Every agent invocation goes through `uv run --no-project` so it
+        # ALWAYS gets an isolated ephemeral venv — there is no host-venv
+        # fallback path. That guarantees the harness's installed packages
+        # are unreachable from the agent, which is the only way to
+        # permanently rule out dep skew.
+        uv_args: list[str] = ["uv", "run", "--no-project"]
+        if requirements_path:
+            uv_args += ["--with-requirements", requirements_path]
+        for pkg in _OTEL_AGENT_DEPS:
+            uv_args += ["--with", pkg]
 
-    # `--` separates uv's args from the command it should run.
-    # opentelemetry-instrument auto-loads the registered instrumentations
-    # at startup so the agent's library calls (boto3.bedrock, etc.) emit
-    # OTLP without the agent author writing any OTel code.
-    argv = uv_args + [
-        "--",
-        "opentelemetry-instrument",
-        "python",
-        _LAUNCHER_PATH,
-        agent_path,
-        agent_entry,
-        prompt,
-    ]
+        # `--` separates uv's args from the command it should run.
+        # opentelemetry-instrument auto-loads the registered instrumentations
+        # at startup so the agent's library calls (boto3.bedrock, etc.)
+        # emit OTLP without the agent author writing any OTel code.
+        argv = uv_args + [
+            "--",
+            "opentelemetry-instrument",
+            "python",
+            _LAUNCHER_PATH,
+            agent_path,
+            agent_entry,
+            prompt,
+        ]
 
     env = dict(os.environ)
     env.update({
@@ -108,6 +136,7 @@ def run_agent_subprocess(
     otlp_endpoint: str,
     sample_id: str,
     requirements_path: Optional[str] = None,
+    venv_python: Optional[str] = None,
     timeout: float = 300.0,
 ) -> str:
     """Spawn the agent, wait for completion, return its answer string.
@@ -123,6 +152,7 @@ def run_agent_subprocess(
         otlp_endpoint=otlp_endpoint,
         sample_id=sample_id,
         requirements_path=requirements_path,
+        venv_python=venv_python,
     )
     try:
         proc = subprocess.run(

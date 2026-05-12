@@ -146,10 +146,53 @@ async def handle_analyze_agent_path(args: Dict[str, Any]) -> List[TextContent]:
         config_dir = user_dir / "configs"
         config_dir.mkdir(parents=True, exist_ok=True)
 
-        # Subprocess mode kicks in automatically when the agent dir ships a
-        # requirements.txt — the agent's deps land in an isolated uv venv,
-        # never in the harness venv. Falls back to in-process for older
-        # examples without a requirements file.
+        # Mode selection, in priority order:
+        #
+        #   1. User-venv mode: they already have a working .venv near
+        #      their agent with the 3 OTel packages installed. We spawn
+        #      via their venv's opentelemetry-instrument — zero env
+        #      management, their setup is the source of truth.
+        #
+        #   2. Managed-mirror mode: requirements.txt or pyproject.toml
+        #      next to the agent. We build an ephemeral uv venv with
+        #      their declared deps + our OTel injections.
+        #
+        #   3. Legacy in-process mode: nothing detected. Falls back to
+        #      bedrock_capture()'s in-process monkeypatch (backward
+        #      compat for examples that haven't migrated).
+        from eval_mcp.agent_detect import detect_agent
+
+        detection = detect_agent(agent_path)
+        venv_python = None
+        if detection.venv_python and detection.otel_installed:
+            venv_python = detection.venv_python
+            logger.info(
+                "Using agent's existing venv at %s (OTel detected)",
+                detection.venv_python,
+            )
+        elif detection.venv_python and not detection.otel_installed:
+            # They have a venv but no OTel yet. Surface a structured
+            # `needs_action` response so the MCP client (Claude) can
+            # offer the install via the `install_otel` tool with one
+            # click of consent. Idempotent: re-running this eval after
+            # the install Just Works.
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "needs_action": "install_otel",
+                "venv_python": detection.venv_python,
+                "agent_path": agent_path,
+                "agent_entry": agent_entry,
+                "message": (
+                    f"Setup needed: I need to install 3 small OpenTelemetry "
+                    f"packages in your agent's venv at {detection.venv_python} "
+                    f"to capture Bedrock telemetry. ~5 seconds, one-time."
+                ),
+                "nextStep": (
+                    f"Call install_otel(venv_python='{detection.venv_python}') "
+                    f"to authorize, then re-run this eval."
+                ),
+            }))]
+
         requirements_path = detect_agent_requirements(agent_path)
 
         task_code, config_data = create_local_pipeline_eval_files(
@@ -160,6 +203,7 @@ async def handle_analyze_agent_path(args: Dict[str, Any]) -> List[TextContent]:
             agent_path=str(Path(agent_path).expanduser().resolve()),
             agent_entry=agent_entry,
             requirements_path=requirements_path,
+            venv_python=venv_python,
         )
 
         (config_dir / f"{config_name}.py").write_text(task_code)

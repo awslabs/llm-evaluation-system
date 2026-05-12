@@ -111,6 +111,57 @@ def test_build_command_sets_standard_otel_envs():
     assert env["OTEL_SERVICE_NAME"] == "user_agent"
 
 
+def test_build_command_with_user_venv_uses_their_otel():
+    """When the user has their own venv (with OTel installed), we spawn
+    via their existing opentelemetry-instrument — no uv run, no ephemeral
+    venv, no overlay. Their environment is the source of truth.
+    """
+    from eval_mcp.subprocess_runner import build_command
+
+    argv, env = build_command(
+        agent_path="/tmp/agent.py",
+        agent_entry="run_agent",
+        prompt="What is 2+2?",
+        otlp_endpoint="http://127.0.0.1:1234",
+        sample_id="s",
+        venv_python="/path/to/their/.venv/bin/python",
+    )
+
+    # No uv ceremony at all — we invoke their venv's binaries directly.
+    assert "uv" not in argv
+    assert "--with-requirements" not in argv
+    assert "--with" not in argv
+    # First binary is their venv's opentelemetry-instrument, second is
+    # their python, then launcher + args.
+    assert argv[0] == "/path/to/their/.venv/bin/opentelemetry-instrument"
+    assert argv[1] == "/path/to/their/.venv/bin/python"
+    # The launcher takes (agent_path, agent_entry, prompt) as positional args.
+    assert argv[-3:] == ["/tmp/agent.py", "run_agent", "What is 2+2?"]
+    # OTel env vars are the same regardless of mode — receiver doesn't care.
+    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://127.0.0.1:1234"
+
+
+def test_build_command_user_venv_takes_priority_over_requirements():
+    """If a venv_python is given AND a requirements_path, the user-venv
+    mode wins — their working setup is the truth, our uv-managed mirror
+    is just a fallback for users who don't have a working venv yet.
+    """
+    from eval_mcp.subprocess_runner import build_command
+
+    argv, _ = build_command(
+        agent_path="/tmp/agent.py",
+        agent_entry="run_agent",
+        prompt="?",
+        otlp_endpoint="http://x",
+        sample_id="s",
+        venv_python="/path/to/their/.venv/bin/python",
+        requirements_path="/tmp/requirements.txt",  # should be ignored
+    )
+
+    assert argv[0] == "/path/to/their/.venv/bin/opentelemetry-instrument"
+    assert "uv" not in argv
+
+
 def test_build_command_without_requirements_still_uses_uv_run():
     """Even when the agent has no extra deps, we ALWAYS spawn via uv run
     so the agent venv is isolated from the harness venv. This is the

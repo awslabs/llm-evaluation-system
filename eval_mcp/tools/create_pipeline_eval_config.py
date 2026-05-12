@@ -468,6 +468,7 @@ def agent_solver():
                 otlp_endpoint=handle.url,
                 sample_id=str(getattr(state, "sample_id", state.input_text[:32])),
                 requirements_path=CONFIG.get("requirements_path"),
+                venv_python=CONFIG.get("venv_python"),
                 timeout=300,
             )
             state.output.completion = str(result)
@@ -559,24 +560,28 @@ def create_local_pipeline_eval_files(
     agent_entry: str = "run_agent",
     description: Optional[str] = None,
     requirements_path: Optional[str] = None,
+    venv_python: Optional[str] = None,
 ) -> tuple[str, dict]:
     """Create pipeline task file + config JSON for non-container evaluation.
 
-    Two modes, chosen by whether `requirements_path` is supplied:
+    Three modes, chosen by which extra args are supplied:
 
-      subprocess (preferred, when requirements_path is given):
-          Each sample spawns the agent in an ephemeral uv-managed venv built
-          from requirements.txt. Bedrock calls are captured via OTLP from
-          subprocess → in-harness receiver. No dep skew is possible.
+      subprocess + user-venv (preferred when their setup works):
+          venv_python set. We spawn via their existing venv's
+          opentelemetry-instrument. Their environment is read-only to us.
 
-      local (legacy, requirements_path=None):
-          Agent is loaded via importlib in the harness process; Bedrock calls
-          are captured via OTel monkeypatch. Kept for backward compat with
-          examples that don't ship a requirements file.
+      subprocess + managed-mirror (when only requirements_path is given):
+          We build an ephemeral uv venv from their requirements.txt plus
+          our OTel deps. Their actual env is untouched.
+
+      local (legacy, neither is given):
+          Agent loaded via importlib in the harness process; Bedrock calls
+          captured via in-process OTel monkeypatch. Kept for backward
+          compat with examples that haven't migrated.
 
     Returns: (task_code, config_dict)
     """
-    mode = "subprocess" if requirements_path else "local"
+    mode = "subprocess" if (venv_python or requirements_path) else "local"
     task_code = generate_pipeline_task_code(config_name, pipeline, judge_models, mode=mode)
     eval_mcp_src = str(Path(__file__).parent.parent.parent.parent.parent / "eval_mcp" / "src")
 
@@ -591,4 +596,6 @@ def create_local_pipeline_eval_files(
     }
     if requirements_path:
         config_data["requirements_path"] = requirements_path
+    if venv_python:
+        config_data["venv_python"] = venv_python
     return task_code, config_data

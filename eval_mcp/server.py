@@ -210,6 +210,31 @@ def list_available_models(
 # Evaluation tools
 # ============================================================
 
+
+@mcp.tool()
+def install_otel(venv_python: str) -> str:
+    """
+    Install the 3 OpenTelemetry packages eval-mcp needs into the user's
+    agent venv. Called after run_evaluation_and_report returns
+    `needs_action: "install_otel"` — that response includes the
+    `venv_python` path to pass here.
+
+    Idempotent: safe to call multiple times. Re-installing on an
+    already-present version is a pip no-op.
+
+    Args:
+        venv_python: Absolute path to the agent's venv python binary,
+            e.g. /path/to/their/.venv/bin/python.
+
+    Returns:
+        JSON: {success: bool, message: str}
+    """
+    from eval_mcp.agent_detect import install_otel_in_venv
+
+    result = install_otel_in_venv(venv_python)
+    return json.dumps({"success": result.success, "message": result.message})
+
+
 @mcp.tool()
 async def generate_qa_pairs(
     user_id: str = None,

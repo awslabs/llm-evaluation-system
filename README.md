@@ -26,10 +26,10 @@ Pick your IDE and paste / click.
 
 **Claude Code** — one CLI command:
 ```bash
-claude mcp add eval -s user -- uvx --from llm-evaluation-system@latest eval-mcp
+claude mcp add eval -s user -- uvx --from llm-evaluation-system eval-mcp
 ```
 
-**Cursor** — one-click deeplink: [Install eval-mcp in Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=eval&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJsbG0tZXZhbHVhdGlvbi1zeXN0ZW1AbGF0ZXN0IiwiZXZhbC1tY3AiXX0=)
+**Cursor** — one-click deeplink: [Install eval-mcp in Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=eval&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJsbG0tZXZhbHVhdGlvbi1zeXN0ZW0iLCJldmFsLW1jcCJdfQ==)
 
 **Kiro** — add to `~/.kiro/settings/mcp.json`:
 ```json
@@ -37,7 +37,7 @@ claude mcp add eval -s user -- uvx --from llm-evaluation-system@latest eval-mcp
   "mcpServers": {
     "eval": {
       "command": "uvx",
-      "args": ["--from", "llm-evaluation-system@latest", "eval-mcp"]
+      "args": ["--from", "llm-evaluation-system", "eval-mcp"]
     }
   }
 }
@@ -47,15 +47,25 @@ claude mcp add eval -s user -- uvx --from llm-evaluation-system@latest eval-mcp
 ```toml
 [mcp_servers.eval]
 command = "uvx"
-args = ["--from", "llm-evaluation-system@latest", "eval-mcp"]
+args = ["--from", "llm-evaluation-system", "eval-mcp"]
 ```
 
 **VS Code** (with GitHub Copilot MCP) — one CLI command:
 ```bash
-code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-system@latest","eval-mcp"]}'
+code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}'
 ```
 
-Using a coding agent to install? Point it at [INSTALL.md](INSTALL.md) — it handles the config edit, warms the uvx cache, and asks about optional S3 team sharing.
+Using a coding agent to install? Point it at [INSTALL.md](INSTALL.md) — it handles the config edit and asks about optional S3 team sharing.
+
+### Upgrading
+
+`uvx` caches the resolved version per package. To pull newer releases, invalidate the cache:
+
+```bash
+uv cache clean llm-evaluation-system
+```
+
+Restart your IDE after. The next launch resolves and caches the newest published version.
 
 ### Use
 
@@ -75,7 +85,7 @@ Share datasets, judges, configs, and eval results across your team via a shared 
 ### Setup
 
 ```bash
-uvx --from llm-evaluation-system@latest eval-mcp init my-team-evals
+uvx --from llm-evaluation-system eval-mcp init my-team-evals
 ```
 
 User identity is auto-detected from your AWS credentials. Projects are auto-discovered from the bucket.

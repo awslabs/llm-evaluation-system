@@ -8,7 +8,7 @@ If you're changing eval_mcp code (tools, server, viewer) and want to run your ch
 
 ### Dev loop at a glance
 
-End-users install via `uvx --from llm-evaluation-system@latest eval-mcp` — do **not** iterate against that, it pulls the published package. For development, use these two layers:
+End-users install via `uvx --from llm-evaluation-system eval-mcp` — do **not** iterate against that, it pulls the published package from uvx's cache. For development, use these two layers:
 
 1. **pytest** against narrow, deterministic logic (regex, parsing, validation) — milliseconds, catches a specific class of regression cheaply. Not a substitute for end-to-end coverage because the tools spawn real subprocesses, call Bedrock, and write user dirs — mocks give false green builds.
 2. **Claude Code / Desktop** pointed at your local build — the primary integration test. This is the ground truth: you exercise the exact same path users will get when you publish. Plan for this to be the main way you verify changes.
@@ -40,31 +40,29 @@ async def test_invalid_bedrock_id_fails_validation():
 
 Run with `.venv/bin/pytest tests/`. Useful for pinning down specific regressions after you hit them — not useful as a proof that a feature works end-to-end.
 
-### 3. Point Claude Code at your local build (primary integration test)
+### 3. Point Claude Code at your local build (permanent dev setup)
 
-This is how you test what you're about to push. Use the venv's direct binary so your IDE runs the code you're editing:
+**Mental model:** as a maintainer you want your IDE running *your* code, not PyPI's. Published users get the uvx install; you get the editable install. This divergence is the point — it's how you see unreleased changes before shipping them. Same pattern as any Python package: `pip install -e .` locally, published version for everyone else.
 
-**a. Edit `~/.claude.json`.** Find the `"eval"` MCP entry and replace its `command` / `args` so it points at your editable install:
+**Configure it once:** edit `~/.claude.json` and change the `eval` MCP entry so `command` points at your editable install's binary. Leave it this way for as long as you're developing on the MCP. No swap-back-when-done step.
 
 ```json
-{
-  "mcpServers": {
-    "eval": {
-      "type": "stdio",
-      "command": "/absolute/path/to/llm-evaluation-system/.venv/bin/eval-mcp",
-      "env": {}
-    }
-  }
+"eval": {
+  "type": "stdio",
+  "command": "/absolute/path/to/llm-evaluation-system/.venv/bin/eval-mcp",
+  "env": {}
 }
 ```
 
-**b. Reload the MCP.** In Claude Code: `/mcp` → disconnect `eval` → reconnect. If tools don't refresh, fully restart the IDE (MCP tools are loaded at session start).
+**Your dev loop after that:**
 
-**c. Exercise the change.** Call the tool you just edited through Claude Code and verify the behavior you expect. This is the exact same code path users will hit after publish — no mocks, no shortcuts.
+1. Edit code in `eval_mcp/*.py`.
+2. `/mcp` → reconnect `eval`. That restarts the subprocess, which picks up your edits via the editable install. No reinstall, no IDE restart.
+3. Call the tool and verify behavior.
 
-**d. After every edit** to `eval_mcp/*.py`, repeat step b (the editable install picks up source changes, but the running MCP process doesn't hot-reload — you have to reconnect to restart it).
+**That's the entire loop.** Reconnect is your "refresh from local." You don't need a dual-entry `eval` + `eval-dev` setup — one entry, pointed at local, is the simplest thing that works and matches Anthropic's MCP quickstart pattern for developing servers.
 
-**e. When you're done developing**, restore the original `uvx --from llm-evaluation-system@latest` block in `~/.claude.json` so your normal use is back on the published version.
+**When you ship a release**, users on `uvx --from llm-evaluation-system eval-mcp` pick it up when they run `uv cache clean`. Your local setup is unaffected — you stay on whatever is in your working tree. If you need to sanity-check the published version behaves as expected (rare), swap the entry temporarily back to `uvx --from llm-evaluation-system eval-mcp` or run `uvx --from llm-evaluation-system eval-mcp --help` in a terminal.
 
 ### 4. Rebuild the viewer frontend
 
@@ -87,23 +85,43 @@ This compiles the frontend and copies the static output into `eval_mcp/viewer_st
 
 ### 6. Publishing a new version
 
-Users pin to `@latest`, so every publish is immediately live for every user. Treat it accordingly:
+Releases are **tag-triggered via GitHub Actions** (`.github/workflows/publish.yml`). When you push a tag matching `v*`, CI rebuilds the viewer frontend, builds the Python wheel, verifies the tag matches `pyproject.toml`, and publishes to PyPI via trusted publishing (OIDC — no token juggling).
 
+**Release steps:**
+
+```bash
+# 1. Bump version in pyproject.toml (patch/minor/major per SemVer)
+# 2. Sync the lockfile
+uv lock
+
+# 3. Commit the version bump + lock + any release-note changes
+git add pyproject.toml uv.lock
+git commit -m "Release vX.Y.Z: <summary>"
+
+# 4. Push + tag. CI takes over.
+git push origin main
+git tag vX.Y.Z
+git push origin vX.Y.Z
+```
+
+Watch the release run:
+```bash
+gh run list --workflow=publish.yml --limit 1
+gh run watch <run-id>
+```
+
+Verify from a clean environment after the run completes:
+```bash
+uvx --refresh --from 'llm-evaluation-system==X.Y.Z' eval-mcp --help
+```
+
+**Release discipline:**
+
+- Users install via plain `uvx --from llm-evaluation-system eval-mcp` (cached per user). They won't pick up a new release until they explicitly run `uv cache clean llm-evaluation-system` — some natural insulation, but assume any published version can reach users at any time.
 - Every main-branch commit should be releasable. Land behind a CI gate (pytest + lint + type-check).
 - Bump the SemVer appropriately: patch for bug fixes, minor for additive changes, major for breaking tool-signature changes.
-- Update the release notes / changelog entry before tagging.
-
-```bash
-# Bump version in pyproject.toml, then
-uv lock              # keep uv.lock in sync (EKS build requires --locked)
-rm -rf dist && uv build
-uv publish           # uses UV_PUBLISH_TOKEN env var
-```
-
-Verify from a clean venv:
-```bash
-uvx --refresh --from 'llm-evaluation-system==<new-version>' eval-mcp --help
-```
+- Do **not** instruct users to put `@latest` in their IDE config — it forces PyPI resolution on every MCP start (~20s cold start) and causes "disconnected" state on first connect after every release. See README "Upgrading" for the correct upgrade path.
+- `uv publish` locally is possible but not recommended — it bypasses the CI viewer rebuild and skips the tag-version-matches check. Only reach for it in emergencies.
 
 ### 7. Adding a new tool (checklist)
 

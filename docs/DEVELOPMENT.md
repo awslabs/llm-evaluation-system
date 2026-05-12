@@ -4,7 +4,14 @@ Technical reference for developers working on the LLM Evaluation Platform.
 
 ## Working on the MCP locally
 
-If you're changing eval_mcp code (tools, server, viewer) and want to run your changes against your own IDE:
+If you're changing eval_mcp code (tools, server, viewer) and want to run your changes against your own IDE.
+
+### Dev loop at a glance
+
+End-users install via `uvx --from llm-evaluation-system@latest eval-mcp` — do **not** iterate against that, it pulls the published package. For development, use these two layers:
+
+1. **pytest** against narrow, deterministic logic (regex, parsing, validation) — milliseconds, catches a specific class of regression cheaply. Not a substitute for end-to-end coverage because the tools spawn real subprocesses, call Bedrock, and write user dirs — mocks give false green builds.
+2. **Claude Code / Desktop** pointed at your local build — the primary integration test. This is the ground truth: you exercise the exact same path users will get when you publish. Plan for this to be the main way you verify changes.
 
 ### 1. Clone and install editable
 
@@ -17,24 +24,49 @@ uv pip install -e .
 
 `-e` installs editable — edits in `eval_mcp/` take effect on next MCP restart without reinstalling.
 
-### 2. Point your IDE at the local build
+### 2. Pytest for narrow deterministic logic (optional supplement)
 
-Instead of the uvx snippet from the README, use the venv's direct binary so your IDE runs the code you're editing:
+For pure functions (regex parsing, validation, config munging), a handler-level pytest is a cheap safety net. The official MCP servers repo (`github.com/modelcontextprotocol/servers`) imports handlers directly — no server boot, no transport mocking. Same pattern here:
+
+```python
+# tests/test_run_eval.py
+from eval_mcp.tools.run_eval import _validate_providers
+
+async def test_invalid_bedrock_id_fails_validation():
+    result = await _validate_providers(["bedrock/nonexistent-model"])
+    assert result["valid"] is False
+    assert "Invalid model ID" in result["failed_providers"][0]["error"]
+```
+
+Run with `.venv/bin/pytest tests/`. Useful for pinning down specific regressions after you hit them — not useful as a proof that a feature works end-to-end.
+
+### 3. Point Claude Code at your local build (primary integration test)
+
+This is how you test what you're about to push. Use the venv's direct binary so your IDE runs the code you're editing:
+
+**a. Edit `~/.claude.json`.** Find the `"eval"` MCP entry and replace its `command` / `args` so it points at your editable install:
 
 ```json
 {
   "mcpServers": {
     "eval": {
+      "type": "stdio",
       "command": "/absolute/path/to/llm-evaluation-system/.venv/bin/eval-mcp",
-      "timeout": 120000
+      "env": {}
     }
   }
 }
 ```
 
-Restart the IDE after every meaningful change (MCP tools are loaded at session start).
+**b. Reload the MCP.** In Claude Code: `/mcp` → disconnect `eval` → reconnect. If tools don't refresh, fully restart the IDE (MCP tools are loaded at session start).
 
-### 3. Rebuild the viewer frontend
+**c. Exercise the change.** Call the tool you just edited through Claude Code and verify the behavior you expect. This is the exact same code path users will hit after publish — no mocks, no shortcuts.
+
+**d. After every edit** to `eval_mcp/*.py`, repeat step b (the editable install picks up source changes, but the running MCP process doesn't hot-reload — you have to reconnect to restart it).
+
+**e. When you're done developing**, restore the original `uvx --from llm-evaluation-system@latest` block in `~/.claude.json` so your normal use is back on the published version.
+
+### 4. Rebuild the viewer frontend
 
 The viewer is a pre-built Next.js export served by the Python viewer app. When you change `frontend/` source:
 
@@ -46,14 +78,20 @@ npm run build:viewer
 
 This compiles the frontend and copies the static output into `eval_mcp/viewer_static/`. The viewer picks it up on next `eval-mcp view`.
 
-### 4. Running evals against your changes
+### 5. Running evals against your changes
 
 ```bash
 .venv/bin/eval-mcp view              # results viewer on :4001
 .venv/bin/inspect eval <task.py>     # run an eval directly via Inspect AI CLI
 ```
 
-### 5. Publishing a new version
+### 6. Publishing a new version
+
+Users pin to `@latest`, so every publish is immediately live for every user. Treat it accordingly:
+
+- Every main-branch commit should be releasable. Land behind a CI gate (pytest + lint + type-check).
+- Bump the SemVer appropriately: patch for bug fixes, minor for additive changes, major for breaking tool-signature changes.
+- Update the release notes / changelog entry before tagging.
 
 ```bash
 # Bump version in pyproject.toml, then
@@ -67,7 +105,14 @@ Verify from a clean venv:
 uvx --refresh --from 'llm-evaluation-system==<new-version>' eval-mcp --help
 ```
 
-### 6. Running the MCP in Docker (optional)
+### 7. Adding a new tool (checklist)
+
+1. Implement the handler in `eval_mcp/tools/<name>.py` as an async function.
+2. Register it in `eval_mcp/server.py` with a typed signature. The docstring is the tool description the LLM sees — keep it specific about expected ID formats, required prerequisites, and failure modes.
+3. (Optional) Write a pytest case for any narrow deterministic logic (parsing, validation) so regressions get caught cheaply next time.
+4. Point Claude Code at your local build (see section 3) and exercise the tool end-to-end through the IDE before publishing.
+
+### 8. Running the MCP in Docker (optional)
 
 The repo root `Dockerfile` builds a slim container that runs `eval-mcp serve` as an HTTP MCP (for self-hosting on EC2/ECS/AgentCore). Local dev rarely needs this — use the editable install above.
 

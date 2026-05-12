@@ -260,17 +260,19 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 )
             ]
 
-        # Read the task file to extract provider list for validation
+        # Read the task file (and sibling JSON config, if present) to extract
+        # provider list for validation. Pipeline evals keep model IDs in the
+        # JSON config and only reference them via CONFIG[...] in the .py — so
+        # scanning just the .py misses them and validation silently skips.
         try:
-            task_content = Path(task_file).read_text()
-            # Extract providers from the task file for validation
-            providers = []
-            for line in task_content.split("\n"):
-                if "bedrock/" in line and '"' in line:
-                    # Extract model IDs from lines like: "bedrock/us.anthropic.claude-..."
-                    import re as _re
-                    matches = _re.findall(r'"(bedrock/[^"]+)"', line)
-                    providers.extend(matches)
+            sources = [Path(task_file).read_text()]
+            json_config = Path(task_file).with_suffix(".json")
+            if json_config.exists():
+                sources.append(json_config.read_text())
+
+            import re as _re
+            provider_pattern = _re.compile(r'"(bedrock/[^"]+)"')
+            providers = list({m for src in sources for m in provider_pattern.findall(src)})
 
             if providers:
                 validation = await _validate_providers(providers)

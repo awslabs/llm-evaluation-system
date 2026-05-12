@@ -24,6 +24,18 @@ from eval_mcp.tools.analyze_agent_image import (
 logger = logging.getLogger(__name__)
 
 
+def detect_agent_requirements(agent_path: str) -> Optional[str]:
+    """Return path to requirements.txt next to the agent, or None if absent.
+
+    Presence of a requirements file is the signal to use subprocess-isolated
+    evaluation: agent deps go into an ephemeral uv-managed venv, never into
+    the harness's. Absence falls back to the legacy in-process mode for
+    backward compat with examples that haven't migrated.
+    """
+    reqs = Path(agent_path).expanduser().resolve().parent / "requirements.txt"
+    return str(reqs) if reqs.is_file() else None
+
+
 def read_agent_code(agent_path: str) -> Dict[str, str]:
     """Read the user's agent file plus any sibling .py files in the same dir.
 
@@ -134,6 +146,12 @@ async def handle_analyze_agent_path(args: Dict[str, Any]) -> List[TextContent]:
         config_dir = user_dir / "configs"
         config_dir.mkdir(parents=True, exist_ok=True)
 
+        # Subprocess mode kicks in automatically when the agent dir ships a
+        # requirements.txt — the agent's deps land in an isolated uv venv,
+        # never in the harness venv. Falls back to in-process for older
+        # examples without a requirements file.
+        requirements_path = detect_agent_requirements(agent_path)
+
         task_code, config_data = create_local_pipeline_eval_files(
             dataset_path=str(dataset_file),
             config_name=config_name,
@@ -141,6 +159,7 @@ async def handle_analyze_agent_path(args: Dict[str, Any]) -> List[TextContent]:
             judge_models=JUDGE_MODELS,
             agent_path=str(Path(agent_path).expanduser().resolve()),
             agent_entry=agent_entry,
+            requirements_path=requirements_path,
         )
 
         (config_dir / f"{config_name}.py").write_text(task_code)

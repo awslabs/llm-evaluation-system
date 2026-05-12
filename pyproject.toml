@@ -3,7 +3,7 @@ name = "llm-evaluation-system"
 version = "0.1.3"
 description = "MCP server for agentic LLM evaluation: jury scoring, agent tracing via OpenTelemetry, document-grounded QA generation, PDF reports."
 readme = "README.md"
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.15"
 license = { text = "Apache-2.0" }
 authors = [{ name = "AWS" }]
 keywords = ["mcp", "llm", "evaluation", "inspect-ai", "bedrock", "opentelemetry", "claude-code"]
@@ -25,9 +25,18 @@ dependencies = [
     "prompt-toolkit>=3.0.43",
     "pydantic>=2.0.0",
     "anyio>=4.0.0",
-    # OpenTelemetry — required for capturing Bedrock calls in agentic evals
+    # OpenTelemetry — required for capturing Bedrock calls in agentic evals.
+    # `proto` is needed by the in-harness OTLP receiver that consumes spans
+    # from subprocess-isolated agents (eval_mcp/otlp_receiver.py). The HTTP
+    # OTLP exporter is what the agent subprocess uses to ship spans back
+    # (set via OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf). `distro` is what
+    # makes `opentelemetry-instrument` actually run the instrumentations
+    # — without it, the CLI is a no-op even though the entry points exist.
     "opentelemetry-instrumentation-botocore>=0.50b0",
     "opentelemetry-sdk>=1.30",
+    "opentelemetry-proto>=1.30",
+    "opentelemetry-exporter-otlp-proto-http>=1.30",
+    "opentelemetry-distro>=0.50b0",
     # Local viewer + HTTP MCP transport
     "fastapi>=0.104.1",
     "uvicorn[standard]>=0.24.0",
@@ -47,7 +56,10 @@ providers = [
     "azure-identity",
     "azure-ai-inference",
     "groq>=0.28.0",
-    "mistralai>=2.0.0",
+    # Note: mistralai is intentionally omitted — the package name is not
+    # published on PyPI (returns 404), so any constraint here makes
+    # `uv lock` unsatisfiable. Inspect AI imports it lazily, so users who
+    # actually need Mistral support can install whatever fork they prefer.
 ]
 
 # Container-sandbox path for evaluating containerized agents on Kubernetes.

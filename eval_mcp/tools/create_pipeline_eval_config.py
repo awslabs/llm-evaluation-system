@@ -267,6 +267,8 @@ def generate_pipeline_task_code(
 
     scorers_list = ", ".join(scorer_names)
 
+    if mode == "subprocess":
+        return _generate_subprocess_task_code(config_name, scorer_functions, scorers_list)
     if mode == "local":
         return _generate_local_task_code(config_name, scorer_functions, scorers_list)
     return _generate_container_task_code(config_name, scorer_functions, scorers_list)
@@ -407,6 +409,96 @@ def eval_task():
 '''
 
 
+def _generate_subprocess_task_code(config_name: str, scorer_functions: list, scorers_list: str) -> str:
+    """Generate task code for the subprocess-isolated agent path.
+
+    Each sample spins up its own OTLP receiver and spawns the agent in an
+    ephemeral uv-managed venv. Spans flow over OTLP to the receiver, which
+    feeds them through the existing _InspectSpanExporter / _InspectLogExporter
+    so the transcript ends up identical to in-process mode — downstream
+    scorers can't tell the difference.
+    """
+    return f'''"""Inspect AI pipeline agent evaluation: {config_name}
+
+Auto-generated. Multi-stage evaluation with separate scorers per stage.
+Subprocess mode: each sample spawns the agent in an isolated uv-managed
+venv, with telemetry flowing back via in-harness OTLP.
+"""
+
+import json
+import sys
+from pathlib import Path
+
+from inspect_ai import Task, task
+from inspect_ai.dataset import json_dataset, FieldSpec
+from inspect_ai.model import ChatMessageUser, ChatMessageSystem, get_model
+from inspect_ai.scorer import Score, accuracy, scorer, stderr
+from inspect_ai.solver import Generate, TaskState, solver
+
+from inspect_ai.tool._tool_info import ToolInfo
+from inspect_ai.tool._tool_params import ToolParams
+
+_config_path = Path(__file__).with_suffix(".json")
+CONFIG = json.loads(_config_path.read_text())
+
+DATASET_PATH = CONFIG["dataset_path"]
+
+sys.path.insert(0, CONFIG.get("_eval_mcp_path", ""))
+from eval_mcp.bedrock_capture import _InspectLogExporter, _InspectSpanExporter
+from eval_mcp.otlp_receiver import start_receiver
+from eval_mcp.subprocess_runner import run_agent_subprocess
+
+
+@solver
+def agent_solver():
+    async def solve(state: TaskState, generate: Generate) -> TaskState:
+        # Per-sample receiver: each sample gets its own ephemeral port so
+        # spans never leak across concurrently-running samples. Buffer the
+        # received batches; drain them through the exporters AFTER the
+        # agent subprocess exits, in this coroutine — that's the only
+        # place where transcript() (an Inspect AI contextvar) resolves to
+        # this sample's transcript. (The receiver runs in a separate
+        # thread which can't see the contextvar.)
+        handle = start_receiver()
+        try:
+            result = run_agent_subprocess(
+                agent_path=CONFIG["agent_path"],
+                agent_entry=CONFIG.get("agent_entry", "run_agent"),
+                prompt=state.input_text,
+                otlp_endpoint=handle.url,
+                sample_id=str(getattr(state, "sample_id", state.input_text[:32])),
+                requirements_path=CONFIG.get("requirements_path"),
+                timeout=300,
+            )
+            state.output.completion = str(result)
+
+            # Drain in the sample's coroutine so transcript() points here.
+            # Logs are processed first because they emit ModelEvents that
+            # spans then enrich with model name + token counts.
+            spans, logs = handle.drain()
+            log_exp = _InspectLogExporter()
+            span_exp = _InspectSpanExporter(log_exp)
+            if logs:
+                log_exp.export(logs)
+            if spans:
+                span_exp.export(spans)
+        finally:
+            handle.shutdown()
+        return state
+    return solve
+
+{"".join(scorer_functions)}
+
+@task
+def eval_task():
+    return Task(
+        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer", metadata=["expected_tools", "expected_steps", "difficulty"])),
+        solver=agent_solver(),
+        scorer=[{scorers_list}],
+    )
+'''
+
+
 AGENT_COMPOSE_TEMPLATE = """services:
   default:
     image: {image}
@@ -466,13 +558,26 @@ def create_local_pipeline_eval_files(
     agent_path: str,
     agent_entry: str = "run_agent",
     description: Optional[str] = None,
+    requirements_path: Optional[str] = None,
 ) -> tuple[str, dict]:
-    """Create pipeline task file + config JSON for local-mode (no container).
+    """Create pipeline task file + config JSON for non-container evaluation.
 
-    The agent is loaded via importlib and Bedrock calls are captured via OTel.
+    Two modes, chosen by whether `requirements_path` is supplied:
+
+      subprocess (preferred, when requirements_path is given):
+          Each sample spawns the agent in an ephemeral uv-managed venv built
+          from requirements.txt. Bedrock calls are captured via OTLP from
+          subprocess → in-harness receiver. No dep skew is possible.
+
+      local (legacy, requirements_path=None):
+          Agent is loaded via importlib in the harness process; Bedrock calls
+          are captured via OTel monkeypatch. Kept for backward compat with
+          examples that don't ship a requirements file.
+
     Returns: (task_code, config_dict)
     """
-    task_code = generate_pipeline_task_code(config_name, pipeline, judge_models, mode="local")
+    mode = "subprocess" if requirements_path else "local"
+    task_code = generate_pipeline_task_code(config_name, pipeline, judge_models, mode=mode)
     eval_mcp_src = str(Path(__file__).parent.parent.parent.parent.parent / "eval_mcp" / "src")
 
     config_data = {
@@ -484,4 +589,6 @@ def create_local_pipeline_eval_files(
         "_eval_mcp_path": eval_mcp_src,
         "description": description or "",
     }
+    if requirements_path:
+        config_data["requirements_path"] = requirements_path
     return task_code, config_data

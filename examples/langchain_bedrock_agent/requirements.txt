@@ -1,0 +1,3 @@
+langchain
+langchain-aws
+langchain-core

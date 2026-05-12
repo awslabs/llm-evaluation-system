@@ -1,4 +1,4 @@
-.PHONY: dev stop logs restart build clean keys
+.PHONY: dev stop logs restart build clean keys release release-minor release-major _release
 
 COMPOSE := docker compose -f local/compose.yaml
 
@@ -46,3 +46,33 @@ build:           ## Build all images
 
 clean: stop      ## Stop and remove volumes
 	@$(COMPOSE) down -v
+
+release:         ## Bump patch version, tag, and push (triggers PyPI publish)
+	@$(MAKE) _release BUMP=patch
+
+release-minor:   ## Bump minor version, tag, and push
+	@$(MAKE) _release BUMP=minor
+
+release-major:   ## Bump major version, tag, and push
+	@$(MAKE) _release BUMP=major
+
+_release:
+	@if [ -n "$$(git status --porcelain)" ]; then \
+	  echo "Working tree is dirty. Commit or stash first."; exit 1; \
+	fi
+	@if [ "$$(git rev-parse --abbrev-ref HEAD)" != "main" ]; then \
+	  echo "Release must be run from main (currently on $$(git rev-parse --abbrev-ref HEAD))."; exit 1; \
+	fi
+	@git pull --ff-only origin main
+	@OLD=$$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])") && \
+	NEW=$$(python3 -c "v='$$OLD'.split('.'); part='$(BUMP)'; \
+	  idx={'major':0,'minor':1,'patch':2}[part]; v[idx]=str(int(v[idx])+1); \
+	  [v.__setitem__(i,'0') for i in range(idx+1,3)]; print('.'.join(v))") && \
+	echo "Bumping $$OLD -> $$NEW" && \
+	python3 -c "import re,pathlib; p=pathlib.Path('pyproject.toml'); p.write_text(re.sub(r'^version = \".*\"', 'version = \"'+'$$NEW'+'\"', p.read_text(), count=1, flags=re.M))" && \
+	git add pyproject.toml && \
+	git commit -m "Release v$$NEW" && \
+	git tag "v$$NEW" && \
+	git push origin main && \
+	git push origin "v$$NEW" && \
+	echo "Pushed v$$NEW. Watch https://github.com/awslabs/llm-evaluation-system/actions"

@@ -73,10 +73,13 @@ def test_build_command_with_requirements_uses_uv_run():
     # to know we're instrumenting them.
     for pkg in _REQUIRED_OTEL_AGENT_DEPS:
         assert _has_with(argv, pkg), f"missing --with {pkg}"
-    # opentelemetry-instrument is the auto-instrumentation entry-point — must
-    # wrap the python invocation, not be after it.
-    oti_idx = argv.index("opentelemetry-instrument")
-    py_idx = oti_idx + 1
+    # We deliberately do NOT wrap with `opentelemetry-instrument` — that CLI
+    # prepends its sitecustomize dir to PYTHONPATH, which leaks to any
+    # grandchild python (boto3 credential_process helpers etc.) and crashes
+    # them with ModuleNotFoundError. The launcher bootstraps OTel in-process
+    # instead; see eval_mcp/_agent_launcher.py.
+    assert "opentelemetry-instrument" not in argv
+    py_idx = argv.index("python")
     assert argv[py_idx] == "python"
     # The launcher takes (agent_path, agent_entry, prompt) as positional args.
     assert argv[-3:] == ["/tmp/agent.py", "run_agent", "What is 2+2?"]
@@ -111,10 +114,15 @@ def test_build_command_sets_standard_otel_envs():
     assert env["OTEL_SERVICE_NAME"] == "user_agent"
 
 
-def test_build_command_with_user_venv_uses_their_otel():
-    """When the user has their own venv (with OTel installed), we spawn
-    via their existing opentelemetry-instrument — no uv run, no ephemeral
-    venv, no overlay. Their environment is the source of truth.
+def test_build_command_with_user_venv_uses_their_python_directly():
+    """When the user has their own venv (with OTel installed), we invoke
+    their python directly and let the launcher bootstrap OTel in-process.
+
+    We deliberately skip the `opentelemetry-instrument` CLI wrapper: it
+    mutates PYTHONPATH in a way that leaks to grandchild python processes
+    (credential_process helpers like isengardcli bundle their own python
+    that then crashes with ModuleNotFoundError). In-process bootstrap
+    avoids that entire class of bug.
     """
     from eval_mcp.subprocess_runner import build_command
 
@@ -127,18 +135,21 @@ def test_build_command_with_user_venv_uses_their_otel():
         venv_python="/path/to/their/.venv/bin/python",
     )
 
-    # No uv ceremony at all — we invoke their venv's binaries directly.
+    # No uv ceremony at all — we invoke their venv's python directly.
     assert "uv" not in argv
     assert "--with-requirements" not in argv
     assert "--with" not in argv
-    # First binary is their venv's opentelemetry-instrument, second is
-    # their python, then launcher + args.
-    assert argv[0] == "/path/to/their/.venv/bin/opentelemetry-instrument"
-    assert argv[1] == "/path/to/their/.venv/bin/python"
+    # No opentelemetry-instrument wrapper — launcher bootstraps OTel itself.
+    assert "opentelemetry-instrument" not in " ".join(argv)
+    # First binary is their venv's python, then launcher + args.
+    assert argv[0] == "/path/to/their/.venv/bin/python"
     # The launcher takes (agent_path, agent_entry, prompt) as positional args.
     assert argv[-3:] == ["/tmp/agent.py", "run_agent", "What is 2+2?"]
     # OTel env vars are the same regardless of mode — receiver doesn't care.
     assert env["OTEL_EXPORTER_OTLP_ENDPOINT"] == "http://127.0.0.1:1234"
+    # PYTHONPATH must be stripped so nothing leaks into the agent or its
+    # grandchildren. The launcher bootstraps OTel from a clean state.
+    assert "PYTHONPATH" not in env
 
 
 def test_build_command_user_venv_takes_priority_over_requirements():
@@ -158,7 +169,7 @@ def test_build_command_user_venv_takes_priority_over_requirements():
         requirements_path="/tmp/requirements.txt",  # should be ignored
     )
 
-    assert argv[0] == "/path/to/their/.venv/bin/opentelemetry-instrument"
+    assert argv[0] == "/path/to/their/.venv/bin/python"
     assert "uv" not in argv
 
 
@@ -253,6 +264,57 @@ def test_run_agent_subprocess_raises_on_nonzero_exit(tmp_path: Path):
     # The error message must include the agent's stderr so the user has
     # something actionable in the eval viewer.
     assert "agent blew up on purpose" in str(exc_info.value)
+
+
+def test_agent_subprocess_does_not_leak_pythonpath_to_grandchildren(tmp_path: Path):
+    """Regression guard for the isengardcli class of bug.
+
+    `opentelemetry-instrument` (the CLI we used to wrap the agent with)
+    prepends its sitecustomize dir to PYTHONPATH. Any grandchild python
+    spawned by the agent — e.g. boto3's `credential_process` invoking an
+    external binary that bundles its own interpreter — would inherit that
+    PYTHONPATH, try to `import opentelemetry`, fail, and crash the parent.
+
+    We now bootstrap OTel in-process inside _agent_launcher.py and strip
+    PYTHONPATH before spawning the agent, so grandchildren see a clean env.
+    This test pins that behavior: the agent spawns a subprocess and inspects
+    the environment visible to it. If PYTHONPATH contains anything mentioning
+    opentelemetry, we've regressed.
+    """
+    from eval_mcp.subprocess_runner import run_agent_subprocess
+
+    agent_file = tmp_path / "agent.py"
+    agent_file.write_text(
+        'import os, subprocess, sys\n'
+        'def run_agent(prompt):\n'
+        '    # Grandchild: same python, but a fresh invocation. Print the\n'
+        '    # PYTHONPATH it sees so the test can assert on it.\n'
+        '    result = subprocess.run(\n'
+        '        [sys.executable, "-c", "import os; print(os.environ.get(\\"PYTHONPATH\\", \\"\\"))"],\n'
+        '        capture_output=True, text=True, timeout=15,\n'
+        '    )\n'
+        '    return f"GRANDCHILD_PYTHONPATH={result.stdout.strip()}"\n'
+    )
+
+    output = run_agent_subprocess(
+        agent_path=str(agent_file),
+        agent_entry="run_agent",
+        prompt="?",
+        otlp_endpoint="http://127.0.0.1:1",
+        sample_id="leak-check",
+        requirements_path=None,
+        timeout=60,
+    )
+
+    assert output.startswith("GRANDCHILD_PYTHONPATH=")
+    grandchild_pp = output.split("=", 1)[1]
+
+    # The specific failure we're guarding: the OTel auto-instrumentation
+    # sitecustomize dir must not be on the grandchild's PYTHONPATH. If it
+    # is, spawning a python without OTel installed would crash in sitecustomize.
+    assert "opentelemetry" not in grandchild_pp.lower(), (
+        f"PYTHONPATH leaked OTel instrumentation dir to grandchild: {grandchild_pp!r}"
+    )
 
 
 def test_run_agent_subprocess_handles_non_string_return(tmp_path: Path):

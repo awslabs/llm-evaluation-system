@@ -34,6 +34,31 @@ _VALID_CONFIG_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
 _VALID_EVAL_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_:-]+$')
 
 
+def is_catastrophic_eval_failure(scores: list, log_results: Any) -> bool:
+    """True when the eval ran to completion but every sample errored.
+
+    Returns False when scores were produced (a real eval, even if 0%).
+    Returns True when no scores were produced AND either:
+      - the log has no results object at all (the task crashed during setup), or
+      - results.total_samples > 0 but results.completed_samples == 0
+        (every sample raised; nothing got far enough to be scored).
+
+    Used by handle_run_evaluation to surface success=false instead of the
+    misleading success=true with scores=[] we used to return. This is the
+    one signal that lets a caller distinguish 'real bad scores' from 'the
+    capture pipeline silently broke and we never even ran your agent'.
+
+    Pure function (no I/O) so it's testable without spinning up Inspect.
+    """
+    if scores:
+        return False
+    if log_results is None:
+        return True
+    total = getattr(log_results, "total_samples", 0) or 0
+    completed = getattr(log_results, "completed_samples", 0) or 0
+    return total > 0 and completed == 0
+
+
 def _validate_config_name(config_name: str) -> str:
     """Validate that a config name is safe (no path traversal possible).
 
@@ -308,11 +333,26 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         env["AWS_REGION"] = region
         env["AWS_DEFAULT_REGION"] = region
 
+        # Cold-storage path for raw OTel records. The receiver inside each
+        # solver picks this up (via EVAL_MCP_RAW_OTEL_PATH) and appends every
+        # received span/log to a JSONL file alongside the eval log. If the
+        # ModelEvent projection ever drops data due to a future bug, the raw
+        # records are still on disk and we can re-derive offline without
+        # re-running the eval. Best-effort: failures here do not block.
+        if not log_dir_str.startswith("s3://"):
+            raw_otel_dir = Path(log_dir_str) / "raw_otel"
+            try:
+                raw_otel_dir.mkdir(parents=True, exist_ok=True)
+                env["EVAL_MCP_RAW_OTEL_PATH"] = str(raw_otel_dir / f"{eval_id}.jsonl")
+            except OSError as e:
+                logger.warning(f"Could not set up raw OTel cold storage: {e}")
+
         # Build inspect eval command with relative path (Inspect requires non-absolute paths)
         relative_task = f"configs/{config_name}.py"
 
         # Extract model providers from the JSON config file
         models = []
+        config_data = None
         config_json_path = user_dir / "configs" / f"{config_name}.json"
         if config_json_path.exists():
             config_data = json.loads(config_json_path.read_text())
@@ -328,6 +368,53 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                     import re as _re
                     matches = _re.findall(r'"([^"]+/[^"]+)"', line)
                     models.extend(matches)
+
+        # Pre-flight capture check for agent evals: spawn the agent once
+        # with a trivial prompt and verify ≥1 Bedrock span lands in our
+        # OTLP receiver. Without this, a broken capture pipeline would let
+        # the eval run to completion and report success=true with empty
+        # scores. We only run this for agent evals — standard model evals
+        # don't go through the OTLP receiver path.
+        if config_data and config_data.get("agent_path"):
+            try:
+                from eval_mcp.canary import run_canary
+                canary = await asyncio.to_thread(
+                    run_canary,
+                    agent_path=config_data["agent_path"],
+                    agent_entry=config_data.get("agent_entry", "run_agent"),
+                    requirements_path=config_data.get("requirements_path"),
+                    venv_python=config_data.get("venv_python"),
+                )
+                if not canary.ok:
+                    return [
+                        TextContent(
+                            type="text",
+                            text=json.dumps({
+                                "success": False,
+                                "evalId": eval_id,
+                                "configName": config_name,
+                                "error": canary.error,
+                                "agentStderr": canary.agent_stderr,
+                                "spansSeen": canary.spans_seen,
+                                "llmSpansSeen": canary.llm_spans_seen,
+                                "hint": (
+                                    "The eval was aborted before running because "
+                                    "we wouldn't have been able to capture "
+                                    "anything. Fix the agent or the OTel install, "
+                                    "then re-run."
+                                ),
+                            }, indent=2),
+                        )
+                    ]
+                logger.info(
+                    f"Pre-flight canary passed: {canary.llm_spans_seen} LLM "
+                    f"spans captured from {canary.spans_seen} total."
+                )
+            except Exception as e:
+                # Don't block the eval on a canary infrastructure problem —
+                # log loudly and let it run. The fail-loud check will still
+                # catch any actual silent failure downstream.
+                logger.warning(f"Pre-flight canary skipped due to error: {e}")
 
         # Use Inspect's --adaptive-connections: auto-tunes parallelism based on
         # actual provider throttling. Recommended by Inspect over a fixed value,
@@ -470,6 +557,8 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         # Read results from the latest .eval log file
         results_summary = None
         run_id = None
+        all_samples_errored = False
+        first_sample_error = None
         try:
             from inspect_ai._view.common import list_eval_logs_async
             eval_logs = await list_eval_logs_async(log_dir_str)
@@ -486,6 +575,25 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                     "logFile": latest_log.name,
                 }
                 run_id = log.eval.run_id
+
+                # Detect silent catastrophic failure: Inspect ran to completion
+                # but every sample errored, so no scores were produced. We used
+                # to report success=true with an empty scores list, which hid
+                # bugs like the OTel sitecustomize grandchild-leak.
+                all_samples_errored = is_catastrophic_eval_failure(scores, log.results)
+
+                # Pull the first sample error for the fail-loud response so the
+                # caller sees the actual cause (missing creds, adapter crash,
+                # env leak) without opening the .eval file themselves.
+                if all_samples_errored:
+                    try:
+                        full_log = await read_eval_log_async(latest_log.name)
+                        for s in (full_log.samples or []):
+                            if s.error:
+                                first_sample_error = str(s.error.message)[:2000]
+                                break
+                    except Exception:
+                        pass
 
                 # Replicate the new .eval log to S3 (no-op if bucket isn't set)
                 try:
@@ -530,6 +638,32 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 logger.warning(f"Could not auto-start viewer: {e}")
         else:
             view_results_msg = None
+
+        # Fail loud when every sample errored: this is the signal that
+        # capture broke (e.g. OTel grandchild leak, missing creds, wrong
+        # model ID). Previously this returned success=true with scores=[],
+        # which let bugs ship unnoticed. The eval log is still produced so
+        # the caller can dig in, but the response makes it unambiguous.
+        if all_samples_errored:
+            result = {
+                "success": False,
+                "evalId": eval_id,
+                "configName": config_name,
+                "runId": run_id,
+                "viewerUrl": viewer_url,
+                "userDir": str(user_dir),
+                "error": (
+                    "Evaluation produced no scores — every sample errored. "
+                    "This usually means the agent failed to run (missing "
+                    "credentials, invalid model ID, capture bug) rather than "
+                    "actually scoring zero."
+                ),
+                "firstSampleError": first_sample_error,
+                "summary": results_summary,
+            }
+            if view_results_msg is not None:
+                result["viewResults"] = view_results_msg
+            return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
         result = {
             "success": True,

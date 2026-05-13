@@ -1,25 +1,45 @@
 """Bootstrap script run inside the agent's subprocess.
 
-Loaded by `opentelemetry-instrument python _agent_launcher.py <agent_path>
-<agent_entry> <prompt>` — by the time this file executes, OTel auto-
-instrumentation has already patched boto3/anthropic/etc. in this process,
-so any Bedrock calls the agent makes flow over OTLP to the harness.
+Invoked as `python _agent_launcher.py <agent_path> <agent_entry> <prompt>`.
+We deliberately do NOT wrap with `opentelemetry-instrument`: that CLI
+prepends its sitecustomize dir to PYTHONPATH, which leaks to any
+grandchild Python process (e.g. boto3's `credential_process` helpers
+like `isengardcli` that bundle their own interpreter without OTel
+installed). Instead we bootstrap auto-instrumentation in-process here,
+then load the user's agent.
 
-The launcher's job is narrow: import the user's agent by file path, call
-its entry function, and write the result back to stdout framed with a
-marker so the parent can extract it reliably even if the agent printed
-log lines of its own.
+The launcher's job is narrow: turn on OTel, import the user's agent by
+file path, call its entry function, and write the result to stdout
+framed with a marker so the parent can extract it reliably even if the
+agent printed log lines of its own.
 """
 
 from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 
 
 _BEGIN = "__EVAL_RESULT__"
 _END = "__EVAL_END__"
+
+
+def _bootstrap_otel() -> None:
+    """Run the same auto-instrumentation the CLI would, but in-process.
+
+    `initialize()` is exactly what opentelemetry-distro's sitecustomize
+    calls. Invoking it here means we never set PYTHONPATH to point at
+    that sitecustomize, so grandchild processes (credential_process
+    helpers, subprocess.run calls from the agent) inherit a clean env.
+    """
+    # Belt-and-suspenders: even if something upstream left PYTHONPATH
+    # pointing at OTel's sitecustomize dir, drop it before the agent
+    # runs so any grandchild python won't try to import opentelemetry.
+    os.environ.pop("PYTHONPATH", None)
+    from opentelemetry.instrumentation.auto_instrumentation import initialize
+    initialize()
 
 
 def _main() -> None:
@@ -28,6 +48,8 @@ def _main() -> None:
             "usage: _agent_launcher.py <agent_path> <agent_entry> <prompt>"
         )
     agent_path, agent_entry, prompt = sys.argv[1], sys.argv[2], sys.argv[3]
+
+    _bootstrap_otel()
 
     spec = importlib.util.spec_from_file_location("_user_agent", agent_path)
     if spec is None or spec.loader is None:

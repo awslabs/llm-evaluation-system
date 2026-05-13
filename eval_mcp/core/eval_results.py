@@ -28,6 +28,76 @@ from eval_mcp.core.user_storage import (
 logger = logging.getLogger(__name__)
 
 
+# Provider systems whose spans represent on-the-wire LLM calls. When a span
+# tagged with one of these is present for a given model, treat its tokens as
+# canonical and discard any framework-layer tokens for the same model.
+#
+# OTel GenAI semconv values that botocore's Bedrock instrumentation uses; if
+# you add another provider (anthropic SDK, openai SDK, etc.), append its
+# `gen_ai.system` value here.
+_PROVIDER_SYSTEMS = ("aws.bedrock",)
+
+
+def _split_model_key(model_key: str) -> tuple[str, str]:
+    """Split an Inspect ModelEvent.model string into (system, model_id).
+
+    bedrock_capture.py builds the model string as f"{provider}/{model}" where
+    provider is the OTel `gen_ai.system` attr and model is `gen_ai.request.model`.
+    Example: "aws.bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0".
+
+    Returns ("", model_key) if there's no slash separator (defensive fallback).
+    """
+    if "/" not in model_key:
+        return "", model_key
+    system, _, model_id = model_key.partition("/")
+    return system, model_id
+
+
+def _dedupe_layered_model_usage(usage_by_key: dict[str, dict]) -> dict[str, dict]:
+    """Collapse provider+framework duplicates that refer to the same model.
+
+    Strands, LangChain, and other agent frameworks that self-instrument emit
+    their own GenAI spans alongside botocore's Bedrock spans. Both spans cover
+    the same converse() call but the framework span typically reports only the
+    first turn's tokens (it doesn't sum across the tool-use loop), while the
+    provider span reports per-HTTP-call tokens — the actual ground truth.
+
+    Rule: when the same model_id appears under both a framework system and a
+    provider system, keep the provider's tokens and drop the framework entry.
+    The framework's role is preserved at the trace level (you can still see
+    "this call was inside a strands.Agent.invoke") but it stops double-counting
+    in the "Models used" aggregation.
+
+    If a model only has framework-layer spans (no provider span — e.g.
+    framework hit a non-Bedrock backend), keep the framework entry as-is so
+    we don't silently lose data.
+    """
+    if not usage_by_key:
+        return {}
+
+    # Index by model_id so we can see what systems exist per model.
+    by_model_id: dict[str, list[tuple[str, str, dict]]] = defaultdict(list)
+    for key, usage in usage_by_key.items():
+        system, model_id = _split_model_key(key)
+        by_model_id[model_id].append((system, key, usage))
+
+    deduped: dict[str, dict] = {}
+    for model_id, entries in by_model_id.items():
+        provider_entries = [e for e in entries if e[0] in _PROVIDER_SYSTEMS]
+        if provider_entries:
+            # Provider tokens are ground truth — keep all provider-systems' rows
+            # (one per provider, normally just aws.bedrock) and drop framework
+            # rows for this model_id.
+            for system, key, usage in provider_entries:
+                deduped[key] = usage
+        else:
+            # No provider span — preserve whatever we have. This is the
+            # "framework hit a backend we don't instrument" case.
+            for system, key, usage in entries:
+                deduped[key] = usage
+    return deduped
+
+
 async def _read_log_headers(log_dir: str) -> list[dict]:
     eval_log_infos = await list_eval_logs_async(log_dir)
     results = []
@@ -124,7 +194,7 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
                                     agent_usage[m]["output_tokens"] += ev.output.usage.output_tokens
                                     agent_usage[m]["total_tokens"] += ev.output.usage.input_tokens + ev.output.usage.output_tokens
                     entry["samples"].append(sample)
-            entry["agent_model_usage"] = agent_usage
+            entry["agent_model_usage"] = _dedupe_layered_model_usage(agent_usage)
             results.append(entry)
         except Exception as e:
             logger.warning(f"Failed to read full log {f}: {e}")

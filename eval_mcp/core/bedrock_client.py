@@ -80,22 +80,22 @@ def _autodetect_aws_profile() -> None:
          AWS_BEARER_TOKEN_BEDROCK) → leave them alone.
       2. Saved choice in ~/.config/eval-mcp/profile → use it.
       3. Exactly one profile in ~/.aws/config → use it and persist the name.
-      4. Multiple profiles → raise with the list (and login-state hint) so the
-         caller / Claude can ask the user. The chosen name is then written to
-         PROFILE_CONFIG_PATH (or AWS_PROFILE set in the MCP env block).
+      4. Multiple profiles → record an "ambiguous" error message that Bedrock
+         tool entry points retrieve via get_autodetect_error() and surface to
+         the user. **Never raises from this function**, so importing the MCP
+         server (which constructs a BedrockClient at module load) cannot crash
+         the whole process before Claude Code can talk to it.
 
     Token validity is never used to route — only the saved name. If the chosen
     profile's SSO token has expired, boto3 will surface a clear auth error and
     `aws sso login --profile <name>` fixes it. The MCP will not silently
     reroute to a different account.
 
-    Runs at most once per process; result (or error) is cached.
+    Runs at most once per process; result is cached.
     """
     global _autodetect_done, _autodetect_error
     with _autodetect_lock:
         if _autodetect_done:
-            if _autodetect_error is not None:
-                raise _autodetect_error
             return
         _autodetect_done = True
 
@@ -127,12 +127,22 @@ def _autodetect_aws_profile() -> None:
             logger.info("Auto-selected sole AWS profile: %s", configured[0])
             return
 
-        # (4) ambiguous — ask the user (via the MCP error → Claude relay)
+        # (4) ambiguous — record the error for tool entry points to surface.
+        # Do NOT raise here: this runs at module import time via
+        # BedrockClient.__init__, and raising would kill the MCP before it
+        # can serve any tools — Claude Code just sees "Failed to connect."
         lines = []
         for name in configured:
-            state = "logged in" if _is_profile_logged_in(name) else "not logged in"
+            try:
+                logged_in = _is_profile_logged_in(name)
+            except Exception:
+                # Token probe itself can throw (e.g. SSO token registration
+                # expired). Treat as "not logged in" rather than letting the
+                # error escape autodetect.
+                logged_in = False
+            state = "logged in" if logged_in else "not logged in"
             lines.append(f"  - {name} ({state})")
-        err = RuntimeError(
+        _autodetect_error = RuntimeError(
             "Multiple AWS profiles configured — the eval MCP needs you to pick one:\n"
             + "\n".join(lines)
             + "\n\nTo save your choice, either:\n"
@@ -142,8 +152,15 @@ def _autodetect_aws_profile() -> None:
             + "if its SSO token expires, run `aws sso login --profile <name>` — "
             + "the MCP will not silently switch to a different profile."
         )
-        _autodetect_error = err
-        raise err
+        logger.warning("AWS profile autodetect: %s", _autodetect_error)
+
+
+def get_autodetect_error() -> Optional[Exception]:
+    """Return the autodetect ambiguity error, if any. Tool entry points call
+    this to convert the error into a structured response instead of letting
+    AWS calls fail with cryptic 'no credentials' messages."""
+    _autodetect_aws_profile()
+    return _autodetect_error
 
 
 def create_boto3_bedrock_client(service: str = "bedrock-runtime", region: str = "us-west-2", **extra_config):

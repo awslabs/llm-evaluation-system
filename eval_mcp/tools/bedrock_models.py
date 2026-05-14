@@ -12,7 +12,10 @@ intentional — add new entries below when validating a new release.
 """
 
 import os
-from eval_mcp.core.bedrock_client import create_boto3_bedrock_client
+from eval_mcp.core.bedrock_client import (
+    create_boto3_bedrock_client,
+    get_autodetect_error,
+)
 from eval_mcp.tools.external_providers import (
     detect_available_providers,
     get_external_models,
@@ -125,10 +128,10 @@ def list_bedrock_models(
     Returns a dict (callers JSON-encode). Filtered against SUPPORTED_MODELS
     so only entries a human has validated for the eval pipeline are surfaced.
     """
-    try:
-        bedrock_client = create_boto3_bedrock_client('bedrock', region)
-    except RuntimeError as e:
-        return {"models": [], "count": 0, "error": str(e)}
+    err = get_autodetect_error()
+    if err is not None:
+        return {"models": [], "count": 0, "error": str(err)}
+    bedrock_client = create_boto3_bedrock_client('bedrock', region)
 
     # Patterns to exclude for text_only mode
     exclude_patterns = ['stability.', 'embed', 'upscale', 'inpaint', 'outpaint', 'image', 'pegasus']

@@ -34,7 +34,6 @@ The evaluation engine (Inspect AI) already routes to OpenAI, Anthropic, Google, 
 - Concurrency hardening — load-test the 100-call Bedrock semaphore and the HTTP transport beyond the current ~43 lines of coverage
 
 ### Researching
-- Pluggable storage backend (Postgres / DynamoDB) for teams that outgrow file + S3
 - Multi-tenant eval queue for shared deployments
 
 ---

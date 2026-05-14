@@ -15,6 +15,7 @@ from botocore.config import Config
 from inspect_ai.log import read_eval_log_async
 from mcp.types import TextContent
 
+from eval_mcp.core.bedrock_client import raise_if_autodetect_error
 from eval_mcp.core.user_storage import get_user_dir, get_user_log_dir
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 
@@ -102,6 +103,10 @@ async def _validate_providers(providers: List[str]) -> Dict[str, Any]:
     bedrock_models = [m for m in providers if m.startswith("bedrock/")]
     if not bedrock_models:
         return {"valid": True, "providers": providers, "note": "No Bedrock providers to validate"}
+
+    # Surface the multi-profile autodetect error here rather than letting
+    # boto3 fail with "Unable to locate credentials" deep in the validator.
+    raise_if_autodetect_error()
 
     # Validate each bedrock model
     failed = []

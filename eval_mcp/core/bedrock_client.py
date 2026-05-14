@@ -163,6 +163,16 @@ def get_autodetect_error() -> Optional[Exception]:
     return _autodetect_error
 
 
+def raise_if_autodetect_error() -> None:
+    """Raise the autodetect ambiguity error if one is recorded. Call this at
+    the entry to any AWS-invoking code path that doesn't already format the
+    error itself, so cryptic boto3 'Unable to locate credentials' failures
+    get replaced with the actionable multi-profile message."""
+    err = get_autodetect_error()
+    if err is not None:
+        raise err
+
+
 def create_boto3_bedrock_client(service: str = "bedrock-runtime", region: str = "us-west-2", **extra_config):
     """Create a boto3 Bedrock client with API key support if configured.
 
@@ -276,6 +286,7 @@ class BedrockClient:
         Returns:
             Response dict from Claude
         """
+        raise_if_autodetect_error()
         request_body = {
             "anthropic_version": "bedrock-2023-05-31",
             "max_tokens": max_tokens,
@@ -329,6 +340,7 @@ class BedrockClient:
             dict: {"type": "text", "text": "..."} for text tokens
                   {"type": "end", "stop_reason": "...", "response": {...}} at end
         """
+        raise_if_autodetect_error()
         import asyncio
 
         request_body = {

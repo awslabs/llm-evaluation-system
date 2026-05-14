@@ -12,6 +12,7 @@ intentional — add new entries below when validating a new release.
 """
 
 import os
+from typing import Optional
 from eval_mcp.core.bedrock_client import (
     create_boto3_bedrock_client,
     get_autodetect_error,
@@ -267,6 +268,7 @@ def list_available_models(
     their API key env var is set (see external_providers.EXTERNAL_PROVIDERS).
     """
     all_models = []
+    bedrock_error: Optional[str] = None
 
     if source in ("all", "bedrock"):
         try:
@@ -274,6 +276,12 @@ def list_available_models(
             for m in bedrock_result.get("models", []):
                 m["source"] = "bedrock"
                 all_models.append(m)
+            # list_bedrock_models surfaces autodetect / credential issues in
+            # an "error" field rather than raising; propagate it so the user
+            # sees the actionable message even when external providers also
+            # come back empty.
+            if bedrock_result.get("error"):
+                bedrock_error = bedrock_result["error"]
         except Exception:
             pass
 
@@ -287,12 +295,15 @@ def list_available_models(
     available_providers = detect_available_providers()
 
     if not all_models:
-        return {
+        out = {
             "models": [],
             "count": 0,
             "available_providers": available_providers,
             "note": "No models found. Check AWS credentials for Bedrock, or configure API keys for external providers (make keys / deploy.sh --keys).",
         }
+        if bedrock_error:
+            out["error"] = bedrock_error
+        return out
 
     return {
         "models": all_models,

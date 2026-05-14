@@ -125,7 +125,10 @@ def list_bedrock_models(
     Returns a dict (callers JSON-encode). Filtered against SUPPORTED_MODELS
     so only entries a human has validated for the eval pipeline are surfaced.
     """
-    bedrock_client = create_boto3_bedrock_client('bedrock', region)
+    try:
+        bedrock_client = create_boto3_bedrock_client('bedrock', region)
+    except RuntimeError as e:
+        return {"models": [], "count": 0, "error": str(e)}
 
     # Patterns to exclude for text_only mode
     exclude_patterns = ['stability.', 'embed', 'upscale', 'inpaint', 'outpaint', 'image', 'pegasus']

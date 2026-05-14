@@ -1,5 +1,6 @@
 """AWS Bedrock client for Claude interactions."""
 
+import configparser
 import json
 import logging
 import os
@@ -15,12 +16,143 @@ from botocore.exceptions import ClientError
 logger = logging.getLogger(__name__)
 
 
+_autodetect_lock = threading.Lock()
+_autodetect_done = False
+_autodetect_error: Optional[Exception] = None
+
+# Where the user's chosen AWS profile is persisted across MCP restarts.
+# Routing is by NAME only — token validity is never used to route, so a flipped
+# SSO login state can never silently switch the MCP to a different account.
+PROFILE_CONFIG_PATH = os.path.expanduser("~/.config/eval-mcp/profile")
+
+
+def _list_configured_aws_profiles() -> List[str]:
+    config_path = os.path.expanduser("~/.aws/config")
+    if not os.path.exists(config_path):
+        return []
+    cp = configparser.ConfigParser()
+    try:
+        cp.read(config_path)
+    except configparser.Error:
+        return []
+    profiles: List[str] = []
+    for section in cp.sections():
+        if section.startswith("profile "):
+            profiles.append(section.split(" ", 1)[1])
+        elif section == "default":
+            profiles.append("default")
+    return profiles
+
+
+def _read_saved_profile() -> Optional[str]:
+    try:
+        with open(PROFILE_CONFIG_PATH) as f:
+            name = f.read().strip()
+            return name or None
+    except OSError:
+        return None
+
+
+def _save_profile(name: str) -> None:
+    try:
+        os.makedirs(os.path.dirname(PROFILE_CONFIG_PATH), exist_ok=True)
+        with open(PROFILE_CONFIG_PATH, "w") as f:
+            f.write(name + "\n")
+    except OSError as e:
+        logger.warning("Could not persist AWS profile choice to %s: %s",
+                       PROFILE_CONFIG_PATH, e)
+
+
+def _is_profile_logged_in(name: str) -> bool:
+    """Best-effort check used only to annotate the first-run prompt. Never
+    used to route — routing is always by saved name."""
+    try:
+        boto3.Session(profile_name=name).client("sts").get_caller_identity()
+        return True
+    except Exception:
+        return False
+
+
+def _autodetect_aws_profile() -> None:
+    """Resolve which AWS profile the MCP should use, in priority order:
+
+      1. AWS credentials already in env (AWS_PROFILE / AWS_ACCESS_KEY_ID /
+         AWS_BEARER_TOKEN_BEDROCK) → leave them alone.
+      2. Saved choice in ~/.config/eval-mcp/profile → use it.
+      3. Exactly one profile in ~/.aws/config → use it and persist the name.
+      4. Multiple profiles → raise with the list (and login-state hint) so the
+         caller / Claude can ask the user. The chosen name is then written to
+         PROFILE_CONFIG_PATH (or AWS_PROFILE set in the MCP env block).
+
+    Token validity is never used to route — only the saved name. If the chosen
+    profile's SSO token has expired, boto3 will surface a clear auth error and
+    `aws sso login --profile <name>` fixes it. The MCP will not silently
+    reroute to a different account.
+
+    Runs at most once per process; result (or error) is cached.
+    """
+    global _autodetect_done, _autodetect_error
+    with _autodetect_lock:
+        if _autodetect_done:
+            if _autodetect_error is not None:
+                raise _autodetect_error
+            return
+        _autodetect_done = True
+
+        # (1) caller already chose
+        if (
+            os.environ.get("AWS_PROFILE")
+            or os.environ.get("AWS_ACCESS_KEY_ID")
+            or os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+        ):
+            return
+
+        configured = _list_configured_aws_profiles()
+
+        # (2) saved choice
+        saved = _read_saved_profile()
+        if saved and saved in configured:
+            os.environ["AWS_PROFILE"] = saved
+            return
+        # saved-but-no-longer-configured → fall through and reprompt
+
+        if not configured:
+            # No AWS config; let boto3 surface its own credential error.
+            return
+
+        # (3) single configured profile — unambiguous, auto-pick and persist
+        if len(configured) == 1:
+            os.environ["AWS_PROFILE"] = configured[0]
+            _save_profile(configured[0])
+            logger.info("Auto-selected sole AWS profile: %s", configured[0])
+            return
+
+        # (4) ambiguous — ask the user (via the MCP error → Claude relay)
+        lines = []
+        for name in configured:
+            state = "logged in" if _is_profile_logged_in(name) else "not logged in"
+            lines.append(f"  - {name} ({state})")
+        err = RuntimeError(
+            "Multiple AWS profiles configured — the eval MCP needs you to pick one:\n"
+            + "\n".join(lines)
+            + "\n\nTo save your choice, either:\n"
+            + f"  - write the profile name to {PROFILE_CONFIG_PATH}, or\n"
+            + "  - set AWS_PROFILE in the eval MCP env block in ~/.claude.json\n"
+            + "Then restart the MCP. The chosen profile is routed by name only; "
+            + "if its SSO token expires, run `aws sso login --profile <name>` — "
+            + "the MCP will not silently switch to a different profile."
+        )
+        _autodetect_error = err
+        raise err
+
+
 def create_boto3_bedrock_client(service: str = "bedrock-runtime", region: str = "us-west-2", **extra_config):
     """Create a boto3 Bedrock client with API key support if configured.
 
     When AWS_BEARER_TOKEN_BEDROCK is set, creates a client that uses bearer token
     auth instead of SigV4 signing. Otherwise returns a standard boto3 client.
     """
+    _autodetect_aws_profile()
     bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
     config_kwargs = {
         "region_name": region,

@@ -82,7 +82,7 @@ async def handle_generate_report(args: Dict[str, Any]) -> List[TextContent]:
             "path": str(pdf_path),
             "sizeBytes": len(pdf_bytes),
             "downloadUrl": f"/api/compare/report/{group_id}",
-            "message": f"Report saved. Available at http://localhost:4001/api/compare/report/{group_id}",
+            "message": f"Report saved. Download via /api/compare/report/{group_id}",
         }, indent=2))]
 
     except Exception as e:

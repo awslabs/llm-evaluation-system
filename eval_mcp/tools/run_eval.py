@@ -608,7 +608,8 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             results_summary = {"error": f"Could not parse results: {str(e)}"}
 
         viewer_path = f"/results?group={run_id}" if run_id else "/results"
-        viewer_url = f"http://localhost:4001{viewer_path}"
+        viewer_base = os.environ.get("EVAL_VIEWER_URL", "http://localhost:4001")
+        viewer_url = f"{viewer_base}{viewer_path}"
 
         # Auto-open the viewer so the user doesn't have to run a separate
         # command. On any failure we fall back to a manual-instructions string

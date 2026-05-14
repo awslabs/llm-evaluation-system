@@ -886,9 +886,10 @@ async def run_evaluation_and_report(
                 f"Run `eval-mcp view` manually, then open {info['url']}"
             )
     except Exception as e:
+        viewer_base = os.environ.get("EVAL_VIEWER_URL", "http://localhost:4001")
         eval_data["viewResults"] = (
             f"Run `eval-mcp view` in your terminal, then open "
-            f"http://localhost:4001{viewer_path} ({e})"
+            f"{viewer_base}{viewer_path} ({e})"
         )
 
     return json.dumps(eval_data, indent=2)

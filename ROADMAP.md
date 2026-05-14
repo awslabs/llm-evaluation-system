@@ -98,12 +98,12 @@ Two agentic frameworks are tested end-to-end (Strands, LangChain+LangGraph). RAG
 
 ### In progress
 - **First-class RAG scorers** — deterministic retrieval correctness (right docs fetched), faithfulness (answer grounded in context), hallucination flags
-- **More agentic frameworks** — CrewAI, AutoGen, native Claude SDK, OpenAI Agents SDK; wire each into a tested example like the existing Strands and LangChain ones
-- **Pre-made example datasets** — bundle 5–10 representative datasets under `examples/datasets/` (QA, RAG, tool-use, agent task) so new users have something to run on day one
+- **Framework-agnostic capture, verified end-to-end** — once the OpenAI and Anthropic SDK bridges land (see *MCP & Providers*), confirm agents built with CrewAI, AutoGen, OpenAI Agents SDK, and the native Claude SDK work without code changes. The goal is the agnostic claim holding, not per-framework code paths
+- **30-second quickstart eval** — one bundled example under `examples/` so a new user has something runnable immediately after install
 
 ### Coming soon
 - Framework-aware pipeline stages (RAG agents → retrieval + context_usage; tool-calling agents → tool_selection)
-- Pointers to public benchmarks (MMLU, GSM8K, SQuAD-style) with import recipes
+- Public-benchmark import recipes (MMLU, GSM8K, SQuAD-style) for cross-model comparison
 
 ### Researching
 - Multi-turn conversation evaluation with checkpoint scoring

@@ -210,7 +210,7 @@ async def generate_report_pdf(
     filename = f"report_{safe_id}.pdf"
 
     if _s3_enabled():
-        key = f"users/{user_id}/store/reports/{filename}"
+        key = f"users/{user_id}/reports/{filename}"
         _get_s3_client().put_object(
             Bucket=DATA_BUCKET,
             Key=key,
@@ -221,7 +221,7 @@ async def generate_report_pdf(
         if not user_id or '/' in user_id or '\\' in user_id or user_id in ('.', '..'):
             raise ValueError(f"invalid user_id: {user_id!r}")
         base_real = os.path.realpath(str(get_user_base_dir()))
-        pdf_real = os.path.realpath(os.path.join(base_real, user_id, "store", "reports", filename))
+        pdf_real = os.path.realpath(os.path.join(base_real, user_id, "reports", filename))
         if not pdf_real.startswith(base_real + os.sep):
             raise ValueError(f"path escape attempt: {pdf_real}")
         os.makedirs(os.path.dirname(pdf_real), exist_ok=True)
@@ -259,7 +259,7 @@ async def download_report(group_id: str, user_id: str = Depends(_get_user_id)):
     filename = f"report_{safe_id}.pdf"
 
     if _s3_enabled():
-        key = f"users/{user_id}/store/reports/{filename}"
+        key = f"users/{user_id}/reports/{filename}"
         try:
             obj = _get_s3_client().get_object(Bucket=DATA_BUCKET, Key=key)
         except Exception as e:
@@ -273,7 +273,7 @@ async def download_report(group_id: str, user_id: str = Depends(_get_user_id)):
         pdf_bytes = obj["Body"].read()
     else:
         base_real = os.path.realpath(str(get_user_base_dir()))
-        pdf_real = os.path.realpath(os.path.join(base_real, user_id, "store", "reports", filename))
+        pdf_real = os.path.realpath(os.path.join(base_real, user_id, "reports", filename))
         if not pdf_real.startswith(base_real + os.sep):
             raise HTTPException(status_code=400, detail="invalid path")
         if not os.path.isfile(pdf_real):

@@ -142,6 +142,10 @@ The script auto-installs Terraform, kubectl, and Helm, then deploys the complete
 
 Architecture details, OIDC config, Helm values, and manual deployment steps: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
 
+## Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for what's planned next and where contributions are most welcome.
+
 ## Contributing / Local Development
 
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for how to clone, run from source, rebuild the viewer frontend, and contribute.

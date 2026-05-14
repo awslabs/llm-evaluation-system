@@ -36,6 +36,7 @@ from inspect_ai.event._model import ModelEvent
 from inspect_ai.log._transcript import transcript
 from inspect_ai.model._chat_message import (
     ChatMessageAssistant,
+    ChatMessageSystem,
     ChatMessageTool,
     ChatMessageUser,
 )
@@ -50,12 +51,70 @@ from inspect_ai.tool._tool_info import ToolInfo
 from inspect_ai.tool._tool_params import ToolParams
 
 
+def _extract_text(content: Any) -> str:
+    """Pull plain text out of OTel content, which can be a string or a list
+    of content blocks (each block a dict with a 'text' key, or a raw string).
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict) and "text" in block:
+                parts.append(str(block["text"]))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return ""
+
+
+def _build_tool_calls(raw: Any) -> list[ToolCall]:
+    """Convert OTel tool_calls (list of dicts) to Inspect ToolCall objects.
+
+    Shape per botocore's bedrock_utils.extract_tool_calls:
+        [{"id": ..., "function": {"name": ..., "arguments": {...}}}, ...]
+    """
+    out: list[ToolCall] = []
+    if not isinstance(raw, list):
+        return out
+    for tc in raw:
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function", {}) or {}
+        out.append(ToolCall(
+            id=tc.get("id", ""),
+            function=fn.get("name", ""),
+            arguments=fn.get("arguments", {}) or {},
+            type="function",
+        ))
+    return out
+
+
 class _InspectLogExporter(LogExporter):
-    """Collects OTel log records (message content) emitted by Bedrock instrumentation."""
+    """Convert OTel log records emitted by botocore's Bedrock instrumentation
+    into Inspect ModelEvents.
+
+    Each converse call emits one log record per message, driven by event_name:
+      gen_ai.system.message      → ChatMessageSystem
+      gen_ai.user.message        → ChatMessageUser
+      gen_ai.assistant.message   → ChatMessageAssistant (with optional tool_calls)
+      gen_ai.tool.message        → ChatMessageTool (tool result)
+      gen_ai.choice              → flush: emit a ModelEvent whose `input` is the
+                                    accumulated history and whose `output` is
+                                    the choice's message.
+
+    We drive off `event_name` (the authoritative role signal in the OTel GenAI
+    semconv) instead of inferring from body shape, so every role survives and
+    tool_call IDs stay linked.
+
+    The previous implementation collapsed everything to a single `_pending_input`
+    dict that got overwritten on every record, silently dropping system prompts,
+    prior assistant turns, and tool results. This one accumulates a list and
+    resets only when a `gen_ai.choice` record flushes it.
+    """
 
     def __init__(self):
-        self._pending_input = None
-        self._pending_span_model = None
+        self._pending_messages: list[Any] = []
 
     def export(self, batch):
         for record in batch:
@@ -69,86 +128,91 @@ class _InspectLogExporter(LogExporter):
         pass
 
     def _process_record(self, record):
+        event_name = getattr(record.log_record, "event_name", None) or ""
         body = record.log_record.body
-        if not body or not isinstance(body, dict):
+
+        if event_name == "gen_ai.choice":
+            self._flush_as_model_event(body)
             return
 
-        # Input message (first record per call)
-        if "content" in body and "message" not in body:
-            self._pending_input = body
-            return
+        # Everything else is an input-history message. Only the roles the
+        # Bedrock instrumentation emits are handled; unknown event names are
+        # ignored rather than mapped incorrectly.
+        message = self._record_to_message(event_name, body)
+        if message is not None:
+            self._pending_messages.append(message)
 
-        # Output message (second record per call — has finish_reason + message)
-        if "message" in body or "finish_reason" in body:
-            self._emit_model_event(body)
+    def _record_to_message(self, event_name: str, body: Any):
+        """Map one input-side record to a ChatMessage*. Returns None for
+        event names we don't handle, so future OTel additions don't blow up.
+        """
+        if not isinstance(body, dict):
+            body = {}
 
-    def _emit_model_event(self, output_body: dict):
-        """Build and emit a ModelEvent from captured input + output."""
-        # Parse input
-        input_messages = []
-        if self._pending_input:
-            content_blocks = self._pending_input.get("content", [])
-            text = ""
-            for block in content_blocks:
-                if isinstance(block, dict) and "text" in block:
-                    text += block["text"]
-                elif isinstance(block, str):
-                    text += block
-            if text:
-                input_messages.append(ChatMessageUser(content=text))
-            self._pending_input = None
+        if event_name == "gen_ai.system.message":
+            return ChatMessageSystem(content=_extract_text(body.get("content")))
 
-        # Parse output
-        message = output_body.get("message", {})
-        finish_reason = output_body.get("finish_reason", "end_turn")
-        role = message.get("role", "assistant")
-        content = message.get("content", "")
-        tool_calls_raw = message.get("tool_calls", [])
+        if event_name == "gen_ai.user.message":
+            return ChatMessageUser(content=_extract_text(body.get("content")))
 
-        # Convert tool calls
-        tool_calls = []
-        for tc in tool_calls_raw:
-            fn = tc.get("function", {})
-            tool_calls.append(ToolCall(
-                id=tc.get("id", ""),
-                function=fn.get("name", ""),
-                arguments=fn.get("arguments", {}),
-                type="function",
-            ))
+        if event_name == "gen_ai.assistant.message":
+            return ChatMessageAssistant(
+                content=_extract_text(body.get("content")),
+                tool_calls=_build_tool_calls(body.get("tool_calls")) or None,
+            )
 
-        # Map finish reason
-        reason_map = {"end_turn": "stop", "tool_use": "tool_calls", "max_tokens": "max_tokens", "stop": "stop"}
+        if event_name == "gen_ai.tool.message":
+            return ChatMessageTool(
+                tool_call_id=body.get("id"),
+                content=_extract_text(body.get("content")),
+            )
+
+        return None
+
+    def _flush_as_model_event(self, choice_body: Any):
+        """Emit a ModelEvent using the accumulated history as input and the
+        choice as output. Always resets state so the next call starts clean.
+        """
+        if not isinstance(choice_body, dict):
+            choice_body = {}
+
+        message = choice_body.get("message", {}) or {}
+        finish_reason = choice_body.get("finish_reason", "end_turn")
+
+        reason_map = {
+            "end_turn": "stop",
+            "tool_use": "tool_calls",
+            "max_tokens": "max_tokens",
+            "stop": "stop",
+        }
         stop_reason = reason_map.get(finish_reason, "stop")
-
-        # Extract text from content
-        text = ""
-        if isinstance(content, str):
-            text = content
-        elif isinstance(content, list):
-            for block in content:
-                if isinstance(block, dict) and "text" in block:
-                    text += block["text"]
 
         output = ModelOutput(
             choices=[ChatCompletionChoice(
                 message=ChatMessageAssistant(
-                    content=text,
-                    tool_calls=tool_calls if tool_calls else None,
+                    content=_extract_text(message.get("content", "")),
+                    tool_calls=_build_tool_calls(message.get("tool_calls")) or None,
                 ),
                 stop_reason=stop_reason,
             )],
             usage=ModelUsage(input_tokens=0, output_tokens=0, total_tokens=0),
         )
 
+        input_messages = self._pending_messages or [ChatMessageUser(content="")]
+
         event = ModelEvent(
             model="bedrock",
-            input=input_messages or [ChatMessageUser(content="")],
+            input=input_messages,
             tools=[],
             tool_choice="auto",
             config=GenerateConfig(),
             output=output,
             completed=datetime.now(timezone.utc),
         )
+
+        # Reset before dispatch: if the transcript() call raises we still
+        # want the next converse call to start with a clean slate.
+        self._pending_messages = []
 
         try:
             transcript()._event(event)

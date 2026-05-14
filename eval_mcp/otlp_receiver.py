@@ -15,9 +15,13 @@ So we present exactly those shapes and nothing more.
 
 from __future__ import annotations
 
+import json
+import os
 import socket
 import threading
+import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn
@@ -35,6 +39,12 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
 from opentelemetry.proto.common.v1.common_pb2 import AnyValue, KeyValue
 
 
+# Env var the solver-side receiver reads to discover the cold-storage path.
+# Set by handle_run_evaluation before spawning the Inspect subprocess; lets
+# us thread the path down without changing every templated solver.
+_RAW_OTEL_ENV = "EVAL_MCP_RAW_OTEL_PATH"
+
+
 # ---------------------------------------------------------------------------
 # Duck-typed wrappers for the existing exporters
 # ---------------------------------------------------------------------------
@@ -49,9 +59,17 @@ class _DecodedSpan:
 
 @dataclass
 class _DecodedLogRecord:
-    """Shape consumed by _InspectLogExporter._process_record — `.log_record.body`."""
+    """Shape consumed by _InspectLogExporter._process_record.
+
+    `body` is the unpacked log body. `event_name` is OTel's authoritative
+    role signal for GenAI records (gen_ai.user.message, gen_ai.choice, etc.)
+    — the adapter relies on it to map records to ChatMessage* types
+    correctly. Forgetting to thread this field through means every record
+    gets dropped silently.
+    """
 
     body: dict[str, Any] | None = None
+    event_name: str | None = None
 
 
 @dataclass
@@ -138,7 +156,13 @@ def decode_logs_request(req: ExportLogsServiceRequest) -> list[_DecodedLogData]:
         for sl in rl.scope_logs:
             for record in sl.log_records:
                 body = _decode_any(record.body)
-                records.append(_DecodedLogData(log_record=_DecodedLogRecord(body=body)))
+                # event_name is the authoritative role signal for GenAI
+                # log records (gen_ai.user.message, gen_ai.choice, etc.).
+                # Without it the downstream adapter can't tell roles apart.
+                event_name = getattr(record, "event_name", None) or None
+                records.append(_DecodedLogData(
+                    log_record=_DecodedLogRecord(body=body, event_name=event_name),
+                ))
     return records
 
 
@@ -156,7 +180,65 @@ def decode_logs_request(req: ExportLogsServiceRequest) -> list[_DecodedLogData]:
 _PROTOBUF_CT = "application/x-protobuf"
 
 
-def build_receiver_app(span_exporter=None, log_exporter=None, buffer=None) -> FastAPI:
+class _JsonlWriter:
+    """Append-only writer for the cold-storage JSONL.
+
+    Serializes writes across uvicorn worker threads with a single lock;
+    sequential `open(path, "a")` is atomic at the syscall level, but we
+    want to avoid interleaved bytes within a single record's write.
+
+    Failures here are logged-but-swallowed so a disk problem can't take
+    the receiver down — the in-memory buffer + exporter dispatch are the
+    primary path; cold storage is insurance.
+    """
+
+    def __init__(self, path: str):
+        self._path = path
+        self._lock = threading.Lock()
+        # Make sure the parent dir exists eagerly; failing now beats failing
+        # on every span write.
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+
+    def write(self, kind: str, payload: dict) -> None:
+        record = {"kind": kind, "received_at": time.time(), **payload}
+        try:
+            line = json.dumps(record, default=str)
+        except (TypeError, ValueError):
+            # If something in the payload isn't JSON-serializable, fall back
+            # to a repr so we still capture the event existed. Better than
+            # losing the record entirely.
+            line = json.dumps({"kind": kind, "received_at": time.time(),
+                               "_unserializable_repr": repr(payload)})
+        try:
+            with self._lock:
+                with open(self._path, "a", encoding="utf-8") as f:
+                    f.write(line + "\n")
+        except OSError:
+            # Disk full, permission denied, etc. Cold storage is a "best
+            # effort" guarantee; do not crash the receiver.
+            pass
+
+
+def _decoded_span_to_payload(span) -> dict:
+    """Project a _DecodedSpan into a JSON-safe dict for cold storage."""
+    return {"attributes": dict(getattr(span, "attributes", None) or {})}
+
+
+def _decoded_log_to_payload(record) -> dict:
+    """Project a _DecodedLogData into a JSON-safe dict for cold storage."""
+    lr = record.log_record
+    return {
+        "event_name": getattr(lr, "event_name", None),
+        "body": getattr(lr, "body", None),
+    }
+
+
+def build_receiver_app(
+    span_exporter=None,
+    log_exporter=None,
+    buffer=None,
+    raw_writer: Optional[_JsonlWriter] = None,
+) -> FastAPI:
     """Build a FastAPI app that consumes OTLP/HTTP-protobuf.
 
     Each received batch is *always* appended to `buffer` (a (spans, logs)
@@ -165,6 +247,12 @@ def build_receiver_app(span_exporter=None, log_exporter=None, buffer=None) -> Fa
     provided as well, batches are also dispatched to them synchronously
     on the request thread (the legacy direct-dispatch mode, useful for
     test capture).
+
+    If `raw_writer` is provided, every span and log is also appended to
+    its JSONL file as-received. That cold-storage copy is the fallback
+    path: if the projection layer (bedrock_capture._InspectLogExporter)
+    drops data due to a future bug, the raw record is still on disk and
+    re-derivable without re-running the eval.
 
     Why buffer-by-default: the receiver runs in a worker thread, so
     contextvar-based APIs like Inspect AI's `transcript()` are unreachable
@@ -197,6 +285,9 @@ def build_receiver_app(span_exporter=None, log_exporter=None, buffer=None) -> Fa
             span_buf.extend(spans)
             if span_exporter is not None:
                 span_exporter.export(spans)
+            if raw_writer is not None:
+                for s in spans:
+                    raw_writer.write("span", _decoded_span_to_payload(s))
         return Response(
             content=ExportTraceServiceResponse().SerializeToString(),
             media_type=_PROTOBUF_CT,
@@ -217,6 +308,9 @@ def build_receiver_app(span_exporter=None, log_exporter=None, buffer=None) -> Fa
             log_buf.extend(records)
             if log_exporter is not None:
                 log_exporter.export(records)
+            if raw_writer is not None:
+                for r in records:
+                    raw_writer.write("log", _decoded_log_to_payload(r))
         return Response(
             content=ExportLogsServiceResponse().SerializeToString(),
             media_type=_PROTOBUF_CT,
@@ -276,6 +370,7 @@ def start_receiver(
     log_exporter=None,
     host: str = "127.0.0.1",
     port: int = 0,
+    raw_otel_path: Optional[str] = None,
 ) -> ReceiverHandle:
     """Start the OTLP receiver in a background thread and return a handle.
 
@@ -284,13 +379,29 @@ def start_receiver(
     batches are always appended to internal buffers (drainable via
     `handle.drain()`); if exporters are also passed they get a synchronous
     side-call on the request thread for legacy direct-dispatch callers.
+
+    If `raw_otel_path` is set (or the EVAL_MCP_RAW_OTEL_PATH env var is set),
+    every received span and log is also appended to that JSONL file as
+    cold storage. Failure to write doesn't break the receiver; it's
+    a "best effort" archive that lets us re-derive ModelEvents offline if
+    the projection layer is ever buggy. The env-var fallback exists so
+    templated solver code (which we don't recompile per-run) can pick
+    the path up automatically when handle_run_evaluation sets it.
     """
     if port == 0:
         port = _find_free_port(host)
 
+    if raw_otel_path is None:
+        raw_otel_path = os.environ.get(_RAW_OTEL_ENV) or None
+    raw_writer = _JsonlWriter(raw_otel_path) if raw_otel_path else None
+
     span_buf: list = []
     log_buf: list = []
-    app = build_receiver_app(span_exporter, log_exporter, buffer=(span_buf, log_buf))
+    app = build_receiver_app(
+        span_exporter, log_exporter,
+        buffer=(span_buf, log_buf),
+        raw_writer=raw_writer,
+    )
     config = uvicorn.Config(
         app,
         host=host,

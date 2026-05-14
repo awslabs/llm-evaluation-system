@@ -70,12 +70,13 @@ def build_command(
     without touching the filesystem or running a real process.
     """
     if venv_python:
-        # Their venv has opentelemetry-instrument already (via the 3 OTel
-        # packages they installed). Use it directly. No uv, no overlay,
-        # no managed mirror — just their setup + our env vars.
-        venv_bin = Path(venv_python).parent
+        # Their venv has the 3 OTel packages installed. We invoke their
+        # python directly (NOT via opentelemetry-instrument): the launcher
+        # bootstraps auto-instrumentation in-process so we never prepend
+        # OTel's sitecustomize dir to PYTHONPATH. That matters because
+        # grandchild pythons (boto3's credential_process helpers, etc.)
+        # would otherwise inherit the PYTHONPATH and crash on import.
         argv = [
-            str(venv_bin / "opentelemetry-instrument"),
             venv_python,
             _LAUNCHER_PATH,
             agent_path,
@@ -94,13 +95,11 @@ def build_command(
         for pkg in _OTEL_AGENT_DEPS:
             uv_args += ["--with", pkg]
 
-        # `--` separates uv's args from the command it should run.
-        # opentelemetry-instrument auto-loads the registered instrumentations
-        # at startup so the agent's library calls (boto3.bedrock, etc.)
-        # emit OTLP without the agent author writing any OTel code.
+        # Same reasoning as the user-venv branch: skip opentelemetry-instrument,
+        # let the launcher bootstrap OTel in-process so no PYTHONPATH leak
+        # reaches any subprocess the agent may spawn.
         argv = uv_args + [
             "--",
-            "opentelemetry-instrument",
             "python",
             _LAUNCHER_PATH,
             agent_path,
@@ -109,6 +108,11 @@ def build_command(
         ]
 
     env = dict(os.environ)
+    # Strip any PYTHONPATH the harness inherited (e.g. from being itself
+    # launched under opentelemetry-instrument). The agent's interpreter
+    # should start from a clean module search path; the launcher handles
+    # OTel bootstrap internally.
+    env.pop("PYTHONPATH", None)
     env.update({
         # Tell the OTel SDK in the agent process where to send batches. The
         # SDK appends /v1/traces and /v1/logs itself.

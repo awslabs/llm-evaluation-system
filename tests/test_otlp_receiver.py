@@ -143,9 +143,18 @@ def _build_trace_request(span_attributes: dict) -> ExportTraceServiceRequest:
     )
 
 
-def _build_logs_request(log_body: dict) -> ExportLogsServiceRequest:
-    """Build a minimal valid ExportLogsServiceRequest with one record."""
-    record = LogRecord(body=_kvlist(log_body))
+def _build_logs_request(log_body: dict, event_name: str | None = None) -> ExportLogsServiceRequest:
+    """Build a minimal valid ExportLogsServiceRequest with one record.
+
+    `event_name` matters for GenAI records — botocore emits e.g.
+    `gen_ai.user.message`, `gen_ai.choice` — and the downstream adapter
+    routes records by event_name. Optional for older non-GenAI tests that
+    just exercise body decoding.
+    """
+    kwargs: dict = {"body": _kvlist(log_body)}
+    if event_name is not None:
+        kwargs["event_name"] = event_name
+    record = LogRecord(**kwargs)
     return ExportLogsServiceRequest(
         resource_logs=[
             ResourceLogs(scope_logs=[ScopeLogs(log_records=[record])]),
@@ -224,6 +233,28 @@ def test_decode_logs_request_handles_output_with_finish_reason():
     assert body["message"]["role"] == "assistant"
     assert body["message"]["content"] == [{"text": "4"}]
     assert body["finish_reason"] == "end_turn"
+
+
+def test_decode_logs_request_preserves_event_name():
+    """Regression guard: event_name must round-trip from OTLP protobuf to
+    the duck-typed _DecodedLogRecord so the downstream adapter can route
+    each record to the right ChatMessage* type.
+
+    Without this, the adapter sees event_name=None on every record, falls
+    into the 'unknown event' branch, and silently drops every input message
+    — the agent's ModelEvents never reach the transcript and the UI shows
+    no model usage. We hit this exact regression once already.
+    """
+    from eval_mcp.otlp_receiver import decode_logs_request
+
+    req = _build_logs_request(
+        {"content": [{"text": "hello"}]},
+        event_name="gen_ai.user.message",
+    )
+
+    records = decode_logs_request(req)
+    assert len(records) == 1
+    assert records[0].log_record.event_name == "gen_ai.user.message"
 
 
 def test_decoded_spans_are_consumed_by_inspect_span_exporter():

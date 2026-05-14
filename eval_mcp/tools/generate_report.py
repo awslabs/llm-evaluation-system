@@ -70,6 +70,29 @@ async def handle_generate_report(args: Dict[str, Any]) -> List[TextContent]:
         pdf_path = reports_dir / filename
         pdf_path.write_bytes(pdf_bytes)
 
+        # On EKS the download endpoint reads from S3 (DATA_BUCKET env), but
+        # the s3_sync.replicate_async path uses a separate ~/.eval-mcp config
+        # bucket — different mechanism, not set in deployed pods. Without an
+        # explicit upload here, the file lives on the generating pod's local
+        # disk only, and any other replica returns 404. Mirror what the
+        # backend's own /report/pdf does (compare.py:212-219).
+        try:
+            from eval_mcp.core.user_storage import (
+                _s3_enabled, _get_s3_client, DATA_BUCKET,
+            )
+            if _s3_enabled():
+                key = f"users/{user_id}/reports/{filename}"
+                _get_s3_client().put_object(
+                    Bucket=DATA_BUCKET,
+                    Key=key,
+                    Body=pdf_bytes,
+                    ContentType="application/pdf",
+                )
+        except Exception as e:
+            logger.warning(f"Failed to upload report to S3: {e}")
+
+        # Also try the s3_sync replicate path for users who set up team
+        # sharing via `eval-mcp init` (separate bucket from DATA_BUCKET).
         try:
             from eval_mcp.s3_sync import replicate_async
             replicate_async(pdf_path, user_id=user_id)

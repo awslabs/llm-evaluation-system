@@ -87,11 +87,15 @@ requires = ["setuptools>=68.0.0", "setuptools-scm>=8.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools_scm]
-# Version is derived from the latest `v*` git tag. When building on a tagged
-# commit the version is clean (e.g. "0.3.5"); off-tag commits get a dev
-# version (e.g. "0.3.6.dev3+gabc1234"). `fallback_version` covers sdist
-# builds and shallow clones where git history isn't available.
-fallback_version = "0.0.0+unknown"
+# Version is derived from the latest `v*` git tag. When building on a
+# tagged commit the version is clean (e.g. "0.3.5"); off-tag commits
+# get a dev version (e.g. "0.3.6.dev3"). `local_scheme = "no-local-version"`
+# strips the "+gHASH.dDATE" suffix so the result is always PyPI-acceptable
+# (PEP 440 forbids local version identifiers on public indexes).
+# `fallback_version` covers sdist builds and shallow clones where git
+# history isn't available.
+local_scheme = "no-local-version"
+fallback_version = "0.0.0"
 
 [tool.setuptools.packages.find]
 where = ["."]

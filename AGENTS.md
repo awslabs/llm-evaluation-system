@@ -25,18 +25,24 @@ Update both files:
 
 ## Releasing
 
+The version lives in git tags. `pyproject.toml` has no `version` field —
+`setuptools-scm` derives it from the latest `v*` tag at build time.
+
 After merging a PR with user-visible changes, publish to PyPI from main:
 
 ```bash
 git checkout main && git pull
-make release         # patch bump (0.3.0 → 0.3.1) — bug fixes only
-make release-minor   # minor bump (0.3.0 → 0.4.0) — new features, backwards-compat
-make release-major   # major bump (0.3.0 → 1.0.0) — breaking changes
+make release         # patch bump (0.3.4 → 0.3.5) — bug fixes only
+make release-minor   # minor bump (0.3.4 → 0.4.0) — new features, backwards-compat
+make release-major   # major bump (0.3.4 → 1.0.0) — breaking changes
 ```
 
-Each target bumps `pyproject.toml`, commits, tags `vX.Y.Z`, and pushes.
-The `publish.yml` GitHub workflow takes over from the tag push and
-publishes to PyPI via trusted publisher. Don't tag manually.
+Each target reads the latest tag, computes the next, tags it, and pushes
+the tag. No source file is bumped; no "Release vX.Y.Z" commits land on
+main. The `publish.yml` workflow runs on tag push and publishes to PyPI
+via trusted publisher (setuptools-scm bakes the tag's version into the
+built artifacts).
 
 Pick the bump from semver: new public API = minor, only bug fixes =
-patch, backwards-incompatible = major.
+patch, backwards-incompatible = major. Don't tag manually outside the
+Makefile — the targets enforce clean tree + on main + up-to-date.

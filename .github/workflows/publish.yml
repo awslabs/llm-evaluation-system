@@ -13,6 +13,10 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          # setuptools-scm needs full history + tags to derive the version
+          # from the latest v* tag. Default checkout depth=1 hides them.
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -27,12 +31,10 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v4
 
-      - name: Set version from tag and sync lockfile
+      - name: Verify tag matches the commit
         run: |
           TAG="${GITHUB_REF#refs/tags/v}"
-          echo "Setting version to $TAG"
-          sed -i "s/^version = .*/version = \"$TAG\"/" pyproject.toml
-          uv lock
+          echo "Building for tag v$TAG (setuptools-scm will derive version from git)"
 
       - name: Build viewer frontend
         run: |

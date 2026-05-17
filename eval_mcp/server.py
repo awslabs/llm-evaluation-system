@@ -12,8 +12,12 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Annotated
+
+from pydantic import Field
 
 from mcp.server import FastMCP
+from mcp.types import ToolAnnotations
 
 from eval_mcp.core.bedrock_client import BedrockClient
 from eval_mcp.core.user_storage import list_user_document_paths
@@ -56,6 +60,135 @@ mcp = FastMCP("eval-server", port=port, host=host)
 bedrock = BedrockClient(region=region)
 
 
+# Tool annotation presets. These are hints (not security boundaries) that
+# help MCP clients reason about side effects and concurrency.
+READ_LOCAL = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+READ_REMOTE = ToolAnnotations(
+    readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=True
+)
+CREATE_LOCAL = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=False
+)
+CREATE_REMOTE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+)
+RUN_REMOTE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+)
+
+
+# Reusable Annotated types. Constraints turn into JSON-schema bounds the
+# client sees during tool discovery; examples show up in the generated
+# input_schema so agents get concrete shape hints.
+LimitParam = Annotated[
+    int,
+    Field(ge=1, le=200, description="Page size (1-200).", examples=[20]),
+]
+OffsetParam = Annotated[
+    int,
+    Field(ge=0, description="Page start offset, 0-based.", examples=[0, 20]),
+]
+ResponseFormat = Annotated[
+    str,
+    Field(
+        pattern="^(markdown|json)$",
+        description="Output shape: 'markdown' for humans, 'json' for programmatic use.",
+        examples=["markdown", "json"],
+    ),
+]
+NumSamples = Annotated[
+    int,
+    Field(
+        ge=1,
+        le=500,
+        description="How many QA samples / test cases to generate.",
+        examples=[10, 15, 50],
+    ),
+]
+NumPersonas = Annotated[
+    int,
+    Field(ge=1, le=50, description="Personas to synthesize from.", examples=[3, 5]),
+]
+MonthlyVolume = Annotated[
+    int,
+    Field(
+        ge=1,
+        description="Projected monthly call volume for cost projections.",
+        examples=[1000, 10000, 100000],
+    ),
+]
+ProvidersList = Annotated[
+    list,
+    Field(
+        description=(
+            "Target model IDs to evaluate. Use ids returned by list_available_models, "
+            "e.g. ['bedrock/us.anthropic.claude-sonnet-4-6']."
+        ),
+        examples=[["bedrock/us.anthropic.claude-sonnet-4-6"]],
+    ),
+]
+DatasetName = Annotated[
+    str,
+    Field(
+        description="Dataset name from list_datasets.",
+        examples=["dataset_qa_20260317_152233"],
+    ),
+]
+JudgeName = Annotated[
+    str,
+    Field(
+        description="Judge name from list_judges.",
+        examples=["judge_general_20260317_152233"],
+    ),
+]
+ConfigName = Annotated[
+    str,
+    Field(
+        description="Eval config name from create_eval_config or analyze_agent_path.",
+        examples=["eval_config_20260317_152233"],
+    ),
+]
+AgentImageURI = Annotated[
+    str,
+    Field(
+        description="Container image URI (ECR/DockerHub/GHCR).",
+        examples=["123456.dkr.ecr.us-east-2.amazonaws.com/my-agent:latest"],
+    ),
+]
+AgentPath = Annotated[
+    str,
+    Field(
+        description="Absolute path to a local Python agent file.",
+        examples=["/Users/me/my-agent/agent.py"],
+    ),
+]
+EvalId = Annotated[
+    str,
+    Field(description="Evaluation run ID from list_evaluations.", examples=["run-abc123"]),
+]
+GroupId = Annotated[
+    str,
+    Field(description="Evaluation runId returned by run_evaluation.", examples=["run-abc123"]),
+]
+VenvPython = Annotated[
+    str,
+    Field(
+        description="Absolute path to the agent venv's python binary.",
+        examples=["/Users/me/my-agent/.venv/bin/python"],
+    ),
+]
+SourceFilter = Annotated[
+    str,
+    Field(
+        pattern="^(all|bedrock|external)$",
+        description="Source filter for model listing.",
+        examples=["all", "bedrock", "external"],
+    ),
+]
+
+
 def _user(user_id: str = None) -> str:
     return user_id or DEFAULT_USER
 
@@ -75,7 +208,7 @@ def _auto_pull(user_id: str = None) -> None:
 # Dataset tools
 # ============================================================
 
-@mcp.tool()
+@mcp.tool(annotations=READ_REMOTE)
 async def analyze_dataset(
     file_path: str = None,
     file_content: str = None,
@@ -116,7 +249,7 @@ async def analyze_dataset(
     return json.dumps({"success": True, "filename": filename, "analysis": analysis}, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATE_LOCAL)
 async def save_dataset(
     column_mapping: dict,
     file_path: str = None,
@@ -161,10 +294,17 @@ from eval_mcp.tools.bedrock_models import (
 )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_REMOTE)
 def list_bedrock_models(
     provider: str = "all",
-    limit: int = 0,
+    limit: Annotated[
+        int,
+        Field(
+            ge=0,
+            description="Max models to return; 0 = unlimited.",
+            examples=[0, 20, 50],
+        ),
+    ] = 0,
     text_only: bool = True,
 ) -> str:
     """
@@ -185,10 +325,10 @@ def list_bedrock_models(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_REMOTE)
 def list_available_models(
     provider: str = "all",
-    source: str = "all",
+    source: SourceFilter = "all",
 ) -> str:
     """
     List all models available for evaluations, across Bedrock and external providers.
@@ -211,8 +351,15 @@ def list_available_models(
 # ============================================================
 
 
-@mcp.tool()
-def install_otel(venv_python: str) -> str:
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+def install_otel(venv_python: VenvPython) -> str:
     """
     Install the 3 OpenTelemetry packages eval-mcp needs into the user's
     agent venv. Called after run_evaluation_and_report returns
@@ -235,14 +382,14 @@ def install_otel(venv_python: str) -> str:
     return json.dumps({"success": result.success, "message": result.message})
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATE_REMOTE)
 async def generate_qa_pairs(
     user_id: str = None,
     prompt: str = None,
     documents: list = None,
     instructions: str = None,
-    numSamples: int = 10,
-    numPersonas: int = 5,
+    numSamples: NumSamples = 10,
+    numPersonas: NumPersonas = 5,
 ) -> str:
     """
     Generate question-answer pairs with golden answers for LLM-as-judge evaluation.
@@ -274,34 +421,73 @@ async def generate_qa_pairs(
     return result[0].text
 
 
-@mcp.tool()
-async def list_documents(user_id: str = None) -> str:
+@mcp.tool(annotations=READ_LOCAL)
+async def list_documents(
+    user_id: str = None,
+    limit: LimitParam = 50,
+    offset: OffsetParam = 0,
+    response_format: ResponseFormat = "json",
+) -> str:
     """
-    List all uploaded documents available for the user.
+    List uploaded documents available for the user.
 
     Use this to discover existing documents that can be used with generate_qa_pairs.
     Returns document paths that can be passed to generate_qa_pairs(documents=[...]).
 
+    Args:
+        limit: Page size (default 50).
+        offset: Page start (default 0).
+        response_format: "json" (default) or "markdown".
+
     Returns:
-        JSON with list of document paths
+        JSON or markdown listing with pagination metadata.
     """
     try:
-        paths = list_user_document_paths(_user(user_id))
+        all_paths = list_user_document_paths(_user(user_id))
+        total = len(all_paths)
+        limit = max(1, int(limit or 50))
+        offset = max(0, int(offset or 0))
+        page = all_paths[offset : offset + limit]
+        has_more = offset + len(page) < total
+        next_offset = offset + len(page) if has_more else None
+
+        if (response_format or "json").lower() == "markdown":
+            if total == 0:
+                return "No documents uploaded. Place files under the user's documents/ directory."
+            lines = [f"Found {total} document(s) — showing {offset + 1}-{offset + len(page)}:\n"]
+            lines += [f"- {p}" for p in page]
+            if has_more:
+                lines.append(f"\nMore available — pass offset={next_offset} to see the next page.")
+            lines.append(
+                "\nHint: pass any of these paths to generate_qa_pairs(documents=[...])."
+            )
+            return "\n".join(lines)
+
         return json.dumps({
             "success": True,
-            "documents": paths,
-            "count": len(paths),
-            "hint": "Pass these paths to generate_qa_pairs(documents=[...]) to generate QA pairs from documents",
+            "total": total,
+            "count": len(page),
+            "offset": offset,
+            "has_more": has_more,
+            "next_offset": next_offset,
+            "documents": page,
+            "hint": "Pass these paths to generate_qa_pairs(documents=[...]).",
         })
     except Exception as e:
         return json.dumps({"success": False, "error": str(e)})
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATE_REMOTE)
 async def generate_judge(
-    dataset: str,
+    dataset: DatasetName,
     user_id: str = None,
-    domain: str = "general",
+    domain: Annotated[
+        str,
+        Field(
+            description="Domain hint guiding criterion selection.",
+            examples=["general", "medical", "legal", "technical", "customer-support"],
+        ),
+    ] = "general",
 ) -> str:
     """
     Generate an LLM judge configuration tailored to your dataset.
@@ -325,11 +511,11 @@ async def generate_judge(
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATE_LOCAL)
 async def create_eval_config(
-    dataset: str,
-    providers: list,
-    judge: str,
+    dataset: DatasetName,
+    providers: ProvidersList,
+    judge: JudgeName,
     user_id: str = None,
     prompts: str | list = "{question}",
     description: str = None,
@@ -378,11 +564,11 @@ async def create_eval_config(
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATE_LOCAL)
 async def create_agent_eval_config(
-    dataset: str,
-    judge: str,
-    agentImage: str,
+    dataset: DatasetName,
+    judge: JudgeName,
+    agentImage: AgentImageURI,
     user_id: str = None,
     agentCmd: list = None,
     model: str = None,
@@ -430,11 +616,11 @@ async def create_agent_eval_config(
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATE_REMOTE)
 async def analyze_agent_image(
-    agentImage: str,
+    agentImage: AgentImageURI,
     user_id: str = None,
-    numSamples: int = 15,
+    numSamples: NumSamples = 15,
     agentCmd: list = None,
     model: str = None,
     context: str = None,
@@ -471,12 +657,12 @@ async def analyze_agent_image(
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATE_REMOTE)
 async def analyze_agent_path(
-    agentPath: str,
+    agentPath: AgentPath,
     user_id: str = None,
     agentEntry: str = "run_agent",
-    numSamples: int = 15,
+    numSamples: NumSamples = 15,
     context: str = None,
 ) -> str:
     """
@@ -517,10 +703,13 @@ async def analyze_agent_path(
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 async def list_datasets(
     user_id: str = None,
     searchTerm: str = None,
+    limit: LimitParam = 20,
+    offset: OffsetParam = 0,
+    response_format: ResponseFormat = "markdown",
 ) -> str:
     """
     List available datasets.
@@ -529,21 +718,33 @@ async def list_datasets(
     Dataset names can be used with generate_judge and create_eval_config.
 
     Args:
-        searchTerm: Optional search term to filter datasets by name
+        searchTerm: Optional case-insensitive filter on dataset name.
+        limit: Page size (default 20).
+        offset: Page start (default 0).
+        response_format: "markdown" (default) for humans, "json" for programmatic use.
 
     Returns:
-        Formatted list of datasets with details
+        Formatted list with pagination metadata.
     """
     _auto_pull(user_id)
-    args = {"user_id": _user(user_id), "searchTerm": searchTerm}
+    args = {
+        "user_id": _user(user_id),
+        "searchTerm": searchTerm,
+        "limit": limit,
+        "offset": offset,
+        "response_format": response_format,
+    }
     result = await handle_list_datasets(args)
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 async def list_judges(
     user_id: str = None,
     searchTerm: str = None,
+    limit: LimitParam = 20,
+    offset: OffsetParam = 0,
+    response_format: ResponseFormat = "markdown",
 ) -> str:
     """
     List available LLM judges.
@@ -552,21 +753,32 @@ async def list_judges(
     Judge names can be used with create_eval_config.
 
     Args:
-        searchTerm: Optional search term to filter judges by name
+        searchTerm: Optional case-insensitive filter on judge name.
+        limit: Page size (default 20).
+        offset: Page start (default 0).
+        response_format: "markdown" (default) for humans, "json" for programmatic use.
 
     Returns:
-        Formatted list of judges with details
+        Formatted list with pagination metadata.
     """
     _auto_pull(user_id)
-    args = {"user_id": _user(user_id), "searchTerm": searchTerm}
+    args = {
+        "user_id": _user(user_id),
+        "searchTerm": searchTerm,
+        "limit": limit,
+        "offset": offset,
+        "response_format": response_format,
+    }
     result = await handle_list_judges(args)
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 async def list_evaluations(
     user_id: str = None,
-    limit: int = 20,
+    limit: LimitParam = 20,
+    offset: OffsetParam = 0,
+    response_format: ResponseFormat = "json",
 ) -> str:
     """
     List completed evaluations.
@@ -578,20 +790,27 @@ async def list_evaluations(
         Factual, Coverage, Reasoning — whatever the judge emitted)
 
     Args:
-        limit: Maximum number of evaluations to return (default: 20)
+        limit: Page size (default 20).
+        offset: Page start (default 0).
+        response_format: "json" (default — eval payloads are heavy) or "markdown".
 
     Returns:
-        JSON with list of evaluations and their aggregated scores.
+        JSON or markdown listing with pagination metadata (total, has_more, next_offset).
     """
     _auto_pull(user_id)
-    args = {"user_id": _user(user_id), "limit": limit}
+    args = {
+        "user_id": _user(user_id),
+        "limit": limit,
+        "offset": offset,
+        "response_format": response_format,
+    }
     result = await handle_list_evaluations(args)
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_LOCAL)
 async def get_evaluation_details(
-    evalId: str,
+    evalId: EvalId,
     user_id: str = None,
 ) -> str:
     """
@@ -611,9 +830,9 @@ async def get_evaluation_details(
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=RUN_REMOTE)
 async def run_evaluation(
-    configName: str,
+    configName: ConfigName,
     user_id: str = None,
 ) -> str:
     """
@@ -645,7 +864,7 @@ async def run_evaluation(
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=RUN_REMOTE)
 async def run_evaluation_and_report(
     user_id: str = None,
     # Standard / prompt-comparison eval inputs (all optional — missing pieces are generated)
@@ -659,74 +878,42 @@ async def run_evaluation_and_report(
     # Agent eval inputs (alternative path)
     agent_path: str = None,
     agent_entry: str = "run_agent",
-    num_samples: int = 15,
+    num_samples: NumSamples = 15,
     # Expert mode: user-authored Inspect AI task.py
     task_path: str = None,
     # Shared
     context: str = None,
-    monthly_volume: int = 10000,
+    monthly_volume: MonthlyVolume = 10000,
 ) -> str:
     """
-    DEFAULT entry point for running an eval. Use this for any "run an eval" request.
+    DEFAULT entry point for running an eval. One call, auto-generates missing
+    pieces (dataset, judge, config), writes a PDF report.
 
-    Pass `providers=["bedrock/..."]` and, optionally, `dataset` / `judge`.
-    Anything you omit is auto-generated: QA pairs, judge, config. Writes a
-    PDF report at the end. One call — no need to chain list_datasets +
-    list_judges + create_eval_config + run_evaluation.
+    Modes — pick by which arg you set:
+      • agent_path → agentic eval (everything generated from code)
+      • task_path → expert mode: run a user-authored Inspect AI task.py
+      • providers (+ optional prompts=[...]) → standard or prompt-comparison eval
 
-    Minimal call for a sample eval:
+    Minimal call:
         run_evaluation_and_report(providers=["bedrock/us.anthropic.claude-sonnet-4-6"])
 
-    Modes (reference — you only pass what distinguishes the mode):
-
-    A. Agent eval:
-         agent_path (+ agent_entry, num_samples, context)
-         Everything else (dataset, judge, pipeline) is generated from the code.
-
-    B. Standard eval:
-         providers
-         If `dataset` omitted: generate_qa_pairs runs first (uses `documents`
-         if provided, otherwise synthesizes from `context`).
-         If `judge` omitted: generate_judge runs on the resulting dataset.
-
-    C. Prompt comparison:
-         providers + prompts=[list of templates]
-         Same auto-generation of dataset/judge as B.
-
-    D. Expert mode — user-authored Inspect AI task:
-         task_path (+ optional providers, context)
-         Runs your own `task.py` with whatever Inspect AI scorers/solvers you
-         chose (exact_match, model_graded_qa, pass_at_k, etc.). The tool runs
-         `inspect eval <task_path>`, captures the log, generates a report, and
-         opens the viewer. Use this when the jury-scoring pipeline isn't what
-         you want. Check `inspect --help` and inspect_ai source for available
-         scorers and task helpers.
-
     Args:
-        providers: Target model IDs, e.g. ["bedrock/us.anthropic.claude-sonnet-4-6"].
-            Required for modes B/C.
-        dataset: Name of an existing dataset (from list_datasets). Optional —
-            auto-generated when omitted.
-        judge: Name of an existing judge (from list_judges). Optional —
-            auto-generated from the dataset + context when omitted.
-        prompts: Single prompt template, or list of prompts for a comparison.
-            Use {question} or {prompt} as the placeholder. Default: "{question}"
+        providers: Target model IDs (required for non-agent modes).
+        dataset: Existing dataset name; auto-generated from `documents`/`context` if omitted.
+        judge: Existing judge name; auto-generated from the dataset if omitted.
+        prompts: Prompt template or list of templates for comparison. Use `{question}`.
         description: Optional description recorded in the eval.
         judge_models: Optional override list of judge model IDs.
-        documents: Optional list of document paths to ground dataset generation
-            (PDFs, markdown, etc.) when auto-generating a dataset.
-
-        agent_path: Path to the user's Python agent file (mode A).
-        agent_entry: Entry function name (default: "run_agent").
-        num_samples: Number of test cases (default: 15).
-
-        context: Short description of what the user is evaluating and why.
-            Used to tailor auto-generated datasets/judges AND the report narrative.
-        monthly_volume: Projected monthly call volume for cost projections.
+        documents: Doc paths used to ground auto-generated datasets (PDFs/markdown).
+        agent_path: Local Python agent file (agentic mode).
+        agent_entry: Agent entry function (default: "run_agent").
+        num_samples: Test cases when auto-generating (default: 15).
+        task_path: Path to a user-authored Inspect AI task.py (expert mode).
+        context: Brief description of what's being evaluated; tailors dataset/judge/report.
+        monthly_volume: Projected monthly calls for cost projections (default: 10000).
 
     Returns:
-        JSON combining eval results, the auto-generated configName, any
-        auto-generated dataset/judge names, and the report download URL.
+        JSON with eval results, configName, autoGenerated dataset/judge, and report URL.
     """
     uid = _user(user_id)
     generated: dict = {}  # track what was auto-created so the caller can see
@@ -895,7 +1082,7 @@ async def run_evaluation_and_report(
     return json.dumps(eval_data, indent=2)
 
 
-@mcp.tool()
+@mcp.tool(annotations=RUN_REMOTE)
 async def retry_evaluation(
     user_id: str = None,
 ) -> str:
@@ -913,11 +1100,11 @@ async def retry_evaluation(
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(annotations=CREATE_REMOTE)
 async def generate_report(
-    group_id: str,
+    group_id: GroupId,
     context: str = None,
-    monthly_volume: int = 10000,
+    monthly_volume: MonthlyVolume = 10000,
     user_id: str = None,
 ) -> str:
     """
@@ -950,7 +1137,14 @@ async def generate_report(
     return result[0].text
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False,
+    )
+)
 async def explore_eval_data(
     user_id: str = None,
     code: str = "",
@@ -1036,7 +1230,8 @@ def main():
     if transport == "http":
         import uvicorn
         from starlette.routing import Route
-        from starlette.responses import JSONResponse
+        from starlette.responses import JSONResponse, Response
+        from starlette.middleware.base import BaseHTTPMiddleware
 
         async def cancel_handler(request):
             user_id = request.path_params["user_id"]
@@ -1047,7 +1242,34 @@ def main():
             user_id = request.path_params["user_id"]
             return JSONResponse(get_running_eval_info(user_id))
 
+        # DNS-rebinding protection: reject browser requests whose Origin isn't
+        # in our allowlist. Same-origin (no Origin header, or matching host)
+        # is always allowed. Override with EVAL_MCP_ALLOWED_ORIGINS=a,b,c.
+        default_allowed = {
+            f"http://{host}:{port}",
+            f"http://localhost:{port}",
+            f"http://127.0.0.1:{port}",
+        }
+        env_allowed = os.environ.get("EVAL_MCP_ALLOWED_ORIGINS", "").strip()
+        allowed_origins = (
+            {o.strip() for o in env_allowed.split(",") if o.strip()}
+            if env_allowed
+            else default_allowed
+        )
+
+        class OriginValidationMiddleware(BaseHTTPMiddleware):
+            async def dispatch(self, request, call_next):
+                origin = request.headers.get("origin")
+                if origin and origin not in allowed_origins:
+                    return Response(
+                        f"Forbidden: Origin {origin!r} not in allowlist. "
+                        f"Set EVAL_MCP_ALLOWED_ORIGINS to permit it.",
+                        status_code=403,
+                    )
+                return await call_next(request)
+
         app = mcp.streamable_http_app()
+        app.add_middleware(OriginValidationMiddleware)
         app.routes.insert(0, Route("/eval-info/{user_id}", eval_info_handler, methods=["GET"]))
         app.routes.insert(0, Route("/cancel/{user_id}", cancel_handler, methods=["POST"]))
 

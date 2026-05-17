@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  MCP-builder Phase 4 evaluation for eval-mcp.
+
+  Grading is per the runner in `runner.py`:
+    <answer_must_contain><fact>...</fact></answer_must_contain>
+      → an LLM judge marks each fact pass/fail; question passes if all
+        facts pass.
+    <expected_tools><tool>name</tool></expected_tools>
+      → at least one of the listed tools must appear in the trace.
+        Omit entirely when no specific tool call is required.
+
+  Questions are intentionally state-independent (no fixture data needed)
+  so the runner works against a clean user dir on every run.
+-->
+<evaluation>
+  <qa_pair>
+    <question>I have a Python agent at /home/user/agent.py that calls Bedrock. I want to evaluate it end-to-end and get a PDF report. Which single eval-mcp tool should I call, and what's the minimum argument I need to pass?</question>
+    <answer_must_contain>
+      <fact>recommends run_evaluation_and_report as the single tool to call</fact>
+      <fact>says the minimum argument is agent_path (set to the file path)</fact>
+    </answer_must_contain>
+  </qa_pair>
+
+  <qa_pair>
+    <question>List the Anthropic models available in Bedrock for evaluations. Are Claude Sonnet 4.5 or 4.6 in the list?</question>
+    <answer_must_contain>
+      <fact>mentions at least one Claude Sonnet model (sonnet-4-5 or sonnet-4-6)</fact>
+      <fact>presents the result as a list of Anthropic models</fact>
+    </answer_must_contain>
+    <expected_tools>
+      <tool>list_bedrock_models</tool>
+      <tool>list_available_models</tool>
+    </expected_tools>
+  </qa_pair>
+
+  <qa_pair>
+    <question>What's the difference between analyze_agent_image and analyze_agent_path? When would I use one over the other?</question>
+    <answer_must_contain>
+      <fact>analyze_agent_image is for agents packaged as container images (Docker / ECR / etc.)</fact>
+      <fact>analyze_agent_path is for local Python agent files on disk</fact>
+      <fact>explains that the choice depends on how the agent is packaged or deployed</fact>
+    </answer_must_contain>
+  </qa_pair>
+
+  <qa_pair>
+    <question>I called run_evaluation_and_report and the response came back with needs_action set to "install_otel" and a venv_python path. What is the next tool I should call, and what do I pass to it?</question>
+    <answer_must_contain>
+      <fact>recommends calling install_otel</fact>
+      <fact>says to pass the venv_python path returned in the previous response</fact>
+    </answer_must_contain>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Why does create_eval_config auto-generate the config name instead of letting me pick it? What downside would picking my own name have?</question>
+    <answer_must_contain>
+      <fact>says the name is auto-generated from a timestamp</fact>
+      <fact>explains that auto-generation prevents accidentally reusing or overwriting a stale config with the same name</fact>
+    </answer_must_contain>
+  </qa_pair>
+
+  <qa_pair>
+    <question>I have a CSV at /tmp/qa.csv with question/answer columns. Walk me through the minimum sequence of eval-mcp tool calls needed to evaluate Claude Sonnet 4.6 against that CSV and get a PDF report at the end.</question>
+    <answer_must_contain>
+      <fact>mentions analyze_dataset or save_dataset to load the CSV</fact>
+      <fact>explains that a judge gets used — either via an explicit generate_judge call OR by noting that run_evaluation_and_report auto-generates one</fact>
+      <fact>ends with running an evaluation (run_evaluation or run_evaluation_and_report)</fact>
+      <fact>references a specific Sonnet 4.6 model id (e.g. bedrock/us.anthropic.claude-sonnet-4-6)</fact>
+    </answer_must_contain>
+  </qa_pair>
+
+  <qa_pair>
+    <question>Check what datasets currently exist in eval-mcp for this user. If there are none, tell me which tool I would call next to create one from a free-text prompt without uploading any documents.</question>
+    <answer_must_contain>
+      <fact>reports whether any datasets currently exist (or explicitly that there are none)</fact>
+      <fact>recommends generate_qa_pairs as the way to create one from a prompt</fact>
+    </answer_must_contain>
+    <expected_tools>
+      <tool>list_datasets</tool>
+    </expected_tools>
+  </qa_pair>
+
+  <qa_pair>
+    <question>What does the openTelemetry installation enable for eval-mcp, and which kind of evaluation requires it? Give a one-line summary plus the trigger.</question>
+    <answer_must_contain>
+      <fact>says OpenTelemetry / OTel is used to capture the agent's Bedrock calls during evaluation</fact>
+      <fact>indicates that agentic evaluations (run_evaluation_and_report with agent_path, or analyze_agent_path) are the ones that need it</fact>
+    </answer_must_contain>
+  </qa_pair>
+
+  <qa_pair>
+    <question>I want a list of every evaluation I have run so far, sorted by recency, but only the five most recent. How would I call list_evaluations to get that?</question>
+    <answer_must_contain>
+      <fact>says to set limit to 5 (or limit=5) on list_evaluations</fact>
+      <fact>indicates that results come back in recency order by default</fact>
+    </answer_must_contain>
+  </qa_pair>
+
+  <qa_pair>
+    <question>I keep getting an error from list_bedrock_models that mentions "models are not accessible" and tells me to check something in my AWS account. What is the most likely cause and what should I do to fix it?</question>
+    <answer_must_contain>
+      <fact>identifies the cause as Bedrock model access not being enabled for the AWS account / region</fact>
+      <fact>recommends enabling model access in the Bedrock console (or otherwise granting access in AWS)</fact>
+    </answer_must_contain>
+  </qa_pair>
+</evaluation>

@@ -3,11 +3,18 @@
 import { useState } from "react";
 import type { Sample } from "./ComparisonView";
 
-// Continuous red -> yellow -> green gradient for a 0-1 score.
 function scoreColor(score: number): string {
-  const clamped = Math.max(0, Math.min(1, score));
-  const hue = Math.round(clamped * 120);
-  return `hsl(${hue}, 70%, 55%)`;
+  const s = Math.max(0, Math.min(1, score));
+  if (s < 0.5) {
+    const t = s * 2;
+    const h = 5 + t * 40;
+    const sat = 50 + t * 10;
+    return `hsl(${h}, ${sat}%, 55%)`;
+  }
+  const t = (s - 0.5) * 2;
+  const h = 45 + t * 30;
+  const sat = 60 - t * 15;
+  return `hsl(${h}, ${sat}%, 55%)`;
 }
 
 function formatModel(model: string): string {
@@ -20,20 +27,16 @@ function formatModel(model: string): string {
     mistral: "Mistral",
     azure: "Azure",
   };
-
   const slashIdx = model.indexOf("/");
   if (slashIdx === -1) return model;
-
   const prefix = model.slice(0, slashIdx);
   const rest = model.slice(slashIdx + 1);
-
-  let name = rest
+  const name = rest
     .replace(/^us\.\w+\./, "")
     .replace(/-v\d+:\d+$/, "")
     .replace(/-\d{8}$/, "");
-
   const provider = providers[prefix] || prefix;
-  return `${provider}: ${name}`;
+  return `${provider} · ${name}`;
 }
 
 interface SampleDetailPanelProps {
@@ -52,60 +55,68 @@ export default function SampleDetailPanel({
 
   const criteriaResults = result.criteriaResults || [];
   const explanation = result.explanation || "";
-
-  // Parse judge details from explanation text
-  const judgeLines = explanation
-    .split("\n")
-    .filter((l) => l.startsWith("  ") && l.includes(":"))
-    .filter((l) => !l.startsWith("  Errors"));
-
-  // Split explanation into sections
   const sections = parseExplanation(explanation);
 
   return (
-    <div className="w-96 flex-shrink-0 overflow-y-auto border-l border-claude-border bg-claude-surface">
-      {/* Header */}
-      <div className="sticky top-0 z-10 flex items-center justify-between border-b border-claude-border bg-claude-surface px-4 py-3">
-        <div>
-          <h3 className="text-sm font-medium text-claude-text">
-            Sample #{sample.id}
-          </h3>
-          <p className="text-xs text-claude-muted">{formatModel(model)}</p>
+    <aside className="w-[420px] flex-shrink-0 overflow-y-auto border-l border-rule bg-ink-elev">
+      <div className="sticky top-0 z-10 flex items-baseline justify-between gap-3 border-b border-rule bg-ink-elev px-5 py-4">
+        <div className="min-w-0">
+          <p className="eyebrow">Sample № {sample.id}</p>
+          <p className="mt-1 truncate font-mono text-[12px] text-bone-dim">
+            {formatModel(model)}
+          </p>
         </div>
         <button
           onClick={onClose}
-          className="rounded p-1 text-claude-muted hover:bg-claude-bg hover:text-claude-text"
+          aria-label="Close detail panel"
+          className="flex h-7 w-7 flex-shrink-0 items-center justify-center border border-rule text-bone-dim transition-colors hover:border-bone-mute hover:text-bone"
         >
-          <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          <svg
+            className="h-3.5 w-3.5"
+            fill="none"
+            viewBox="0 0 24 24"
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth={1.6}
+              d="M6 18L18 6M6 6l12 12"
+            />
           </svg>
         </button>
       </div>
 
-      <div className="p-4 space-y-4">
-        {/* Overall score */}
-        <div
-          className="rounded-lg p-3 border"
-          style={{
-            borderColor: scoreColor(result.score),
-            backgroundColor: `hsla(${Math.round(result.score * 120)}, 55%, 30%, 0.20)`,
-          }}
-        >
-          <div className="flex items-baseline gap-2">
-            <span className="text-2xl font-bold" style={{ color: scoreColor(result.score) }}>
-              {(result.score * 100).toFixed(0)}%
+      <div className="space-y-6 px-5 py-5">
+        <div>
+          <p className="eyebrow">Rubric score</p>
+          <div className="mt-2 flex items-baseline gap-3">
+            <span
+              className="font-display text-6xl leading-none tabular-nums"
+              style={{ color: scoreColor(result.score) }}
+            >
+              {(result.score * 100).toFixed(0)}
             </span>
-            <span className="text-sm text-claude-muted">rubric score</span>
+            <span className="font-mono text-sm text-bone-mute">/ 100</span>
+          </div>
+          <div
+            className="mt-3 h-1 w-full bg-rule-soft"
+            aria-hidden
+          >
+            <div
+              className="h-full transition-all"
+              style={{
+                width: `${Math.max(0, Math.min(1, result.score)) * 100}%`,
+                backgroundColor: scoreColor(result.score),
+              }}
+            />
           </div>
         </div>
 
-        {/* Criteria breakdown */}
         {criteriaResults.length > 0 && (
           <div>
-            <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-claude-muted">
-              Per-Criterion Scores
-            </h4>
-            <div className="space-y-2">
+            <p className="eyebrow mb-3">Per-criterion</p>
+            <dl className="border-y border-rule-soft">
               {criteriaResults.map((cr) => {
                 const critScore =
                   typeof (cr as { score?: number }).score === "number"
@@ -118,82 +129,78 @@ export default function SampleDetailPanel({
                 return (
                   <div
                     key={cr.name}
-                    className="flex items-center justify-between rounded bg-claude-bg px-3 py-2"
+                    className="flex items-baseline justify-between gap-3 border-t border-rule-soft py-2.5 first:border-t-0"
                   >
-                    <span className="text-sm capitalize text-claude-text">
-                      {cr.name}
-                    </span>
-                    <div className="flex items-center gap-2">
+                    <dt className="text-[13px] capitalize text-bone">
+                      {cr.name.replace(/_/g, " ")}
+                    </dt>
+                    <dd className="flex items-baseline gap-2">
                       <span
-                        className="text-xs font-medium"
+                        className="font-sans text-sm font-medium tabular-nums"
                         style={{ color: scoreColor(critScore) }}
                       >
                         {(critScore * 100).toFixed(0)}%
                       </span>
-                      <span className="text-xs text-claude-muted">
-                        ({cr.votes_for}/{cr.total} judges)
+                      <span className="font-mono text-[10px] tabular-nums text-bone-mute">
+                        {cr.votes_for}/{cr.total} judges
                       </span>
-                    </div>
+                    </dd>
                   </div>
                 );
               })}
-            </div>
+            </dl>
           </div>
         )}
 
-        {/* Judge details */}
         {sections.judges.length > 0 && (
           <div>
-            <h4 className="mb-2 text-xs font-medium uppercase tracking-wider text-claude-muted">
-              Individual Judges
-            </h4>
+            <p className="eyebrow mb-3">Individual judges</p>
             <div className="space-y-2">
               {sections.judges.map((judge, i) => (
-                <div
+                <pre
                   key={i}
-                  className="rounded bg-claude-bg px-3 py-2 text-xs text-claude-muted"
+                  className="whitespace-pre-wrap break-words border-l border-ember-deep bg-ink-raised px-3 py-2 font-mono text-[11px] leading-relaxed text-bone-dim"
                 >
-                  <pre className="whitespace-pre-wrap font-mono">{judge}</pre>
-                </div>
+                  {judge}
+                </pre>
               ))}
             </div>
           </div>
         )}
 
-        {/* Question */}
         <ExpandableSection title="Question" content={sample.input} />
-
-        {/* Expected answer */}
-        <ExpandableSection title="Expected Answer" content={sample.target} />
-
-        {/* Model response */}
-        <ExpandableSection title="Model Response" content={result.output} />
-
+        <ExpandableSection title="Expected answer" content={sample.target} />
+        <ExpandableSection title="Model response" content={result.output} />
       </div>
-    </div>
+    </aside>
   );
 }
 
-function ExpandableSection({ title, content }: { title: string; content: string }) {
+function ExpandableSection({
+  title,
+  content,
+}: {
+  title: string;
+  content: string;
+}) {
   const [expanded, setExpanded] = useState(false);
   const isLong = content.length > 200;
-
-  const truncated = isLong ? content.slice(0, content.lastIndexOf(" ", 200)) + "..." : content;
+  const truncated = isLong
+    ? content.slice(0, content.lastIndexOf(" ", 200)) + "…"
+    : content;
 
   return (
     <div>
-      <h4 className="mb-1 text-xs font-medium uppercase tracking-wider text-claude-muted">
-        {title}
-      </h4>
-      <div className="rounded bg-claude-bg p-3 text-sm text-claude-text whitespace-pre-wrap">
+      <p className="eyebrow mb-2">{title}</p>
+      <div className="whitespace-pre-wrap border-l border-rule bg-ink-raised/40 px-3 py-2.5 text-[13px] leading-relaxed text-bone">
         {isLong && !expanded ? truncated : content}
       </div>
       {isLong && (
         <button
           onClick={() => setExpanded(!expanded)}
-          className="mt-1 text-xs text-claude-accent hover:text-claude-hover"
+          className="mt-1.5 font-mono text-[10px] uppercase tracking-eyebrow text-ember hover:text-ember-deep"
         >
-          {expanded ? "▲ Show less" : "▼ Show more"}
+          {expanded ? "Show less ▴" : "Show more ▾"}
         </button>
       )}
     </div>

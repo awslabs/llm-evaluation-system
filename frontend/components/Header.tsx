@@ -1,38 +1,75 @@
 "use client";
 
 import { useAuth } from "@/contexts/AuthContext";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
+
+const NAV: Array<{ href: string; label: string }> = [
+  { href: "/chat", label: "Chat" },
+  { href: "/results", label: "Results" },
+  { href: "/history", label: "History" },
+];
 
 export default function Header() {
   const { user, logoutUrl } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
 
   return (
-    <div className="border-b border-claude-border bg-claude-bg px-4 py-3">
-      <div className="mx-auto flex items-center justify-between">
-        <h1 className="text-lg font-semibold text-claude-text">
-          LLM Evaluation Platform
-        </h1>
-        <div className="flex items-center gap-3">
-          <button
-            onClick={() => router.push("/results")}
-            className="rounded-lg bg-claude-accent px-4 py-2 text-sm font-semibold text-white hover:bg-claude-hover"
-          >
-            View Results
-          </button>
+    <header className="relative border-b border-rule bg-ink">
+      <div className="flex items-center justify-between px-6 py-3">
+        <div className="flex items-baseline gap-4">
+          <span className="font-display text-xl italic leading-none text-bone">
+            Observatory
+          </span>
+          <span className="hidden h-3 w-px bg-rule sm:inline-block" aria-hidden />
+          <span className="eyebrow hidden sm:inline-block">LLM Evaluation</span>
+        </div>
+
+        <nav className="absolute left-1/2 -translate-x-1/2">
+          <ul className="flex items-center gap-1">
+            {NAV.map((item) => {
+              const active = pathname?.startsWith(item.href);
+              return (
+                <li key={item.href}>
+                  <button
+                    onClick={() => router.push(item.href)}
+                    className={`relative px-3 py-2 font-mono text-[11px] uppercase tracking-eyebrow transition-colors ${
+                      active
+                        ? "text-bone"
+                        : "text-bone-mute hover:text-bone-dim"
+                    }`}
+                  >
+                    {item.label}
+                    {active && (
+                      <span
+                        className="absolute inset-x-3 -bottom-px h-px bg-ember"
+                        aria-hidden
+                      />
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </nav>
+
+        <div className="flex items-center gap-4">
           {user?.name && (
-            <span className="text-sm text-claude-muted">
-              {user.name}
+            <span className="hidden font-mono text-[11px] text-bone-dim sm:inline-block">
+              <span className="text-bone-mute">SIGNED</span>{" "}
+              <span className="text-bone">{user.name}</span>
             </span>
           )}
           <button
-            onClick={() => { window.location.href = logoutUrl; }}
-            className="rounded-lg border border-claude-border px-3 py-1.5 text-sm text-claude-text hover:bg-claude-surface"
+            onClick={() => {
+              window.location.href = logoutUrl;
+            }}
+            className="eyebrow border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone-dim"
           >
-            Sign Out
+            Sign out
           </button>
         </div>
       </div>
-    </div>
+    </header>
   );
 }

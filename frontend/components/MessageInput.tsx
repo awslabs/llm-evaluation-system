@@ -260,26 +260,25 @@ export default function MessageInput({
   const inputDisabled = disabled || isUploading;
 
   return (
-    <div className="border-t border-claude-border bg-claude-bg p-4">
+    <div className="border-t border-rule bg-ink px-6 py-4">
       <div className="mx-auto max-w-3xl">
-        {/* Upload progress indicator */}
         {isUploading && (
-          <div className="mb-3 flex items-center gap-2 rounded-lg border border-claude-border bg-claude-surface px-3 py-2">
-            <svg className="h-5 w-5 animate-spin text-claude-accent" fill="none" viewBox="0 0 24 24">
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
-            </svg>
-            <span className="text-sm text-claude-text">Uploading files...</span>
+          <div className="mb-3 flex items-center gap-3 border border-rule bg-ink-elev px-3 py-2">
+            <span className="cursor-block bg-ember" />
+            <span className="font-mono text-[11px] uppercase tracking-eyebrow text-bone-dim">
+              Uploading files
+            </span>
           </div>
         )}
 
         <div
-          className={`flex items-end space-x-4 ${isDragging ? 'rounded-lg ring-2 ring-claude-accent ring-offset-2' : ''}`}
+          className={`flex items-end gap-3 border bg-ink-elev transition-colors ${
+            isDragging ? "border-ember" : "border-rule focus-within:border-bone-mute"
+          }`}
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
         >
-          {/* Hidden file input - accepts multiple files and various types */}
           <input
             ref={fileInputRef}
             type="file"
@@ -289,15 +288,24 @@ export default function MessageInput({
             className="hidden"
           />
 
-          {/* File upload button */}
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={inputDisabled}
-            className="rounded-lg border border-claude-border bg-claude-surface p-3 text-claude-muted hover:bg-claude-border hover:text-claude-text disabled:opacity-50 disabled:cursor-not-allowed"
-            title="Upload files (PDF, CSV, TXT, images)"
+            title="Attach files (PDF, CSV, TXT, images)"
+            className="m-2 flex h-9 w-9 items-center justify-center border border-rule text-bone-dim transition-colors hover:border-bone-mute hover:text-bone disabled:cursor-not-allowed disabled:opacity-40"
           >
-            <svg className="h-5 w-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
+            <svg
+              className="h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={1.6}
+                d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13"
+              />
             </svg>
           </button>
 
@@ -307,36 +315,45 @@ export default function MessageInput({
             onChange={(e) => onChange(e.target.value)}
             onKeyDown={handleKeyDown}
             disabled={inputDisabled}
-            placeholder={isDragging ? "Drop files here..." : "Type your message or drop files..."}
-            className={`flex-1 resize-none rounded-lg border bg-claude-surface px-4 py-3 text-claude-text placeholder-claude-muted focus:border-claude-accent focus:outline-none focus:ring-2 focus:ring-claude-accent disabled:opacity-50 ${
-              isDragging ? 'border-claude-accent' : 'border-claude-border'
-            }`}
+            placeholder={
+              isDragging
+                ? "Drop files to attach…"
+                : "Compose — describe an evaluation, ask a question, drop a CSV…"
+            }
+            className="flex-1 resize-none bg-transparent px-1 py-3 text-[0.95rem] leading-relaxed text-bone placeholder:text-bone-mute focus:outline-none disabled:opacity-50"
             rows={3}
           />
+
           {isStreaming ? (
             <button
               onClick={onCancel}
-              className="rounded-lg bg-claude-accent px-6 py-3 font-semibold text-white hover:bg-claude-hover"
+              className="m-2 inline-flex items-center gap-2 border border-ember bg-ember-soft px-4 py-2 font-mono text-[11px] uppercase tracking-eyebrow text-ember transition-colors hover:bg-ember hover:text-ink"
             >
+              <span className="block h-2 w-2 bg-ember" />
               Stop
             </button>
           ) : (
             <button
               onClick={onSend}
               disabled={!canSend}
-              className="rounded-lg bg-claude-accent px-6 py-3 font-semibold text-white hover:bg-claude-hover disabled:opacity-50 disabled:cursor-not-allowed"
+              className="m-2 inline-flex items-center gap-2 border border-bone px-4 py-2 font-mono text-[11px] uppercase tracking-eyebrow text-bone transition-colors hover:bg-bone hover:text-ink disabled:cursor-not-allowed disabled:border-rule disabled:text-bone-mute disabled:hover:bg-transparent disabled:hover:text-bone-mute"
             >
               Send
+              <span className="font-mono">↵</span>
             </button>
           )}
         </div>
 
-        {/* Drop hint */}
-        {isDragging && (
-          <div className="mt-2 text-center text-sm text-claude-accent">
-            Drop your files here (PDF, CSV, TXT, images)
-          </div>
-        )}
+        <div className="mt-2 flex items-center justify-between font-mono text-[10px] uppercase tracking-eyebrow">
+          <span className="text-bone-mute">
+            {isDragging
+              ? "Release to attach — PDF, CSV, TXT, MD, JSON, image"
+              : "Enter to send · Shift+Enter for newline"}
+          </span>
+          <span className="text-bone-mute">
+            {value.length > 0 && `${value.length} chars`}
+          </span>
+        </div>
       </div>
     </div>
   );

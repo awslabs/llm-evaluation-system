@@ -14,22 +14,17 @@ function formatModelName(model: string): string {
     azure: "Azure",
     agent: "Agent",
   };
-
   const slashIdx = model.indexOf("/");
   if (slashIdx === -1) return model;
-
   const prefix = model.slice(0, slashIdx);
   const rest = model.slice(slashIdx + 1);
-
-  if (prefix === "agent") return `Agent: ${rest}`;
-
-  let name = rest
+  if (prefix === "agent") return `Agent · ${rest}`;
+  const name = rest
     .replace(/^us\.\w+\./, "")
     .replace(/-v\d+:\d+$/, "")
     .replace(/-\d{8}$/, "");
-
   const provider = providers[prefix] || prefix;
-  return `${provider}: ${name}`;
+  return `${provider} · ${name}`;
 }
 
 function getPromptIndex(columnKey: string): number | null {
@@ -43,18 +38,30 @@ function getPromptIndex(columnKey: string): number | null {
   return null;
 }
 
-// Continuous red -> yellow -> green gradient for a 0-1 score.
 function scoreColor(score: number): string {
-  const clamped = Math.max(0, Math.min(1, score));
-  const hue = Math.round(clamped * 120);
-  return `hsl(${hue}, 70%, 55%)`;
+  const s = Math.max(0, Math.min(1, score));
+  if (s < 0.5) {
+    const t = s * 2;
+    const h = 5 + t * 40;
+    const sat = 50 + t * 10;
+    return `hsl(${h}, ${sat}%, 55%)`;
+  }
+  const t = (s - 0.5) * 2;
+  const h = 45 + t * 30;
+  const sat = 60 - t * 15;
+  return `hsl(${h}, ${sat}%, 55%)`;
 }
 
-function scoreBgColor(score: number): string {
-  const clamped = Math.max(0, Math.min(1, score));
-  const hue = Math.round(clamped * 120);
-  // Low saturation + very low lightness so tinted cells stay legible on dark bg.
-  return `hsla(${hue}, 55%, 30%, 0.25)`;
+function scoreBg(score: number): string {
+  const s = Math.max(0, Math.min(1, score));
+  if (s < 0.5) {
+    const t = s * 2;
+    const h = 5 + t * 40;
+    return `hsla(${h}, 45%, 32%, 0.18)`;
+  }
+  const t = (s - 0.5) * 2;
+  const h = 45 + t * 30;
+  return `hsla(${h}, 35%, 30%, 0.16)`;
 }
 
 function getModelFromKey(columnKey: string): string {
@@ -76,7 +83,6 @@ interface ComparisonGridProps {
 export default function ComparisonGrid({
   models,
   samples,
-  prompts,
   selectedCell,
   onCellClick,
 }: ComparisonGridProps) {
@@ -92,17 +98,20 @@ export default function ComparisonGrid({
   };
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-claude-border">
+    <div className="overflow-x-auto border border-rule bg-ink-elev">
       <table className="w-full border-collapse">
         <thead>
-          <tr className="bg-claude-surface">
-            <th className="sticky left-0 z-10 bg-claude-surface border-b border-r border-claude-border px-4 py-3 text-left w-[350px] max-w-[350px]">
-              <span className="text-xs font-medium uppercase tracking-wider text-claude-muted">
-                Question / Expected Answer
-              </span>
-              <span className="ml-2 text-xs font-normal normal-case text-claude-muted">
-                ({samples.length} samples)
-              </span>
+          <tr>
+            <th
+              className="sticky left-0 z-10 w-[360px] max-w-[360px] border-b border-rule bg-ink-elev px-4 py-3 text-left"
+              scope="col"
+            >
+              <div className="flex items-baseline justify-between gap-3">
+                <span className="eyebrow">Sample · expected</span>
+                <span className="font-mono text-[10px] tabular-nums text-bone-mute">
+                  n={samples.length}
+                </span>
+              </div>
             </th>
             {models.map((model) => {
               const promptIdx = getPromptIndex(model);
@@ -110,13 +119,14 @@ export default function ComparisonGrid({
               return (
                 <th
                   key={model}
-                  className="border-b border-claude-border px-4 py-3 text-center min-w-[100px]"
+                  scope="col"
+                  className="min-w-[120px] border-b border-l border-rule-soft bg-ink-elev px-3 py-3 text-center align-bottom"
                 >
-                  <div className="text-xs font-medium text-claude-text">
+                  <div className="font-mono text-[10px] uppercase tracking-eyebrow text-bone">
                     {formatModelName(modelName)}
                   </div>
                   {promptIdx !== null && (
-                    <div className="mt-1 text-[10px] font-normal normal-case text-claude-accent">
+                    <div className="mt-1 font-mono text-[10px] text-ember">
                       P{promptIdx + 1}
                     </div>
                   )}
@@ -128,31 +138,37 @@ export default function ComparisonGrid({
         <tbody>
           {samples.map((sample, idx) => {
             const isExpanded = expandedRows.has(sample.id);
+            const rowBg = idx % 2 === 0 ? "bg-ink" : "bg-ink-elev";
+            const rowBgInline = idx % 2 === 0 ? "#0c0a08" : "#15120e";
             return (
-              <tr
-                key={sample.id}
-                className={idx % 2 === 0 ? "bg-claude-bg" : "bg-claude-surface/30"}
-              >
+              <tr key={sample.id} className={rowBg}>
                 <td
-                  className="sticky left-0 z-10 border-r border-claude-border px-4 py-3 text-sm text-claude-text align-top w-[350px] max-w-[350px]"
-                  style={{ backgroundColor: idx % 2 === 0 ? "#1a1a1a" : "#232323" }}
+                  className="sticky left-0 z-10 w-[360px] max-w-[360px] border-b border-rule-soft px-4 py-3 align-top text-sm text-bone"
+                  style={{ backgroundColor: rowBgInline }}
                 >
                   <div
                     className="cursor-pointer"
                     onClick={() => toggleRow(sample.id)}
                   >
-                    <div className="flex items-start gap-2">
-                      <span className="mt-0.5 text-claude-muted text-xs select-none flex-shrink-0">
-                        {isExpanded ? "▼" : "▶"}
+                    <div className="flex items-start gap-3">
+                      <span className="mt-0.5 flex-shrink-0 select-none font-mono text-[10px] tabular-nums text-bone-mute">
+                        {(idx + 1).toString().padStart(3, "0")}
+                        <span className="ml-1 text-bone-mute">
+                          {isExpanded ? "▾" : "▸"}
+                        </span>
                       </span>
-                      <div className="min-w-0 overflow-hidden">
-                        <div className={`text-claude-text ${isExpanded ? "" : "truncate"}`}>
+                      <div className="min-w-0 flex-1 overflow-hidden">
+                        <div
+                          className={`text-[0.875rem] leading-snug text-bone ${
+                            isExpanded ? "" : "truncate"
+                          }`}
+                        >
                           {sample.input}
                         </div>
                         {isExpanded && (
-                          <div className="mt-2 rounded bg-claude-surface/50 p-2 text-xs text-claude-muted">
-                            <span className="font-medium">Expected: </span>
-                            {sample.target}
+                          <div className="mt-2 border-l border-rule-soft pl-3 text-xs leading-relaxed text-bone-dim">
+                            <span className="eyebrow mr-2">Expected</span>
+                            <span className="break-words">{sample.target}</span>
                           </div>
                         )}
                       </div>
@@ -168,9 +184,9 @@ export default function ComparisonGrid({
                     return (
                       <td
                         key={model}
-                        className="border-claude-border px-4 py-3 text-center text-sm text-claude-muted align-top"
+                        className="border-b border-l border-rule-soft px-3 py-3 text-center align-middle font-mono text-sm text-bone-mute"
                       >
-                        &mdash;
+                        ·
                       </td>
                     );
                   }
@@ -178,18 +194,22 @@ export default function ComparisonGrid({
                     <td
                       key={model}
                       onClick={() => onCellClick(sample.id, model)}
-                      className={`cursor-pointer border-claude-border px-4 py-3 text-center align-top transition-colors ${
-                        isSelected
-                          ? "ring-2 ring-inset ring-claude-accent"
-                          : "hover:bg-claude-surface"
+                      className={`cursor-pointer border-b border-l border-rule-soft px-3 py-3 text-center align-middle transition-colors ${
+                        isSelected ? "ring-1 ring-inset ring-ember" : ""
                       }`}
-                      style={{ backgroundColor: scoreBgColor(result.score) }}
+                      style={{
+                        backgroundColor: isSelected
+                          ? undefined
+                          : scoreBg(result.score),
+                      }}
                     >
-                      <div className="flex items-center justify-center">
-                        <span className="text-sm font-medium" style={{ color: scoreColor(result.score) }}>
-                          {(result.score * 100).toFixed(0)}%
-                        </span>
-                      </div>
+                      <span
+                        className="font-sans text-sm font-medium tabular-nums"
+                        style={{ color: scoreColor(result.score) }}
+                      >
+                        {(result.score * 100).toFixed(0)}
+                        <span className="text-bone-mute">%</span>
+                      </span>
                     </td>
                   );
                 })}

@@ -82,7 +82,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
   const createNewChat = useCallback(() => {
     const newSession: ChatSession = {
-      id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+      id: crypto.randomUUID(),
       title: "New Chat",
       createdAt: new Date().toISOString(),
       messages: [],
@@ -114,7 +114,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       if (!user?.id) return;
 
       const userMessage: Message = {
-        id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+        id: crypto.randomUUID(),
         role: "user",
         content: content,
         timestamp: new Date().toISOString(),
@@ -143,7 +143,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
         // Handle SSE streaming
         if (response.headers.get("content-type")?.includes("text/event-stream")) {
-          const assistantMessageId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+          const assistantMessageId = crypto.randomUUID();
           let assistantContent = "";
           let statusContent = "";
           let statusHistory: string[] = [];
@@ -346,7 +346,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           const data = await response.json();
 
           const assistantMessage: Message = {
-            id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+            id: crypto.randomUUID(),
             role: "assistant",
             content: data.response,
             timestamp: new Date().toISOString(),
@@ -370,7 +370,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         console.error("Failed to send message:", error);
 
         const errorMessage: Message = {
-          id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+          id: crypto.randomUUID(),
           role: "assistant",
           content: "Sorry, I encountered an error processing your request.",
           timestamp: new Date().toISOString(),
@@ -390,7 +390,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       if (!result.success) {
         // Show error to user
         const errorMessage: Message = {
-          id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+          id: crypto.randomUUID(),
           role: "status",
           content: `Upload failed: ${result.error || "Unknown error"}`,
           timestamp: new Date().toISOString(),

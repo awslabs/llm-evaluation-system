@@ -1,0 +1,23 @@
+name: Release Please
+
+# Watches main and opens (or updates) a "Release PR" whenever there are
+# unreleased commits with conventional-commit prefixes (feat:, fix:, etc.).
+# Merging that Release PR creates a vX.Y.Z tag, which the existing
+# publish.yml workflow consumes to build and upload to PyPI.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

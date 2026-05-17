@@ -71,7 +71,7 @@ AGENT_DEEP_ANALYSIS_TOOL = {
                         "expected_tools": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "description": "Tools that should be called for this input",
+                            "description": "Tools that should be called for this input. Leave as empty array if the agent has no tools.",
                         },
                         "expected_steps": {
                             "type": "string",
@@ -82,7 +82,7 @@ AGENT_DEEP_ANALYSIS_TOOL = {
                             "enum": ["simple", "moderate", "complex"],
                         },
                     },
-                    "required": ["question", "golden_answer", "expected_tools", "expected_steps", "difficulty"],
+                    "required": ["question", "golden_answer", "expected_steps", "difficulty"],
                 },
                 "description": "Test cases covering different capabilities and difficulty levels",
             },
@@ -294,7 +294,13 @@ async def analyze_agent_deep(
 Tasks:
 1. Summarize what this agent does
 2. Identify the framework (strands, crewai, langgraph, openai, anthropic, or custom)
-3. List ALL tools/functions the agent can call (with their parameters)
+3. List ALL Bedrock tools the agent exposes to the model — i.e., things the LLM can decide to invoke during inference. Concrete sources to look for:
+   - Items in `toolConfig.tools` passed to bedrock-runtime.converse / converse_stream
+   - `@tool` decorators (Strands, LangChain) registered on an agent
+   - Tool registries the agent constructs and passes to a framework
+
+   DO NOT include internal Python helper functions that the agent code calls itself. Only count things the LLM can choose to invoke.
+   If the agent uses no tools at all, return an empty array.
 4. Identify any sub-agents or delegation patterns
 5. Generate {num_pairs} test cases that cover:
    - Simple cases (single tool call, straightforward answer)
@@ -316,8 +322,11 @@ Tasks:
    - Simple agent: [tool_selection (deterministic), final_output (llm_judge)]
    - Multi-agent: [routing (deterministic, did orchestrator pick right sub-agent), sub_agent_tools (deterministic, did sub-agent use right tools), argument_quality (llm_judge), final_output (llm_judge)]
    - RAG agent: [retrieval (deterministic, right docs fetched), context_usage (llm_judge), answer_quality (llm_judge)]
+   - Converse-only agent (NO tools): [output_correctness (llm_judge), reasoning_quality (llm_judge), output_format (llm_judge)] — when the agent makes plain text completions without any tool-calling, design stages that score the output and reasoning. Do NOT include tool_called stages.
 
    Adapt the pipeline to what you see in the code. More complex agents need more stages.
+
+   IMPORTANT: A `tool_called` stage only makes sense when the agent actually exposes Bedrock tools (the things you identified in step 3). If step 3 returned an empty array, do NOT generate any `tool_called` stages or populate `expected_tools` on test cases. Use llm_judge stages on output, reasoning, and trajectory instead.
 
 Focus on testing the agent's BEHAVIOR, not just its output.
 

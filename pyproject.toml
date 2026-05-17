@@ -1,6 +1,6 @@
 [project]
 name = "llm-evaluation-system"
-version = "0.3.0"
+dynamic = ["version"]
 description = "MCP server for agentic LLM evaluation: jury scoring, agent tracing via OpenTelemetry, document-grounded QA generation, PDF reports."
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
@@ -83,8 +83,15 @@ eval-mcp = "eval_mcp.cli:main"
 eval-chat = "backend.core.main:main"
 
 [build-system]
-requires = ["setuptools>=68.0.0", "wheel"]
+requires = ["setuptools>=68.0.0", "setuptools-scm>=8.0.0", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+# Version is derived from the latest `v*` git tag. When building on a tagged
+# commit the version is clean (e.g. "0.3.5"); off-tag commits get a dev
+# version (e.g. "0.3.6.dev3+gabc1234"). `fallback_version` covers sdist
+# builds and shallow clones where git history isn't available.
+fallback_version = "0.0.0+unknown"
 
 [tool.setuptools.packages.find]
 where = ["."]

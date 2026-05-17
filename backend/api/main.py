@@ -38,6 +38,20 @@ logging.basicConfig(
 # Create logger
 logger = logging.getLogger(__name__)
 
+
+def _user_safe_error(context: str) -> tuple[str, str]:
+    """Log the active exception with a correlation id, return (id, safe message).
+
+    Use inside `except` blocks anywhere we'd otherwise put `str(e)` into a
+    response. The full traceback goes to logs; the client sees only the
+    correlation id, so internal paths, SQL fragments, and class names don't
+    leak. Users can quote the id when contacting support.
+    """
+    error_id = uuid.uuid4().hex[:8]
+    logger.exception("[error_id=%s] %s", error_id, context)
+    return error_id, f"An internal error occurred (ref: {error_id})"
+
+
 # Global clients (initialized on startup)
 mcp_client: Optional[MultiMCPClient] = None
 bedrock_client: Optional[BedrockClient] = None
@@ -583,12 +597,13 @@ async def process_qa_dataset_content(
             "rows_saved": len(test_cases),
         }
 
-    except Exception as e:
-        logger.error(f"Dataset processing error: {e}", exc_info=True)
+    except Exception:
+        error_id, safe_msg = _user_safe_error("Dataset processing")
         return {
             "success": False,
-            "message": f"[Dataset processing failed: {str(e)}]",
-            "error": str(e),
+            "message": f"[Dataset processing failed: {safe_msg}]",
+            "error": safe_msg,
+            "error_id": error_id,
         }
 
 
@@ -762,11 +777,9 @@ async def run_agent_background(
             await db.save_message(assistant_msg_id, session_id, "assistant", full_response)
             logger.info(f"[DB SAVE] Saved partial response for cancelled session {session_id}")
 
-    except Exception as e:
-        import traceback
-        logger.error(f"[BACKGROUND ERROR] Error in agent background task for session {session_id}: {e}")
-        logger.error(f"[BACKGROUND ERROR] Traceback: {traceback.format_exc()}")
-        await queue.put({"type": "error", "data": {"error": str(e)}})
+    except Exception:
+        error_id, safe_msg = _user_safe_error(f"Agent background task session={session_id}")
+        await queue.put({"type": "error", "data": {"error": safe_msg, "error_id": error_id}})
 
     finally:
         # Signal completion to queue readers
@@ -853,10 +866,10 @@ async def chat_stream(request: ChatRequest, user_id: str):
             )
             file_result_message = file_result
             yield f"event: progress\ndata: {json.dumps({'message': 'File processed successfully'})}\n\n"
-        except Exception as e:
-            logger.error(f"File processing failed: {e}")
-            file_result_message = f"[File upload failed: {str(e)}]"
-            yield f"event: progress\ndata: {json.dumps({'message': f'File processing failed: {e}'})}\n\n"
+        except Exception:
+            error_id, safe_msg = _user_safe_error("File processing")
+            file_result_message = f"[File upload failed: {safe_msg}]"
+            yield f"event: progress\ndata: {json.dumps({'message': f'File processing failed (ref: {error_id})'})}\n\n"
 
     # Build final message for agent
     if file_result_message:
@@ -909,11 +922,9 @@ async def chat_stream(request: ChatRequest, user_id: str):
         logger.info(f"[CLIENT DISCONNECT] Client disconnected from session {session_id}, task continues in background")
         # Don't cleanup - task will do it when complete
 
-    except Exception as e:
-        import traceback
-        logger.error(f"[STREAM ERROR] Error streaming to client for session {session_id}: {e}")
-        logger.error(f"[STREAM ERROR] Traceback: {traceback.format_exc()}")
-        yield f"event: error\ndata: {json.dumps({'error': str(e)})}\n\n"
+    except Exception:
+        error_id, safe_msg = _user_safe_error(f"Stream error session={session_id}")
+        yield f"event: error\ndata: {json.dumps({'error': safe_msg, 'error_id': error_id})}\n\n"
 
 
 async def chat_non_stream(request: ChatRequest, user_id: str) -> ChatResponse:
@@ -975,11 +986,9 @@ async def chat_non_stream(request: ChatRequest, user_id: str) -> ChatResponse:
             response=response,
             session_id=session_id,
         )
-    except Exception as e:
-        import traceback
-        print(f"Error in chat endpoint: {e}")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        _, safe_msg = _user_safe_error("chat_non_stream endpoint")
+        raise HTTPException(status_code=500, detail=safe_msg)
 
 
 @app.get("/api/sessions")
@@ -994,8 +1003,9 @@ async def get_sessions(user_id: str = Depends(get_current_user_id)):
 
         sessions = await db.get_user_sessions(user_id)
         return {"sessions": sessions}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception:
+        _, safe_msg = _user_safe_error("get_sessions endpoint")
+        raise HTTPException(status_code=500, detail=safe_msg)
 
 
 @app.get("/health")
@@ -1227,13 +1237,14 @@ async def confirm_s3_upload(
                     "filename": filename,
                     **dataset_result,
                 })
-            except Exception as e:
-                logger.error(f"Failed to process {ext.upper()} {filename} from S3: {e}")
+            except Exception:
+                error_id, safe_msg = _user_safe_error(f"Process {ext.upper()} {filename} from S3")
                 csv_results.append({
                     "filename": filename,
                     "success": False,
-                    "message": f"[Failed to process {ext.upper()}: {str(e)}]",
-                    "error": str(e),
+                    "message": f"[Failed to process {ext.upper()}: {safe_msg}]",
+                    "error": safe_msg,
+                    "error_id": error_id,
                 })
         else:
             non_csv_files.append(filename)

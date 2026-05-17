@@ -64,7 +64,7 @@ def stage_{stage.name}():
         found = expected.lower() in output.lower() if expected else True
         return Score(
             value="C" if found else "I",
-            explanation=f"Expected '{expected[:50]}' in output: {{'found' if found else 'not found'}}",
+            explanation=f"Expected '{{expected[:50]}}' in output: {{'found' if found else 'not found'}}",
             metadata={{"stage": "{stage.name}", "stage_order": {stage.order}}},
         )
     return score

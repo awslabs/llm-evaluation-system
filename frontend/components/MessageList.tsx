@@ -35,16 +35,18 @@ export default function MessageList() {
       <div className="mx-auto max-w-3xl">
         {showEmpty && (
           <div className="reveal mt-8 border-t border-rule pt-10">
-            <p className="eyebrow">Begin transmission</p>
+            <p className="eyebrow">New conversation</p>
             <h2 className="font-display mt-3 text-4xl leading-tight text-bone">
-              Ask the instrument
-              <br />
-              <em className="text-ember">what it knows.</em>
+              What would you like to{" "}
+              <em className="text-ember">evaluate?</em>
             </h2>
             <p className="mt-5 max-w-md text-sm leading-relaxed text-bone-dim">
-              Try: <span className="text-bone">&ldquo;Compare Sonnet and Haiku on
-              the qa_v3 dataset and judge with strictness.&rdquo;</span>{" "}
-              Or drop a CSV of test cases below to begin a new evaluation.
+              Try:{" "}
+              <span className="text-bone">
+                &ldquo;Compare Sonnet and Haiku on the qa_v3 dataset and judge
+                with strictness.&rdquo;
+              </span>{" "}
+              Or drop a CSV of test cases below to start a new evaluation.
             </p>
           </div>
         )}

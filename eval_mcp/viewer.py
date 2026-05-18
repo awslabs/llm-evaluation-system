@@ -8,15 +8,20 @@ Usage:
     eval-mcp view --port 4001
 """
 
+import csv
+import io
+import json
 import os
 import sys
 import webbrowser
 from pathlib import Path
+from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import FileResponse
+from pydantic import BaseModel
+from starlette.responses import FileResponse, StreamingResponse
 
 STATIC_DIR = Path(__file__).parent / "viewer_static"
 
@@ -89,13 +94,164 @@ def create_viewer_app() -> FastAPI:
     # Auth stub for local viewer (only binds to 127.0.0.1, never deployed to AWS)
     @app.get("/api/auth/user")
     async def auth_user():
-        return {"user": {}, "logoutUrl": "#"}
+        # Use a non-empty user object so the AuthContext treats the session
+        # as authenticated and renders pages like /data that gate on user.
+        return {
+            "user": {"id": "local", "name": "local", "email": "local@dev"},
+            "logoutUrl": "#",
+        }
+
+    # ---------- Data Library (datasets + judges) ----------
+    #
+    # Mirrors backend/api/main.py but pulls user_id from EVAL_MCP_USER
+    # instead of the oauth2-proxy header. Same storage layer, same
+    # response shape, so the same frontend works in either deployment.
+
+    def _viewer_user() -> str:
+        return os.environ.get("EVAL_MCP_USER", "local")
+
+    class _DatasetPatch(BaseModel):
+        name: Optional[str] = None
+        tests: Optional[list[dict]] = None
+
+    @app.get("/api/datasets")
+    async def list_datasets(search: str = ""):
+        from eval_mcp.core.user_storage import list_datasets_from_db
+        entries = list_datasets_from_db(_viewer_user(), search)
+        return {"datasets": [{k: v for k, v in e.items() if k != "tests"} for e in entries]}
+
+    @app.get("/api/datasets/{dataset_id}")
+    async def get_dataset_detail(dataset_id: str, offset: int = 0, limit: int = 50):
+        from eval_mcp.core.user_storage import get_dataset_from_db
+        data = get_dataset_from_db(_viewer_user(), dataset_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        tests = data.get("tests", [])
+        total = len(tests)
+        if limit <= 0 or limit > 500:
+            limit = 50
+        if offset < 0:
+            offset = 0
+        return {
+            "id": data["id"],
+            "name": data.get("name", ""),
+            "source": data.get("source", {"kind": "imported"}),
+            "created_at": data["created_at"],
+            "updated_at": data.get("updated_at"),
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "tests": tests[offset : offset + limit],
+        }
+
+    @app.delete("/api/datasets/{dataset_id}")
+    async def delete_dataset(dataset_id: str):
+        from eval_mcp.core.user_storage import delete_dataset_from_db
+        if not delete_dataset_from_db(_viewer_user(), dataset_id):
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        return {"deleted": True}
+
+    @app.patch("/api/datasets/{dataset_id}")
+    async def patch_dataset(dataset_id: str, patch: _DatasetPatch):
+        from eval_mcp.core.user_storage import update_dataset_in_db
+        updated = update_dataset_in_db(
+            _viewer_user(), dataset_id, name=patch.name, tests=patch.tests,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        return {
+            "id": updated["id"],
+            "name": updated.get("name", ""),
+            "source": updated.get("source", {"kind": "imported"}),
+            "created_at": updated["created_at"],
+            "updated_at": updated.get("updated_at"),
+            "total": len(updated.get("tests", [])),
+        }
+
+    @app.get("/api/datasets/{dataset_id}/export")
+    async def export_dataset_csv(dataset_id: str):
+        from eval_mcp.core.user_storage import get_dataset_from_db
+        data = get_dataset_from_db(_viewer_user(), dataset_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        tests = data.get("tests", [])
+        keys: list[str] = []
+        seen: set[str] = set()
+        for t in tests:
+            for k in (t.get("vars") or {}).keys():
+                if k not in seen:
+                    seen.add(k)
+                    keys.append(k)
+        for col in ("golden_answer", "question"):
+            if col in keys:
+                keys.remove(col)
+                keys.insert(0, col)
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(keys)
+        for t in tests:
+            v = t.get("vars") or {}
+            writer.writerow([v.get(k, "") for k in keys])
+        csv_bytes = buf.getvalue().encode("utf-8")
+        safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in (data.get("name") or "dataset"))[:80]
+        return StreamingResponse(
+            iter([csv_bytes]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="{safe_name}.csv"'},
+        )
+
+    @app.get("/api/judges")
+    async def list_judges(search: str = ""):
+        from eval_mcp.core.user_storage import list_judges_from_db
+        entries = list_judges_from_db(_viewer_user(), search)
+        return {
+            "judges": [
+                {
+                    "id": e["id"],
+                    "name": e.get("name", ""),
+                    "domain": (e.get("config") or {}).get("domain", "general"),
+                    "criteria": [c.get("name") for c in (e.get("config") or {}).get("criteria", [])],
+                    "created_at": e.get("created_at"),
+                }
+                for e in entries
+            ]
+        }
+
+    @app.get("/api/judges/{judge_id}")
+    async def get_judge_detail(judge_id: str):
+        from eval_mcp.core.user_storage import get_judge_from_db
+        data = get_judge_from_db(_viewer_user(), judge_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="Judge not found")
+        return data
+
+    @app.delete("/api/judges/{judge_id}")
+    async def delete_judge(judge_id: str):
+        from eval_mcp.core.user_storage import delete_judge_from_db
+        if not delete_judge_from_db(_viewer_user(), judge_id):
+            raise HTTPException(status_code=404, detail="Judge not found")
+        return {"deleted": True}
+
+    @app.get("/api/documents/list")
+    async def list_documents_local():
+        # Local viewer has no S3, so always reads the per-user disk store.
+        try:
+            from eval_mcp.core.user_storage import list_user_document_paths
+            paths = list_user_document_paths(_viewer_user())
+            return {"documents": [{"path": p} for p in paths], "storage": "disk"}
+        except Exception:
+            return {"documents": [], "storage": "disk"}
 
     # Serve static files
     if STATIC_DIR.exists():
         @app.get("/results")
         async def results_page():
             return FileResponse(STATIC_DIR / "results.html")
+
+        @app.get("/data")
+        async def data_page():
+            # The Next static export emits one .html per route.
+            return FileResponse(STATIC_DIR / "data.html")
 
         @app.get("/")
         async def index():

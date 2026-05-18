@@ -244,6 +244,140 @@ def create_viewer_app() -> FastAPI:
         except Exception:
             return {"documents": [], "storage": "disk"}
 
+    # ---------- Demo chat sessions ----------
+    #
+    # The local viewer doesn't have Postgres/chat-backend wired up, so without
+    # this the /chat session list is empty and there's nothing to preview.
+    # These three fixture conversations let users see the rendered transcript
+    # styling. Marked "DEMO" in the titles so they aren't confused with real
+    # sessions; the EKS deployment uses backend/api/main.py and never touches
+    # this endpoint.
+
+    def _demo_sessions():
+        import time
+        now_ms = int(time.time() * 1000)
+        def iso(ms):
+            from datetime import datetime, timezone
+            return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat()
+        return [
+            {
+                "id": "demo_session_1",
+                "title": "Compare Sonnet 4 and Haiku 4.5 on healthcare_qa_v3",
+                "createdAt": iso(now_ms - 2 * 3600 * 1000),
+                "messages": [
+                    {
+                        "id": "m1a",
+                        "role": "user",
+                        "content": (
+                            "Compare Sonnet 4 and Haiku 4.5 on the healthcare_qa_v3 dataset "
+                            "and judge with strictness across factual accuracy, completeness, "
+                            "and clinical tone."
+                        ),
+                        "timestamp": iso(now_ms - 2 * 3600 * 1000),
+                    },
+                    {
+                        "id": "m1b",
+                        "role": "assistant",
+                        "content": (
+                            "Loading **healthcare_qa_v3** (47 samples) and configuring two "
+                            "evaluation columns:\n\n"
+                            "- `bedrock/claude-sonnet-4-20250514-v1:0`\n"
+                            "- `bedrock/claude-haiku-4-5-20251001-v1:0`\n\n"
+                            "Applying a three-criterion judge: **factual_accuracy** "
+                            "(weight 0.5), **completeness** (0.3), **clinical_tone** "
+                            "(0.2).\n\nKicking off the run now. Results will land at "
+                            "[/results](/results)."
+                        ),
+                        "timestamp": iso(now_ms - 2 * 3600 * 1000 + 12_000),
+                    },
+                    {
+                        "id": "m1c",
+                        "role": "assistant",
+                        "content": (
+                            "Run complete. **Sonnet 4: 87%**, **Haiku 4.5: 76%**. "
+                            "Sonnet led on factual accuracy (+14 pts); Haiku was "
+                            "stronger on completeness (+5 pts). Full breakdown in "
+                            "[the run detail](/results?group=demo_run_1)."
+                        ),
+                        "timestamp": iso(now_ms - 2 * 3600 * 1000 + 320_000),
+                    },
+                ],
+            },
+            {
+                "id": "demo_session_2",
+                "title": "Generate 50 synthetic Q&A from policy_handbook.pdf",
+                "createdAt": iso(now_ms - 26 * 3600 * 1000),
+                "messages": [
+                    {
+                        "id": "m2a",
+                        "role": "user",
+                        "content": (
+                            "Generate 50 synthetic Q&A pairs from policy_handbook.pdf. "
+                            "Focus on edge cases — questions a junior employee might "
+                            "actually ask."
+                        ),
+                        "timestamp": iso(now_ms - 26 * 3600 * 1000),
+                    },
+                    {
+                        "id": "m2b",
+                        "role": "assistant",
+                        "content": (
+                            "Reading **policy_handbook.pdf** (24 pages, chunked into 6 "
+                            "sections). Generating per-section to keep grounding tight.\n\n"
+                            "Synthesizing 50 Q&A pairs with edge-case framing — junior "
+                            "perspective, ambiguous policy boundaries, exception cases.\n\n"
+                            "Saved as `policy_handbook_50`. Inspect it in the "
+                            "[Data tab](/data) before running an eval against it."
+                        ),
+                        "timestamp": iso(now_ms - 26 * 3600 * 1000 + 45_000),
+                    },
+                ],
+            },
+            {
+                "id": "demo_session_3",
+                "title": "RAG faithfulness sweep — top-k retrieval comparison",
+                "createdAt": iso(now_ms - 5 * 24 * 3600 * 1000),
+                "messages": [
+                    {
+                        "id": "m3a",
+                        "role": "user",
+                        "content": (
+                            "Run a RAG faithfulness eval comparing top-k = 3, 5, and 10 "
+                            "on the support tickets dataset. Same retriever, just vary k."
+                        ),
+                        "timestamp": iso(now_ms - 5 * 24 * 3600 * 1000),
+                    },
+                    {
+                        "id": "m3b",
+                        "role": "assistant",
+                        "content": (
+                            "Setting up three variants of the same pipeline:\n\n"
+                            "| Variant | Top-k | Avg context tokens |\n"
+                            "|---------|-------|--------------------|\n"
+                            "| A       | 3     | ~1,200             |\n"
+                            "| B       | 5     | ~2,100             |\n"
+                            "| C       | 10    | ~4,400             |\n\n"
+                            "Using `rag_faithfulness` judge — measures whether each "
+                            "answer is grounded *only* in retrieved context. Running "
+                            "all three against support_tickets_v2 (88 samples)."
+                        ),
+                        "timestamp": iso(now_ms - 5 * 24 * 3600 * 1000 + 20_000),
+                    },
+                ],
+            },
+        ]
+
+    @app.get("/api/sessions")
+    async def list_sessions_local():
+        return {"sessions": _demo_sessions()}
+
+    @app.get("/api/documents/upload-mode")
+    async def upload_mode_local():
+        # Local viewer accepts direct uploads — but the chat composer's upload
+        # path needs the FastAPI backend; this just keeps the page from
+        # erroring on the upload-mode probe.
+        return {"mode": "direct"}
+
     # Serve static files
     if STATIC_DIR.exists():
         @app.get("/results")

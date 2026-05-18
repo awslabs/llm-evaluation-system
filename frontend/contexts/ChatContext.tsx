@@ -50,14 +50,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       const response = await fetch(`/api/sessions?user_id=${encodeURIComponent(user.name)}`);
       if (response.ok) {
         const data = await response.json();
-        const loadedSessions = data.sessions || [];
-        setChatSessions(loadedSessions);
-
-        // Load most recent session
-        if (loadedSessions.length > 0) {
-          setCurrentSessionId(loadedSessions[0].id);
-          setMessages(loadedSessions[0].messages || []);
-        }
+        setChatSessions(data.sessions || []);
+        // No auto-load — the /chat and /history pages decide which session
+        // (if any) is active based on the URL.
       }
     } catch (error) {
       console.error("Failed to load sessions:", error);

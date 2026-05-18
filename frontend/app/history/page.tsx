@@ -2,6 +2,7 @@
 
 import { useAuth, login } from "@/contexts/AuthContext";
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import Header from "@/components/Header";
 
 interface ChatSession {
@@ -25,27 +26,21 @@ function formatDateTime(iso: string): string {
   }
 }
 
-function formatTime(iso: string): string {
-  if (!iso) return "";
-  try {
-    return new Date(iso).toLocaleTimeString(undefined, {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    });
-  } catch {
-    return "";
+function preview(session: ChatSession): string {
+  const firstUser = session.messages?.find((m) => m.role === "user");
+  if (firstUser?.content) {
+    const snip = firstUser.content.replace(/\s+/g, " ").trim();
+    return snip.length > 140 ? snip.slice(0, 140) + "…" : snip;
   }
+  return "No messages yet.";
 }
 
 export default function HistoryPage() {
+  const router = useRouter();
   const { user, isLoading: authLoading } = useAuth();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [selectedSession, setSelectedSession] = useState<ChatSession | null>(
-    null,
-  );
   const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
 
   useEffect(() => {
     if (!authLoading && !user) {
@@ -75,133 +70,116 @@ export default function HistoryPage() {
     );
   }
 
+  const filtered = search.trim()
+    ? sessions.filter((s) => {
+        const q = search.toLowerCase();
+        return (
+          s.title?.toLowerCase().includes(q) ||
+          s.messages?.some((m) => m.content?.toLowerCase().includes(q))
+        );
+      })
+    : sessions;
+
+  function openInChat(sessionId: string) {
+    router.push(`/chat?session=${encodeURIComponent(sessionId)}`);
+  }
+
   return (
     <div className="flex h-screen flex-col bg-ink">
       <Header />
 
-      <div className="flex flex-1 overflow-hidden">
-        <aside className="flex w-80 flex-col border-r border-rule bg-ink-elev">
-          <div className="flex items-baseline justify-between border-b border-rule-soft px-5 py-4">
-            <p className="eyebrow">Archive</p>
-            <span className="font-mono text-[10px] tabular-nums text-bone-mute">
-              {sessions.length.toString().padStart(3, "0")} sessions
-            </span>
-          </div>
-
-          <div className="flex-1 overflow-y-auto">
-            {loading ? (
-              <p className="px-5 py-4 eyebrow">
-                Reading
-                <span className="cursor-block ml-2 align-baseline" />
-              </p>
-            ) : sessions.length === 0 ? (
-              <p className="px-5 py-6 text-sm italic leading-relaxed text-bone-mute">
-                <span className="font-display not-italic text-bone">
-                  No conversations yet.
+      <div className="flex-1 overflow-y-auto">
+        <div className="mx-auto max-w-4xl px-8 py-10">
+          <div className="reveal flex items-end justify-between border-b border-rule pb-6">
+            <div>
+              <p className="eyebrow">Conversation archive</p>
+              <h1 className="font-display mt-2 text-5xl leading-none text-bone">
+                {sessions.length}{" "}
+                <span className="text-bone-mute">
+                  {sessions.length === 1 ? "conversation" : "conversations"}
                 </span>
-                <br />
-                Sessions you start in chat will appear here.
-              </p>
-            ) : (
-              <ul>
-                {sessions.map((session, idx) => {
-                  const active = selectedSession?.id === session.id;
-                  return (
-                    <li key={session.id}>
-                      <button
-                        onClick={() => setSelectedSession(session)}
-                        className={`group flex w-full items-baseline gap-3 border-b border-rule-soft border-l-2 px-4 py-3 text-left transition-colors ${
-                          active
-                            ? "border-l-ember bg-ink-raised"
-                            : "border-l-transparent hover:border-l-rule hover:bg-ink-raised/40"
-                        }`}
-                      >
-                        <span
-                          className={`font-mono text-[10px] tabular-nums ${
-                            active ? "text-ember" : "text-bone-mute"
-                          }`}
-                        >
-                          {(sessions.length - idx).toString().padStart(3, "0")}
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div
-                            className={`truncate text-[13px] leading-tight ${
-                              active ? "text-bone" : "text-bone-dim"
-                            }`}
-                          >
-                            {session.title || "Untitled session"}
-                          </div>
-                          <div className="mt-1 flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
-                            <span>{formatDateTime(session.createdAt)}</span>
-                            {session.messages && (
-                              <>
-                                <span aria-hidden>·</span>
-                                <span>{session.messages.length} msgs</span>
-                              </>
-                            )}
-                          </div>
-                        </div>
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
+              </h1>
+            </div>
+            <button
+              onClick={() => router.push("/chat")}
+              className="eyebrow inline-flex items-center gap-2 border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone"
+            >
+              <span className="font-mono text-sm leading-none">+</span>
+              New conversation
+            </button>
           </div>
-        </aside>
 
-        <div className="flex-1 overflow-y-auto">
-          {selectedSession ? (
-            <div className="mx-auto max-w-3xl px-8 py-10">
-              <div className="reveal border-b border-rule pb-6">
-                <p className="eyebrow">Session transcript</p>
-                <h2 className="font-display mt-2 text-3xl leading-tight text-bone">
-                  {selectedSession.title || "Untitled session"}
-                </h2>
-                <p className="mt-2 font-mono text-[11px] uppercase tracking-eyebrow text-bone-mute">
-                  Opened {formatDateTime(selectedSession.createdAt)} ·{" "}
-                  {selectedSession.messages?.length ?? 0} messages
+          <div className="reveal stagger-1 mt-6 border-b border-rule-soft pb-4">
+            <input
+              type="search"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search transcripts…"
+              className="w-full border-b border-rule bg-transparent py-2 font-mono text-[12px] text-bone placeholder:text-bone-mute focus:border-bone-mute focus:outline-none"
+            />
+          </div>
+
+          {loading ? (
+            <p className="px-1 py-10 eyebrow">
+              Reading
+              <span className="cursor-block ml-2 align-baseline" />
+            </p>
+          ) : filtered.length === 0 ? (
+            <div className="reveal stagger-2 px-1 py-10">
+              <p className="eyebrow">{sessions.length === 0 ? "Empty archive" : "No matches"}</p>
+              <h3 className="font-display mt-3 text-3xl leading-tight text-bone">
+                {sessions.length === 0 ? (
+                  <>
+                    Start your first <em className="text-ember">conversation</em>.
+                  </>
+                ) : (
+                  <>Try a different <em className="text-ember">search</em>.</>
+                )}
+              </h3>
+              {sessions.length === 0 && (
+                <p className="mt-4 max-w-md text-sm text-bone-dim">
+                  Sessions you start in chat appear here. Click any past
+                  conversation to pick up where you left off.
                 </p>
-              </div>
-
-              <ul className="reveal stagger-1">
-                {selectedSession.messages?.map((msg, i) => {
-                  const isUser = msg.role === "user";
-                  return (
-                    <li key={i} className="border-b border-rule-soft py-5">
-                      <div className="flex items-baseline gap-3">
-                        <span
-                          className={`font-mono text-[10px] uppercase tracking-eyebrow ${
-                            isUser ? "text-ember" : "text-bone-mute"
-                          }`}
-                        >
-                          {isUser ? "You" : "Observatory"}
-                        </span>
-                        <span className="font-mono text-[10px] tabular-nums text-bone-mute">
-                          {formatTime(msg.timestamp)}
-                        </span>
-                      </div>
-                      <div className="mt-2 whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed text-bone">
-                        {msg.content}
-                      </div>
-                    </li>
-                  );
-                })}
-              </ul>
+              )}
             </div>
           ) : (
-            <div className="flex h-full items-center justify-center px-8">
-              <div className="max-w-md text-center">
-                <p className="eyebrow">No session selected</p>
-                <h3 className="font-display mt-3 text-4xl leading-tight text-bone">
-                  <em className="text-ember">Choose</em> a session to read.
-                </h3>
-                <p className="mt-4 text-sm text-bone-dim">
-                  Past conversations are preserved here in full — including any
-                  results they produced.
-                </p>
-              </div>
-            </div>
+            <ul className="reveal stagger-2">
+              {filtered.map((session, idx) => {
+                const num = (filtered.length - idx).toString().padStart(3, "0");
+                return (
+                  <li key={session.id}>
+                    <button
+                      onClick={() => openInChat(session.id)}
+                      className="group flex w-full items-baseline gap-5 border-b border-rule-soft px-1 py-5 text-left transition-colors hover:bg-ink-elev"
+                    >
+                      <span className="font-mono text-[11px] tabular-nums text-bone-mute">
+                        {num}
+                      </span>
+
+                      <div className="min-w-0 flex-1">
+                        <h3 className="font-display text-xl leading-tight text-bone transition-colors group-hover:text-ember">
+                          {session.title || "Untitled conversation"}
+                        </h3>
+                        <p className="mt-1 line-clamp-2 text-[0.95rem] leading-relaxed text-bone-dim">
+                          {preview(session)}
+                        </p>
+                        <p className="mt-2 font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
+                          {session.messages?.length ?? 0} message
+                          {(session.messages?.length ?? 0) === 1 ? "" : "s"}
+                          <span className="mx-2" aria-hidden>·</span>
+                          {formatDateTime(session.createdAt)}
+                        </p>
+                      </div>
+
+                      <span className="font-mono text-base text-bone-mute transition-all group-hover:translate-x-0.5 group-hover:text-ember">
+                        →
+                      </span>
+                    </button>
+                  </li>
+                );
+              })}
+            </ul>
           )}
         </div>
       </div>

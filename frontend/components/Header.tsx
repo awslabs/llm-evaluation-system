@@ -3,16 +3,27 @@
 import { useAuth } from "@/contexts/AuthContext";
 import { usePathname, useRouter } from "next/navigation";
 
-const NAV: Array<{ href: string; label: string }> = [
-  { href: "/chat", label: "Chat" },
+interface NavItem {
+  href: string;
+  label: string;
+  // Hidden in `viewer` mode (local eval-mcp viewer has no chat backend
+  // or Postgres for history). EKS deployment shows all entries.
+  fullOnly?: boolean;
+}
+
+const NAV: NavItem[] = [
+  { href: "/chat", label: "Chat", fullOnly: true },
+  { href: "/history", label: "History", fullOnly: true },
   { href: "/results", label: "Results" },
-  { href: "/history", label: "History" },
+  { href: "/data", label: "Data" },
 ];
 
 export default function Header() {
-  const { user, logoutUrl } = useAuth();
+  const { user, logoutUrl, mode } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
+
+  const visibleNav = NAV.filter((item) => !(mode === "viewer" && item.fullOnly));
 
   return (
     <header className="relative border-b border-rule bg-ink">
@@ -27,7 +38,7 @@ export default function Header() {
 
         <nav className="absolute left-1/2 -translate-x-1/2">
           <ul className="flex items-center gap-1">
-            {NAV.map((item) => {
+            {visibleNav.map((item) => {
               const active = pathname?.startsWith(item.href);
               return (
                 <li key={item.href}>
@@ -60,14 +71,16 @@ export default function Header() {
               <span className="text-bone">{user.name}</span>
             </span>
           )}
-          <button
-            onClick={() => {
-              window.location.href = logoutUrl;
-            }}
-            className="eyebrow border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone-dim"
-          >
-            Sign out
-          </button>
+          {mode !== "viewer" && (
+            <button
+              onClick={() => {
+                window.location.href = logoutUrl;
+              }}
+              className="eyebrow border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone-dim"
+            >
+              Sign out
+            </button>
+          )}
         </div>
       </div>
     </header>

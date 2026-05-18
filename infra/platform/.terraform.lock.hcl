@@ -3,7 +3,7 @@
 
 provider "registry.terraform.io/alekc/kubectl" {
   version     = "2.1.3"
-  constraints = "~> 2.0"
+  constraints = "~> 2.1.3"
   hashes = [
     "h1:poWSAAtK4FI1x79C2OyLaNrvWUGTQdr1ZT58edDz+Rs=",
     "zh:0e601ae36ebc32eb8c10aff4c48c1125e471fa09f5668465af7581c9057fa22c",

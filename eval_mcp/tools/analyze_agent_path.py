@@ -123,7 +123,12 @@ async def handle_analyze_agent_path(args: Dict[str, Any]) -> List[TextContent]:
             json.dump(inspect_samples, f, indent=2)
 
         db_tests = [{"vars": s} for s in inspect_samples]
-        save_dataset_to_db(user_id, dataset_name, db_tests)
+        save_dataset_to_db(
+            user_id,
+            dataset_name,
+            db_tests,
+            source={"kind": "synthetic", "mode": "agent-path"},
+        )
 
         raw_stages = analysis.get("pipeline_stages", [])
         if raw_stages:

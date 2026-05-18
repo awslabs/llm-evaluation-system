@@ -4,7 +4,6 @@ import { useState } from "react";
 import { useChat } from "@/contexts/ChatContext";
 import MessageList from "./MessageList";
 import MessageInput from "./MessageInput";
-import Header from "./Header";
 
 export default function ChatInterface() {
   const { sendMessage, cancelRequest, handleDocumentsUploaded, isLoading } = useChat();
@@ -18,8 +17,7 @@ export default function ChatInterface() {
   };
 
   return (
-    <div className="flex flex-1 flex-col">
-      <Header />
+    <div className="flex flex-1 flex-col overflow-hidden">
       <MessageList />
       <MessageInput
         value={input}

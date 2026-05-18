@@ -952,8 +952,16 @@ async def handle_generate_qa_pairs(bedrock: BedrockClient, args: Dict[str, Any])
         # Generate dataset name with actual count
         dataset_name = f"{safe_name}_{len(test_cases)}"
 
+        # Build provenance source descriptor
+        if wrapper_path:
+            source = {"kind": "synthetic", "mode": "agent", "agent": wrapper_path}
+        elif use_documents:
+            source = {"kind": "synthetic", "mode": "document", "documents": documents}
+        else:
+            source = {"kind": "synthetic", "mode": "persona", "prompt": prompt}
+
         # Save to database
-        dataset_id = save_dataset_to_db(user_id, dataset_name, test_cases)
+        dataset_id = save_dataset_to_db(user_id, dataset_name, test_cases, source=source)
 
         # Log success
         log_event(logger, "info", "qa_generation_completed",

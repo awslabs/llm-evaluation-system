@@ -170,7 +170,12 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
         dataset_name = generate_dataset_name(base_name)
 
         # Save to database
-        dataset_id = save_dataset_to_db(user_id, dataset_name, test_cases)
+        dataset_id = save_dataset_to_db(
+            user_id,
+            dataset_name,
+            test_cases,
+            source={"kind": "imported", "origin": filename},
+        )
 
         return [TextContent(
             type="text",

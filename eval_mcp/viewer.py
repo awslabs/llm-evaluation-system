@@ -255,6 +255,20 @@ def create_viewer_app() -> FastAPI:
             # The Next static export emits one .html per route.
             return FileResponse(STATIC_DIR / "data.html")
 
+        @app.get("/chat")
+        async def chat_page():
+            # Local viewer has no chat backend — the shell still renders so
+            # you can preview layout/styling, but message sending and session
+            # listing will fail. The chat nav entry stays hidden in viewer
+            # mode; this route is only hit via direct URL.
+            return FileResponse(STATIC_DIR / "chat.html")
+
+        @app.get("/history")
+        async def history_page():
+            # Same caveat as /chat — no Postgres locally, so the session list
+            # will be empty. Layout is still inspectable.
+            return FileResponse(STATIC_DIR / "history.html")
+
         @app.get("/")
         async def index():
             return FileResponse(STATIC_DIR / "results.html")

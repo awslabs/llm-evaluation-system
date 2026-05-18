@@ -1,16 +1,18 @@
 # Backend Dockerfile - FastAPI + Python MCP servers + Inspect AI
 FROM public.ecr.aws/docker/library/python:3.12-slim
 
-# Install system dependencies: tini (PID 1 signal handling), curl (for tool
-# installs below — kept on PATH because the live container also uses it).
-RUN apt-get update && apt-get install -y --no-install-recommends tini curl \
+# Install tini (PID 1 signal handling)
+RUN apt-get update && apt-get install -y --no-install-recommends tini \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
 # kubectl + Helm — installed via direct download from canonical upstream
-# CDNs with pinned versions + SHA256 verification. This replaces multi-stage
+# CDNs with pinned versions + SHA256 verification. Replaces multi-stage
 # `COPY --from=bitnami/kubectl:latest` / `alpine/helm:...` which (a) pulled
 # from Docker Hub and tripped its anonymous-pull rate limit in CodeBuild,
 # and (b) gave us an unpinned `:latest` with no checksum check.
+#
+# curl is installed for the download, then PURGED in the same RUN layer so
+# it never persists in the final image (no new runtime attack surface).
 #
 # To bump: edit the version + paste the new SHA256 from
 #   https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/arm64/kubectl.sha256
@@ -21,6 +23,9 @@ ARG HELM_VERSION=3.17.3
 ARG HELM_SHA256=7944e3defd386c76fd92d9e6fec5c2d65a323f6fadc19bfb5e704e3eee10348e
 
 RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates; \
+    \
     curl -fsSL --retry 3 --retry-delay 5 \
       "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/arm64/kubectl" \
       -o /usr/local/bin/kubectl; \
@@ -32,7 +37,11 @@ RUN set -eux; \
       -o /tmp/helm.tar.gz; \
     echo "${HELM_SHA256}  /tmp/helm.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/helm.tar.gz -C /usr/local/bin --strip-components=1 linux-arm64/helm; \
-    rm /tmp/helm.tar.gz
+    rm /tmp/helm.tar.gz; \
+    \
+    apt-get purge -y --auto-remove curl; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
 
 # Install uv for reproducible Python builds (GHCR, not rate-limited)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv

@@ -23,26 +23,28 @@ Update both files:
 | `eval_mcp/core/judge_config.py` | Default judge models and criteria |
 | `Makefile` | Local dev commands (`make dev`, `make run`, `make stop`) |
 
-## Releasing
+## Starting new work
 
-The version lives in git tags. `pyproject.toml` has no `version` field —
-`setuptools-scm` derives it from the latest `v*` tag at build time.
-
-After merging a PR with user-visible changes, publish to PyPI from main:
+Default to a **git worktree** under `.claude/worktrees/<branch-name>/`
+for any non-trivial change, rather than checking out a branch in the
+main repo directory. This keeps parallel sessions and branches isolated
+(build artifacts, viewer_static, node_modules don't collide). The
+`.claude/` directory is gitignored except for `.claude/skills/`.
 
 ```bash
-git checkout main && git pull
-make release         # patch bump (e.g. 0.3.5 → 0.3.6) — bug fixes only
-make release-minor   # minor bump (e.g. 0.3.5 → 0.4.0) — new features, backwards-compat
-make release-major   # major bump (e.g. 0.3.5 → 1.0.0) — breaking changes
+git worktree add .claude/worktrees/<name> -b <type>/<name>
+cd .claude/worktrees/<name>
 ```
 
-Each target reads the latest tag, computes the next, tags it, and pushes
-the tag. No source file is bumped; no "Release vX.Y.Z" commits land on
-main. The `publish.yml` workflow runs on tag push and publishes to PyPI
-via trusted publisher (setuptools-scm bakes the tag's version into the
-built artifacts).
+Skip the worktree only for trivial single-file edits you'll merge in the
+next minute.
 
-Pick the bump from semver: new public API = minor, only bug fixes =
-patch, backwards-incompatible = major. Don't tag manually outside the
-Makefile — the targets enforce clean tree + on main + up-to-date.
+## Shipping changes (commit → PR → release)
+
+Use the **[`ship-it` skill](./.claude/skills/ship-it/SKILL.md)** — it
+encodes this repo's conventions for conventional-commit titles, PR flow,
+manual `make release` against `setuptools-scm` tags, and post-merge
+cleanup. Don't invent an ad-hoc git workflow; invoke the skill so the
+conventions stay consistent. The skill auto-loads via Claude Code's
+`.claude/skills/` mechanism and triggers when the user wants to commit,
+push, open a PR, or release.

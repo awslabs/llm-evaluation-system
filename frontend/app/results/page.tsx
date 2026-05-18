@@ -4,9 +4,9 @@ import { Suspense } from "react";
 import { useAuth, login } from "@/contexts/AuthContext";
 import { useEffect } from "react";
 import { useSearchParams } from "next/navigation";
-import ComparisonGroupList from "@/components/results/ComparisonGroupList";
 import ComparisonView from "@/components/results/ComparisonView";
 import ResultsHeader from "@/components/results/ResultsHeader";
+import RunRail from "@/components/results/RunRail";
 
 function ResultsContent() {
   const { user, isLoading } = useAuth();
@@ -37,12 +37,30 @@ function ResultsContent() {
   return (
     <div className="flex h-screen flex-col bg-ink">
       <ResultsHeader groupId={groupId} />
-      <div className="flex-1 overflow-auto">
-        {groupId ? (
-          <ComparisonView groupId={groupId} />
-        ) : (
-          <ComparisonGroupList />
-        )}
+
+      <div className="flex flex-1 overflow-hidden">
+        <RunRail selectedId={groupId} />
+
+        <div className="flex-1 overflow-hidden">
+          {groupId ? (
+            <ComparisonView groupId={groupId} />
+          ) : (
+            <div className="flex h-full items-center justify-center px-8">
+              <div className="max-w-md text-center">
+                <p className="eyebrow">No run selected</p>
+                <h3 className="font-display mt-3 text-4xl leading-tight text-bone">
+                  <em className="text-ember">Pick</em> a run to read its
+                  scores.
+                </h3>
+                <p className="mt-4 text-sm text-bone-dim">
+                  Each entry on the left is a recorded evaluation —
+                  per-criterion scores, sample-level judgments, and full
+                  transcripts are one click away.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );

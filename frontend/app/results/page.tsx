@@ -21,8 +21,11 @@ function ResultsContent() {
 
   if (isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-claude-bg">
-        <div className="text-claude-muted">Loading...</div>
+      <div className="flex h-screen items-center justify-center bg-ink">
+        <span className="eyebrow">
+          Identifying
+          <span className="cursor-block ml-2 align-baseline" />
+        </span>
       </div>
     );
   }
@@ -32,7 +35,7 @@ function ResultsContent() {
   }
 
   return (
-    <div className="flex h-screen flex-col bg-claude-bg">
+    <div className="flex h-screen flex-col bg-ink">
       <ResultsHeader groupId={groupId} />
       <div className="flex-1 overflow-auto">
         {groupId ? (
@@ -49,8 +52,11 @@ export default function ResultsPage() {
   return (
     <Suspense
       fallback={
-        <div className="flex h-screen items-center justify-center bg-claude-bg">
-          <div className="text-claude-muted">Loading...</div>
+        <div className="flex h-screen items-center justify-center bg-ink">
+          <span className="eyebrow">
+            Loading
+            <span className="cursor-block ml-2 align-baseline" />
+          </span>
         </div>
       }
     >

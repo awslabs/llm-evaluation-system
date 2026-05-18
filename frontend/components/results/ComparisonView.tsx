@@ -93,7 +93,10 @@ export default function ComparisonView({ groupId }: { groupId: string }) {
   if (loading) {
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="text-claude-muted">Loading comparison data...</div>
+        <span className="eyebrow">
+          Loading comparison
+          <span className="cursor-block ml-2 align-baseline" />
+        </span>
       </div>
     );
   }
@@ -101,7 +104,12 @@ export default function ComparisonView({ groupId }: { groupId: string }) {
   if (error || !data) {
     return (
       <div className="flex h-full items-center justify-center">
-        <div className="text-red-400">Error: {error || "No data"}</div>
+        <div className="border border-oxide bg-ink-elev px-6 py-4">
+          <p className="eyebrow text-oxide">Read error</p>
+          <p className="mt-2 font-mono text-sm text-bone-dim">
+            {error || "No data returned for this evaluation."}
+          </p>
+        </div>
       </div>
     );
   }
@@ -124,16 +132,22 @@ export default function ComparisonView({ groupId }: { groupId: string }) {
           prompts={data.prompts}
         />
         {data.prompts && data.prompts.length > 1 && (
-          <details className="mb-4 rounded-lg border border-claude-border bg-claude-surface group">
-            <summary className="px-3 py-2 cursor-pointer text-xs font-medium uppercase tracking-wider text-claude-muted select-none list-none flex items-center gap-1">
-              <span className="group-open:rotate-90 transition-transform text-[10px]">▶</span>
-              Prompt Templates ({data.prompts.length}) — click to expand
+          <details className="group mb-4 border border-rule bg-ink-elev">
+            <summary className="flex cursor-pointer list-none select-none items-center gap-2 px-3 py-2 eyebrow">
+              <span className="font-mono text-[10px] transition-transform group-open:rotate-90">
+                ▶
+              </span>
+              Prompt templates ({data.prompts.length}) — click to expand
             </summary>
-            <div className="px-3 pb-3 space-y-2 border-t border-claude-border/50 pt-2">
+            <div className="space-y-2 border-t border-rule-soft px-3 pb-3 pt-2">
               {data.prompts.map((prompt, i) => (
-                <div key={i} className="flex items-start gap-2">
-                  <span className="font-mono text-claude-accent flex-shrink-0 text-xs mt-0.5">P{i + 1}</span>
-                  <span className="text-claude-text font-mono text-[11px] whitespace-pre-wrap break-all">{prompt}</span>
+                <div key={i} className="flex items-start gap-3">
+                  <span className="mt-0.5 flex-shrink-0 font-mono text-xs text-ember">
+                    P{i + 1}
+                  </span>
+                  <span className="whitespace-pre-wrap break-all font-mono text-[11px] text-bone">
+                    {prompt}
+                  </span>
                 </div>
               ))}
             </div>

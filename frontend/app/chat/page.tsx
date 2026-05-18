@@ -16,8 +16,11 @@ export default function ChatPage() {
 
   if (isLoading) {
     return (
-      <div className="flex h-screen items-center justify-center bg-claude-bg">
-        <div className="text-claude-muted">Loading...</div>
+      <div className="flex h-screen items-center justify-center bg-ink">
+        <span className="eyebrow">
+          Identifying
+          <span className="cursor-block ml-2 align-baseline" />
+        </span>
       </div>
     );
   }
@@ -27,7 +30,7 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex h-screen bg-claude-bg">
+    <div className="flex h-screen bg-ink">
       <Sidebar />
       <ChatInterface />
     </div>

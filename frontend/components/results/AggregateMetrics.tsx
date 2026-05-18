@@ -19,15 +19,15 @@ function formatModelName(model: string): string {
   const prefix = model.slice(0, slashIdx);
   const rest = model.slice(slashIdx + 1);
 
-  if (prefix === "agent") return `Agent: ${rest}`;
+  if (prefix === "agent") return `Agent · ${rest}`;
 
-  let name = rest
+  const name = rest
     .replace(/^us\.\w+\./, "")
     .replace(/-v\d+:\d+$/, "")
     .replace(/-\d{8}$/, "");
 
   const provider = providers[prefix] || prefix;
-  return `${provider}: ${name}`;
+  return `${provider} · ${name}`;
 }
 
 function getPromptIndex(columnKey: string): number | null {
@@ -53,12 +53,18 @@ function formatCriterion(name: string): string {
   return name.replace(/_/g, " ");
 }
 
-// Continuous red -> yellow -> green gradient for a score in [0, 1].
-// HSL: 0° red, 60° yellow, 120° green. Saturation/lightness tuned for dark UI.
 function scoreColor(score: number): string {
-  const clamped = Math.max(0, Math.min(1, score));
-  const hue = Math.round(clamped * 120); // 0 = red, 120 = green
-  return `hsl(${hue}, 70%, 55%)`;
+  const s = Math.max(0, Math.min(1, score));
+  if (s < 0.5) {
+    const t = s * 2;
+    const h = 5 + t * 40;
+    const sat = 50 + t * 10;
+    return `hsl(${h}, ${sat}%, 55%)`;
+  }
+  const t = (s - 0.5) * 2;
+  const h = 45 + t * 30;
+  const sat = 60 - t * 15;
+  return `hsl(${h}, ${sat}%, 55%)`;
 }
 
 interface PipelineStage {
@@ -87,7 +93,14 @@ interface ModelStats {
 
 interface AggregateMetricsProps {
   models: string[];
-  aggregate: Record<string, { overall: number; byCriterion: Record<string, number>; byStage?: Record<string, number> }>;
+  aggregate: Record<
+    string,
+    {
+      overall: number;
+      byCriterion: Record<string, number>;
+      byStage?: Record<string, number>;
+    }
+  >;
   criteria: string[];
   criteriaDescriptions?: Record<string, string>;
   stats: Record<string, ModelStats>;
@@ -96,12 +109,8 @@ interface AggregateMetricsProps {
   prompts?: string[];
 }
 
-const MODEL_COLORS = [
-  { bar: "bg-indigo-500", text: "text-indigo-400" },
-  { bar: "bg-amber-500", text: "text-amber-400" },
-  { bar: "bg-emerald-500", text: "text-emerald-400" },
-  { bar: "bg-rose-500", text: "text-rose-400" },
-];
+// Distinctive but harmonious swatches — used as accents on model panels.
+const MODEL_SWATCHES = ["#d97757", "#9bb556", "#d4a72c", "#9b87b5", "#a39a87"];
 
 export default function AggregateMetrics({
   models,
@@ -113,7 +122,9 @@ export default function AggregateMetrics({
   pipeline,
   prompts,
 }: AggregateMetricsProps) {
-  const [expandedCriteria, setExpandedCriteria] = useState<Set<string>>(new Set());
+  const [expandedCriteria, setExpandedCriteria] = useState<Set<string>>(
+    new Set(),
+  );
 
   const toggleCriterion = (name: string) => {
     setExpandedCriteria((prev) => {
@@ -125,77 +136,92 @@ export default function AggregateMetrics({
   };
 
   return (
-    <div className="mb-6 space-y-4">
-      {/* Model overall scores */}
-      <div className="grid gap-4" style={{ gridTemplateColumns: `repeat(${models.length}, 1fr)` }}>
+    <div className="mb-6 space-y-6">
+      <div
+        className="grid gap-px overflow-hidden border border-rule bg-rule"
+        style={{ gridTemplateColumns: `repeat(${models.length}, minmax(0, 1fr))` }}
+      >
         {models.map((model, i) => {
           const overall = aggregate[model]?.overall ?? 0;
-          const color = MODEL_COLORS[i % MODEL_COLORS.length];
+          const swatch = MODEL_SWATCHES[i % MODEL_SWATCHES.length];
           const totalTokens = Number(stats[model]?.total_tokens || 0);
-          const tokens = sampleCount > 0 ? Math.round(totalTokens / sampleCount) : totalTokens;
+          const tokens =
+            sampleCount > 0
+              ? Math.round(totalTokens / sampleCount)
+              : totalTokens;
           return (
-            <div key={model} className="rounded-lg border border-claude-border bg-claude-surface p-4">
-              <div className="flex items-center gap-2">
-                <div className={`h-3 w-3 rounded-full ${color.bar}`} />
-                <span className="text-sm font-medium text-claude-text truncate">
-                  {pipeline ? "Agent Evaluation" : formatModelName(getModelFromKey(model))}
+            <div
+              key={model}
+              className="relative flex flex-col gap-3 bg-ink-elev px-5 py-5"
+            >
+              <span
+                aria-hidden
+                className="absolute left-0 top-0 h-full w-0.5"
+                style={{ backgroundColor: swatch }}
+              />
+              <div className="flex items-baseline gap-2">
+                <span className="truncate font-mono text-[10px] uppercase tracking-eyebrow text-bone">
+                  {pipeline
+                    ? "Agent evaluation"
+                    : formatModelName(getModelFromKey(model))}
                 </span>
                 {prompts && getPromptIndex(model) !== null && (
-                  <span className="text-[10px] text-claude-accent flex-shrink-0">P{getPromptIndex(model)! + 1}</span>
+                  <span className="font-mono text-[10px] flex-shrink-0 text-ember">
+                    P{getPromptIndex(model)! + 1}
+                  </span>
                 )}
               </div>
-              <div className="mt-2 flex items-end gap-2">
-                <span className="text-3xl font-bold" style={{ color: scoreColor(overall) }}>
-                  {(overall * 100).toFixed(0)}%
+              <div className="flex items-baseline gap-3">
+                <span
+                  className="font-display text-5xl leading-none tabular-nums"
+                  style={{ color: scoreColor(overall) }}
+                >
+                  {(overall * 100).toFixed(0)}
                 </span>
-                <span className="mb-1 text-xs text-claude-muted">score</span>
+                <span className="font-mono text-xs uppercase tracking-eyebrow text-bone-mute">
+                  / 100
+                </span>
               </div>
-              <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-1 text-xs text-claude-muted">
+              <dl className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1.5 border-t border-rule-soft pt-3">
                 {stats[model]?.cost != null && (
-                  <>
-                    <span>Total cost</span>
-                    <span className="text-claude-text font-medium">
-                      ${Number(stats[model].cost).toFixed(4)}
-                    </span>
-                  </>
+                  <Row label="Cost" value={`$${Number(stats[model].cost).toFixed(4)}`} />
                 )}
                 {stats[model]?.latencySeconds != null && (
-                  <>
-                    <span>Avg latency</span>
-                    <span className="text-claude-text font-medium">
-                      {Number(stats[model].latencySeconds).toFixed(1)}s
-                    </span>
-                  </>
+                  <Row
+                    label="Latency"
+                    value={`${Number(stats[model].latencySeconds).toFixed(1)}s`}
+                  />
                 )}
                 {tokens > 0 && (
-                  <>
-                    <span>Avg tokens</span>
-                    <span className="text-claude-text font-medium">
-                      {tokens.toLocaleString()}
-                    </span>
-                  </>
+                  <Row label="Avg tokens" value={tokens.toLocaleString()} />
                 )}
                 {stats[model]?.tokensPerSecond != null && (
-                  <>
-                    <span>Speed</span>
-                    <span className="text-claude-text font-medium">
-                      {Number(stats[model].tokensPerSecond).toFixed(0)} tok/s
-                    </span>
-                  </>
+                  <Row
+                    label="Speed"
+                    value={`${Number(stats[model].tokensPerSecond).toFixed(0)} tok/s`}
+                  />
                 )}
-              </div>
-              {/* Per-model usage breakdown for pipeline evals */}
+              </dl>
               {pipeline && stats[model]?.modelUsage && (
-                <div className="mt-3 border-t border-claude-border/50 pt-2">
-                  <div className="text-xs text-claude-muted mb-1">Models used</div>
-                  {Object.entries(stats[model].modelUsage!).map(([modelName, usage]) => (
-                    <div key={modelName} className="flex justify-between text-xs py-0.5">
-                      <span className="text-claude-text truncate">{formatModelName(modelName)}</span>
-                      <span className="text-claude-muted ml-2 whitespace-nowrap">
-                        {usage.total_tokens?.toLocaleString()} tok {usage.cost != null && ` · $${usage.cost.toFixed(4)}`}
-                      </span>
-                    </div>
-                  ))}
+                <div className="mt-1 border-t border-rule-soft pt-3">
+                  <p className="eyebrow mb-1.5">Models used</p>
+                  {Object.entries(stats[model].modelUsage!).map(
+                    ([modelName, usage]) => (
+                      <div
+                        key={modelName}
+                        className="flex items-baseline justify-between gap-3 py-0.5 text-[11px]"
+                      >
+                        <span className="truncate text-bone">
+                          {formatModelName(modelName)}
+                        </span>
+                        <span className="ml-2 whitespace-nowrap font-mono text-bone-mute tabular-nums">
+                          {usage.total_tokens?.toLocaleString()} tok
+                          {usage.cost != null &&
+                            ` · $${usage.cost.toFixed(4)}`}
+                        </span>
+                      </div>
+                    ),
+                  )}
                 </div>
               )}
             </div>
@@ -203,115 +229,172 @@ export default function AggregateMetrics({
         })}
       </div>
 
-      {/* Pipeline stages overview */}
       {pipeline && pipeline.length > 0 && (
-        <div className="rounded-lg border border-claude-border bg-claude-surface p-4">
-          <div className="mb-3 text-xs font-medium uppercase tracking-wider text-claude-muted">
-            Pipeline Stages
-          </div>
-          <div className="flex items-center gap-2 overflow-x-auto">
-            {pipeline.sort((a, b) => a.order - b.order).map((stage, i) => {
-              const passRate = aggregate[models[0]]?.byStage?.[stage.name] ?? 0;
-              const color = scoreColor(passRate);
-              return (
-                <div key={stage.name} className="flex items-center gap-2">
-                  {i > 0 && <span className="text-claude-muted">→</span>}
-                  <div className="rounded-md border px-3 py-2" style={{ borderColor: color, color }}>
-                    <div className="text-sm font-medium">{stage.displayName}</div>
-                    <div className="flex items-center gap-2 mt-0.5">
-                      <span className="text-lg font-bold">{(passRate * 100).toFixed(0)}%</span>
-                      <span className="text-xs text-claude-muted">{stage.scorerType === "deterministic" ? "auto" : "judge"}</span>
+        <div className="border border-rule bg-ink-elev px-5 py-4">
+          <p className="eyebrow mb-3">Pipeline stages</p>
+          <div className="flex items-center gap-2 overflow-x-auto pb-1">
+            {pipeline
+              .sort((a, b) => a.order - b.order)
+              .map((stage, i) => {
+                const passRate =
+                  aggregate[models[0]]?.byStage?.[stage.name] ?? 0;
+                const color = scoreColor(passRate);
+                return (
+                  <div
+                    key={stage.name}
+                    className="flex flex-shrink-0 items-center gap-2"
+                  >
+                    {i > 0 && (
+                      <span className="font-mono text-bone-mute">→</span>
+                    )}
+                    <div
+                      className="border bg-ink px-3 py-2"
+                      style={{ borderColor: color }}
+                    >
+                      <div className="font-mono text-[10px] uppercase tracking-eyebrow text-bone">
+                        {stage.displayName}
+                      </div>
+                      <div className="mt-1 flex items-baseline gap-2">
+                        <span
+                          className="font-sans text-lg font-medium tabular-nums"
+                          style={{ color }}
+                        >
+                          {(passRate * 100).toFixed(0)}
+                          <span className="text-bone-mute">%</span>
+                        </span>
+                        <span className="font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
+                          {stage.scorerType === "deterministic"
+                            ? "auto"
+                            : "judge"}
+                        </span>
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
           </div>
         </div>
       )}
 
-      {/* Per-stage criteria (pipeline mode) */}
       {pipeline && pipeline.length > 0 ? (
         <div className="space-y-3">
-          {pipeline.sort((a, b) => a.order - b.order).map((stage) => {
-            const stagePassRate = aggregate[models[0]]?.byStage?.[stage.name] ?? 0;
-            const stageColor = scoreColor(stagePassRate);
-            return (
-              <div key={stage.name} className="rounded-lg border border-claude-border bg-claude-surface p-4">
-                <div className="flex items-center justify-between mb-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-claude-text">{stage.displayName}</span>
-                    <span className="text-xs px-1.5 py-0.5 rounded bg-claude-border/50 text-claude-muted">
-                      {stage.scorerType === "deterministic" ? "auto" : "judge"}
+          {pipeline
+            .sort((a, b) => a.order - b.order)
+            .map((stage) => {
+              const stagePassRate =
+                aggregate[models[0]]?.byStage?.[stage.name] ?? 0;
+              const stageColor = scoreColor(stagePassRate);
+              return (
+                <div
+                  key={stage.name}
+                  className="border border-rule bg-ink-elev px-5 py-4"
+                >
+                  <div className="mb-3 flex items-baseline justify-between">
+                    <div className="flex items-baseline gap-3">
+                      <span className="font-display text-lg text-bone">
+                        {stage.displayName}
+                      </span>
+                      <span className="font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
+                        {stage.scorerType === "deterministic"
+                          ? "auto"
+                          : "judge"}
+                      </span>
+                    </div>
+                    <span
+                      className="font-sans text-base font-medium tabular-nums"
+                      style={{ color: stageColor }}
+                    >
+                      {(stagePassRate * 100).toFixed(0)}%
                     </span>
                   </div>
-                  <span className="text-sm font-bold" style={{ color: stageColor }}>
-                    {(stagePassRate * 100).toFixed(0)}%
-                  </span>
-                </div>
-                {stage.scorerType === "deterministic" ? (
-                  <div className="text-xs text-claude-muted">
-                    Checks if the correct tools were called for each sample
-                  </div>
-                ) : (
-                  <table className="w-full mt-2">
-                    <tbody>
-                      {(stage.criteria && stage.criteria.length > 0 ? stage.criteria : criteria).map((criterion) => {
-                        const value = aggregate[models[0]]?.byCriterion?.[criterion] ?? 0;
-                        const color = scoreColor(value);
-                        const description = criteriaDescriptions?.[criterion];
-                        const isExpanded = expandedCriteria.has(criterion);
-                        return (
-                          <tr key={criterion} className="border-t border-claude-border/30">
-                            <td className="py-1.5">
-                              <div
-                                className={`text-sm text-claude-text capitalize ${description ? "cursor-pointer hover:text-claude-accent" : ""}`}
-                                onClick={() => description && toggleCriterion(criterion)}
-                              >
-                                <span className="flex items-center gap-1.5">
+                  {stage.scorerType === "deterministic" ? (
+                    <p className="text-xs text-bone-dim">
+                      Checks whether the correct tools were called for each sample.
+                    </p>
+                  ) : (
+                    <table className="w-full">
+                      <tbody>
+                        {(stage.criteria && stage.criteria.length > 0
+                          ? stage.criteria
+                          : criteria
+                        ).map((criterion) => {
+                          const value =
+                            aggregate[models[0]]?.byCriterion?.[criterion] ?? 0;
+                          const color = scoreColor(value);
+                          const description = criteriaDescriptions?.[criterion];
+                          const isExpanded = expandedCriteria.has(criterion);
+                          return (
+                            <tr
+                              key={criterion}
+                              className="border-t border-rule-soft"
+                            >
+                              <td className="py-2">
+                                <button
+                                  className={`flex items-center gap-1.5 text-left text-[13px] capitalize text-bone ${
+                                    description ? "cursor-pointer hover:text-ember" : ""
+                                  }`}
+                                  onClick={() =>
+                                    description && toggleCriterion(criterion)
+                                  }
+                                >
                                   {description && (
-                                    <span className="text-xs text-claude-muted select-none">
-                                      {isExpanded ? "▼" : "▶"}
+                                    <span className="select-none font-mono text-[10px] text-bone-mute">
+                                      {isExpanded ? "▾" : "▸"}
                                     </span>
                                   )}
                                   {formatCriterion(criterion)}
+                                </button>
+                                {isExpanded && description && (
+                                  <div className="ml-4 mt-1 text-xs text-bone-dim">
+                                    {description}
+                                  </div>
+                                )}
+                              </td>
+                              <td className="py-2 text-right align-top">
+                                <span
+                                  className="font-sans text-sm font-medium tabular-nums"
+                                  style={{ color }}
+                                >
+                                  {(value * 100).toFixed(0)}%
                                 </span>
-                              </div>
-                              {isExpanded && description && (
-                                <div className="mt-1 ml-4 text-xs text-claude-muted normal-case">
-                                  {description}
-                                </div>
-                              )}
-                            </td>
-                            <td className="py-1.5 text-right align-top">
-                              <span className="text-sm font-medium" style={{ color }}>{(value * 100).toFixed(0)}%</span>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            );
-          })}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              );
+            })}
         </div>
       ) : criteria.length > 0 ? (
-        <div className="rounded-lg border border-claude-border bg-claude-surface p-4">
+        <div className="border border-rule bg-ink-elev px-5 py-4">
+          <p className="eyebrow mb-3">Per-criterion comparison</p>
           <table className="w-full">
             <thead>
               <tr>
-                <th className="pb-2 text-left text-xs font-medium uppercase tracking-wider text-claude-muted">
-                  Criterion
+                <th className="pb-2 text-left">
+                  <span className="eyebrow">Criterion</span>
                 </th>
                 {models.map((model, i) => (
-                  <th key={model} className="pb-2 text-right text-xs font-medium uppercase tracking-wider text-claude-muted">
-                    <span className="flex items-center justify-end gap-1.5">
-                      <span className="truncate">{formatModelName(getModelFromKey(model))}</span>
+                  <th key={model} className="pb-2 text-right">
+                    <span className="inline-flex items-center justify-end gap-1.5">
+                      <span
+                        className="inline-block h-2 w-2 rounded-full"
+                        style={{
+                          backgroundColor:
+                            MODEL_SWATCHES[i % MODEL_SWATCHES.length],
+                        }}
+                      />
+                      <span className="truncate font-mono text-[10px] uppercase tracking-eyebrow text-bone">
+                        {formatModelName(getModelFromKey(model))}
+                      </span>
                       {getPromptIndex(model) !== null && (
-                        <span className="text-claude-accent">P{getPromptIndex(model)! + 1}</span>
+                        <span className="font-mono text-[10px] text-ember">
+                          P{getPromptIndex(model)! + 1}
+                        </span>
                       )}
-                      <span className={`inline-block h-2 w-2 rounded-full ${MODEL_COLORS[i % MODEL_COLORS.length].bar}`} />
                     </span>
                   </th>
                 ))}
@@ -322,32 +405,41 @@ export default function AggregateMetrics({
                 const isExpanded = expandedCriteria.has(criterion);
                 const description = criteriaDescriptions?.[criterion];
                 return (
-                  <tr key={criterion} className="border-t border-claude-border/50">
+                  <tr
+                    key={criterion}
+                    className="border-t border-rule-soft"
+                  >
                     <td className="py-2">
-                      <div
-                        className={`text-sm capitalize text-claude-text ${description ? "cursor-pointer hover:text-claude-accent" : ""}`}
-                        onClick={() => description && toggleCriterion(criterion)}
+                      <button
+                        className={`flex items-center gap-1.5 text-left text-[13px] capitalize text-bone ${
+                          description ? "cursor-pointer hover:text-ember" : ""
+                        }`}
+                        onClick={() =>
+                          description && toggleCriterion(criterion)
+                        }
                       >
-                        <span className="flex items-center gap-1.5">
-                          {description && (
-                            <span className="text-xs text-claude-muted select-none">
-                              {isExpanded ? "▼" : "▶"}
-                            </span>
-                          )}
-                          {formatCriterion(criterion)}
-                        </span>
-                      </div>
+                        {description && (
+                          <span className="select-none font-mono text-[10px] text-bone-mute">
+                            {isExpanded ? "▾" : "▸"}
+                          </span>
+                        )}
+                        {formatCriterion(criterion)}
+                      </button>
                       {isExpanded && description && (
-                        <div className="mt-1 ml-4 text-xs text-claude-muted">
+                        <div className="ml-4 mt-1 text-xs text-bone-dim">
                           {description}
                         </div>
                       )}
                     </td>
                     {models.map((model) => {
-                      const value = aggregate[model]?.byCriterion?.[criterion] ?? 0;
+                      const value =
+                        aggregate[model]?.byCriterion?.[criterion] ?? 0;
                       return (
                         <td key={model} className="py-2 text-right">
-                          <span className="text-sm font-medium" style={{ color: scoreColor(value) }}>
+                          <span
+                            className="font-sans text-sm font-medium tabular-nums"
+                            style={{ color: scoreColor(value) }}
+                          >
                             {(value * 100).toFixed(0)}%
                           </span>
                         </td>
@@ -361,5 +453,18 @@ export default function AggregateMetrics({
         </div>
       ) : null}
     </div>
+  );
+}
+
+function Row({ label, value }: { label: string; value: string }) {
+  return (
+    <>
+      <dt className="font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
+        {label}
+      </dt>
+      <dd className="text-right font-sans text-xs font-medium tabular-nums text-bone">
+        {value}
+      </dd>
+    </>
   );
 }

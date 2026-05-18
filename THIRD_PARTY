@@ -46,3 +46,40 @@ caniuse-lite 1.0.30001759
 
   caniuse-lite is a dataset of browser compatibility data used by
   Browserslist and related build tools. It is distributed unmodified.
+
+--------------------------------------------------------------------------------
+
+Geist (font) — Geist-Variable.woff2
+  Copyright 2024 The Geist Project Authors
+  License: SIL Open Font License, Version 1.1 (OFL-1.1)
+  Source: https://github.com/vercel/geist-font
+
+  Geist is a variable sans-serif typeface bundled with the web frontend
+  (frontend/app/fonts/Geist-Variable.woff2). The full OFL-1.1 license text
+  and copyright statement are included in frontend/app/fonts/OFL.txt. The
+  font is distributed unmodified.
+
+--------------------------------------------------------------------------------
+
+Geist Mono (font) — GeistMono-Variable.woff2
+  Copyright 2024 The Geist Project Authors
+  License: SIL Open Font License, Version 1.1 (OFL-1.1)
+  Source: https://github.com/vercel/geist-font
+
+  Geist Mono is a variable monospace typeface bundled with the web frontend
+  (frontend/app/fonts/GeistMono-Variable.woff2). The full OFL-1.1 license
+  text and copyright statement are included in frontend/app/fonts/OFL.txt.
+  The font is distributed unmodified.
+
+--------------------------------------------------------------------------------
+
+Instrument Serif (font) — InstrumentSerif-Regular.woff2, InstrumentSerif-Italic.woff2
+  Copyright 2022 The Instrument Serif Project Authors
+  License: SIL Open Font License, Version 1.1 (OFL-1.1)
+  Source: https://github.com/Instrument/instrument-serif
+
+  Instrument Serif is a display serif typeface bundled with the web frontend
+  in regular and italic styles (frontend/app/fonts/InstrumentSerif-Regular.woff2,
+  frontend/app/fonts/InstrumentSerif-Italic.woff2). The full OFL-1.1 license
+  text and copyright statement are included in frontend/app/fonts/OFL.txt.
+  The font is distributed unmodified.

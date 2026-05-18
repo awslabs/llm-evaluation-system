@@ -2,31 +2,41 @@
 
 import { useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 
 interface ResultsHeaderProps {
   groupId: string | null;
   sessionId?: string | null;
 }
 
-export default function ResultsHeader({ groupId, sessionId }: ResultsHeaderProps) {
+const NAV: Array<{ href: string; label: string }> = [
+  { href: "/chat", label: "Chat" },
+  { href: "/results", label: "Results" },
+  { href: "/history", label: "History" },
+];
+
+export default function ResultsHeader({ groupId }: ResultsHeaderProps) {
   const { user, logoutUrl } = useAuth();
   const router = useRouter();
+  const pathname = usePathname();
   const [downloading, setDownloading] = useState(false);
 
   const handleDownloadReport = async () => {
     if (!groupId) return;
     setDownloading(true);
     try {
-      const response = await fetch(`/api/compare/report/${encodeURIComponent(groupId)}`);
+      const response = await fetch(
+        `/api/compare/report/${encodeURIComponent(groupId)}`,
+      );
       if (response.status === 404) {
         alert(
           "No report has been generated yet for this evaluation.\n\n" +
-          "Ask the AI assistant to generate one — e.g., 'Generate a report for this eval'."
+            "Ask the AI assistant to generate one — e.g., 'Generate a report for this eval'.",
         );
         return;
       }
-      if (!response.ok) throw new Error(`Failed to load report: ${response.status}`);
+      if (!response.ok)
+        throw new Error(`Failed to load report: ${response.status}`);
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -41,58 +51,101 @@ export default function ResultsHeader({ groupId, sessionId }: ResultsHeaderProps
     }
   };
 
+  const showChatActions = process.env.NEXT_PUBLIC_SHOW_CHAT === "true";
+
   return (
-    <div className="border-b border-claude-border bg-claude-bg px-4 py-3">
-      <div className="mx-auto flex max-w-7xl items-center justify-between">
-        <div className="flex items-center gap-3">
-          <h1 className="text-lg font-semibold text-claude-text">
-            LLM Evaluation Platform
-          </h1>
-          <span className="text-claude-muted">|</span>
+    <header className="relative border-b border-rule bg-ink">
+      <div className="flex items-center justify-between px-6 py-3">
+        <div className="flex items-baseline gap-4">
+          <button
+            onClick={() => router.push("/chat")}
+            className="font-display text-xl italic leading-none text-bone transition-opacity hover:opacity-80"
+          >
+            Observatory
+          </button>
+          <span
+            className="hidden h-3 w-px bg-rule sm:inline-block"
+            aria-hidden
+          />
           {groupId ? (
-            <a
-              href="/results"
-              className="text-sm text-claude-accent hover:text-claude-hover"
+            <button
+              onClick={() => router.push("/results")}
+              className="eyebrow inline-flex items-center gap-1 transition-colors hover:text-bone-dim"
             >
-              &larr; All Evaluations
-            </a>
+              <span className="font-mono">←</span> All evaluations
+            </button>
           ) : (
-            <span className="text-sm text-claude-muted">Results</span>
+            <span className="eyebrow hidden sm:inline-block">
+              Evaluation index
+            </span>
           )}
         </div>
-        <div className="flex items-center gap-4">
+
+        <nav className="absolute left-1/2 -translate-x-1/2">
+          <ul className="flex items-center gap-1">
+            {NAV.map((item) => {
+              const active = pathname?.startsWith(item.href);
+              return (
+                <li key={item.href}>
+                  <button
+                    onClick={() => router.push(item.href)}
+                    className={`relative px-3 py-2 font-mono text-[11px] uppercase tracking-eyebrow transition-colors ${
+                      active
+                        ? "text-bone"
+                        : "text-bone-mute hover:text-bone-dim"
+                    }`}
+                  >
+                    {item.label}
+                    {active && (
+                      <span
+                        className="absolute inset-x-3 -bottom-px h-px bg-ember"
+                        aria-hidden
+                      />
+                    )}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </nav>
+
+        <div className="flex items-center gap-3">
           {groupId && (
             <button
               onClick={handleDownloadReport}
               disabled={downloading}
-              className="rounded-lg border border-claude-border px-4 py-2 text-sm text-claude-text hover:bg-claude-surface disabled:opacity-50 disabled:cursor-not-allowed"
+              className="eyebrow inline-flex items-center gap-2 border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone-dim disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {downloading ? "Downloading..." : "Download Report"}
+              {downloading ? (
+                <>
+                  Downloading
+                  <span className="cursor-block bg-ember align-baseline" />
+                </>
+              ) : (
+                <>
+                  <span className="font-mono">↓</span> Report
+                </>
+              )}
             </button>
           )}
-          {process.env.NEXT_PUBLIC_SHOW_CHAT === "true" && user?.name && (
-            <div className="text-sm text-claude-muted">
-              Signed in as <span className="text-claude-text font-medium">{user.name}</span>
-            </div>
+          {showChatActions && user?.name && (
+            <span className="hidden font-mono text-[11px] text-bone-dim sm:inline-block">
+              <span className="text-bone-mute">SIGNED</span>{" "}
+              <span className="text-bone">{user.name}</span>
+            </span>
           )}
-          {process.env.NEXT_PUBLIC_SHOW_CHAT === "true" && (
+          {showChatActions && (
             <button
-              onClick={() => router.push("/chat")}
-              className="rounded-lg bg-claude-accent px-4 py-2 text-sm font-semibold text-white hover:bg-claude-hover"
+              onClick={() => {
+                window.location.href = logoutUrl;
+              }}
+              className="eyebrow border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone-dim"
             >
-              Back to Chat
-            </button>
-          )}
-          {process.env.NEXT_PUBLIC_SHOW_CHAT === "true" && (
-            <button
-              onClick={() => { window.location.href = logoutUrl; }}
-              className="rounded-lg border border-claude-border px-4 py-2 text-sm text-claude-text hover:bg-claude-surface"
-            >
-              Sign Out
+              Sign out
             </button>
           )}
         </div>
       </div>
-    </div>
+    </header>
   );
 }

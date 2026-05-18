@@ -6,6 +6,19 @@ import { useRouter } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+function formatTime(ts: string): string {
+  try {
+    return new Date(ts).toLocaleTimeString(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    });
+  } catch {
+    return "";
+  }
+}
+
 export default function MessageList() {
   const { messages, isLoading } = useChat();
   const router = useRouter();
@@ -15,85 +28,136 @@ export default function MessageList() {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  return (
-    <div className="flex-1 overflow-y-auto px-4 py-8">
-      <div className="mx-auto max-w-3xl space-y-6">
-        {messages.map((message) => (
-          <div
-            key={message.id}
-            className={`flex ${
-              message.role === "user" ? "justify-end" : "justify-start"
-            }`}
-          >
-            <div
-              className={`max-w-[80%] rounded-lg px-4 py-3 ${
-                message.role === "user"
-                  ? "bg-claude-accent text-white"
-                  : "bg-claude-surface text-claude-text"
-              }`}
-            >
-              {/* Show progress/thinking when streaming */}
-              {message.metadata?.isStreaming && message.metadata?.progress && (
-                <div className="mb-2 text-sm opacity-70 italic">
-                  {message.metadata.progress}
-                </div>
-              )}
+  const showEmpty = messages.length === 0 && !isLoading;
 
-              {/* Only show content if it's not just the status message */}
-              {message.content && message.content !== message.metadata?.progress && (
-                <div className={message.role === "user" ? "whitespace-pre-wrap break-words" : "break-words"}>
-                  {message.role === "assistant" ? (
-                    <ReactMarkdown
-                      remarkPlugins={[remarkGfm]}
-                      components={{
-                        a: ({ node, ...props }) => {
-                          const href = props.href || "";
-                          const isResults = href.includes("/results");
-                          if (isResults) {
-                            const path = href.replace(/^https?:\/\/[^/]+/, "");
-                            return (
-                              <a
-                                {...props}
-                                href={path}
-                                onClick={(e) => {
-                                  e.preventDefault();
-                                  router.push(path);
-                                }}
-                              />
-                            );
-                          }
-                          return <a {...props} target="_blank" rel="noopener noreferrer" />;
-                        },
-                        p: ({ children }) => <p style={{ margin: '0 0 8px 0', lineHeight: '1.5' }}>{children}</p>,
-                        ul: ({ children }) => <ul style={{ margin: '0 0 8px 0', paddingLeft: '1.5rem', lineHeight: '1.5' }}>{children}</ul>,
-                        ol: ({ children }) => <ol style={{ margin: '0 0 8px 0', paddingLeft: '1.5rem', lineHeight: '1.5' }}>{children}</ol>,
-                        li: ({ children }) => <li style={{ margin: 0, lineHeight: '1.5' }}>{children}</li>,
-                      }}
-                    >
-                      {message.content}
-                    </ReactMarkdown>
-                  ) : (
-                    message.content
-                  )}
-                </div>
-              )}
-              <div className="mt-2 text-xs opacity-60">
-                {new Date(message.timestamp).toLocaleTimeString()}
-              </div>
-            </div>
-          </div>
-        ))}
-        {isLoading && (
-          <div className="flex justify-start">
-            <div className="max-w-[80%] rounded-lg bg-claude-surface px-4 py-3 text-claude-text">
-              <div className="flex space-x-2">
-                <div className="h-2 w-2 animate-bounce rounded-full bg-claude-muted"></div>
-                <div className="h-2 w-2 animate-bounce rounded-full bg-claude-muted delay-100"></div>
-                <div className="h-2 w-2 animate-bounce rounded-full bg-claude-muted delay-200"></div>
-              </div>
-            </div>
+  return (
+    <div className="flex-1 overflow-y-auto px-6 py-10">
+      <div className="mx-auto max-w-3xl">
+        {showEmpty && (
+          <div className="reveal mt-8 border-t border-rule pt-10">
+            <p className="eyebrow">Begin transmission</p>
+            <h2 className="font-display mt-3 text-4xl leading-tight text-bone">
+              Ask the instrument
+              <br />
+              <em className="text-ember">what it knows.</em>
+            </h2>
+            <p className="mt-5 max-w-md text-sm leading-relaxed text-bone-dim">
+              Try: <span className="text-bone">&ldquo;Compare Sonnet and Haiku on
+              the qa_v3 dataset and judge with strictness.&rdquo;</span>{" "}
+              Or drop a CSV of test cases below to begin a new evaluation.
+            </p>
           </div>
         )}
+
+        <ul>
+          {messages.map((message, idx) => {
+            const isUser = message.role === "user";
+            const prev = idx > 0 ? messages[idx - 1] : null;
+            const roleChanged = !prev || prev.role !== message.role;
+            const progress = message.metadata?.progress;
+            const isStreaming = message.metadata?.isStreaming;
+            const showContent =
+              message.content && message.content !== progress;
+
+            return (
+              <li
+                key={message.id}
+                className={`relative py-5 ${
+                  roleChanged && idx > 0 ? "border-t border-rule-soft" : ""
+                } ${idx === 0 ? "border-t border-rule-soft" : ""}`}
+              >
+                <div className="flex items-baseline gap-3">
+                  <span
+                    className={`font-mono text-[10px] uppercase tracking-eyebrow ${
+                      isUser ? "text-ember" : "text-bone-mute"
+                    }`}
+                  >
+                    {isUser ? "You" : "Observatory"}
+                  </span>
+                  <span className="font-mono text-[10px] tabular-nums text-bone-mute">
+                    {formatTime(message.timestamp)}
+                  </span>
+                  {isStreaming && (
+                    <span className="font-mono text-[10px] uppercase tracking-eyebrow text-ember">
+                      Live
+                    </span>
+                  )}
+                </div>
+
+                <div className="mt-2 text-[0.95rem] leading-relaxed text-bone">
+                  {isStreaming && progress && (
+                    <div className="mb-2 flex items-center gap-2 text-sm italic text-bone-dim">
+                      <span>{progress}</span>
+                      <span className="cursor-block bg-ember" />
+                    </div>
+                  )}
+
+                  {showContent &&
+                    (isUser ? (
+                      <div className="whitespace-pre-wrap break-words">
+                        {message.content}
+                      </div>
+                    ) : (
+                      <div className="markdown-content break-words">
+                        <ReactMarkdown
+                          remarkPlugins={[remarkGfm]}
+                          components={{
+                            a: ({ ...props }) => {
+                              const href = props.href || "";
+                              const isResults = href.includes("/results");
+                              if (isResults) {
+                                const path = href.replace(
+                                  /^https?:\/\/[^/]+/,
+                                  "",
+                                );
+                                return (
+                                  <a
+                                    {...props}
+                                    href={path}
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      router.push(path);
+                                    }}
+                                  />
+                                );
+                              }
+                              return (
+                                <a
+                                  {...props}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                />
+                              );
+                            },
+                          }}
+                        >
+                          {message.content}
+                        </ReactMarkdown>
+                      </div>
+                    ))}
+                </div>
+              </li>
+            );
+          })}
+
+          {isLoading && messages.length > 0 && (
+            <li className="border-t border-rule-soft py-5">
+              <div className="flex items-baseline gap-3">
+                <span className="font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
+                  Observatory
+                </span>
+                <span className="font-mono text-[10px] uppercase tracking-eyebrow text-ember">
+                  Working
+                </span>
+              </div>
+              <div className="mt-2 text-sm italic text-bone-dim">
+                Composing response
+                <span className="cursor-block ml-2 bg-ember align-baseline" />
+              </div>
+            </li>
+          )}
+        </ul>
+
         <div ref={bottomRef} />
       </div>
     </div>

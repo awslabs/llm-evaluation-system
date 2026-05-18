@@ -419,9 +419,15 @@ def delete_judge_from_db(user_id: str, judge_id: str) -> bool:
     if _s3_enabled():
         return _s3_delete_json(user_id, "judges", f"{judge_id}.json")
     store_dir = _get_json_store_dir(user_id, "judges")
-    path = store_dir / f"{judge_id}.json"
-    if path.exists():
-        path.unlink()
+    safe_id = os.path.basename(judge_id)
+    if not safe_id or safe_id != judge_id:
+        raise ValueError(f"invalid judge_id: {judge_id!r}")
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    target_real = os.path.realpath(str(store_dir / f"{safe_id}.json"))
+    if not target_real.startswith(base_real + os.sep):
+        raise ValueError(f"path escape attempt: {target_real}")
+    if os.path.exists(target_real):
+        os.unlink(target_real)
         return True
     return False
 
@@ -591,9 +597,15 @@ def delete_dataset_from_db(user_id: str, dataset_id: str) -> bool:
     if _s3_enabled():
         return _s3_delete_json(user_id, "datasets", f"{dataset_id}.json")
     store_dir = _get_json_store_dir(user_id, "datasets")
-    path = store_dir / f"{dataset_id}.json"
-    if path.exists():
-        path.unlink()
+    safe_id = os.path.basename(dataset_id)
+    if not safe_id or safe_id != dataset_id:
+        raise ValueError(f"invalid dataset_id: {dataset_id!r}")
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    target_real = os.path.realpath(str(store_dir / f"{safe_id}.json"))
+    if not target_real.startswith(base_real + os.sep):
+        raise ValueError(f"path escape attempt: {target_real}")
+    if os.path.exists(target_real):
+        os.unlink(target_real)
         return True
     return False
 

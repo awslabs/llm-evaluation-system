@@ -280,6 +280,23 @@ def test_provenance_round_trip(client):
     assert detail["source"] == src
 
 
+def test_delete_dataset_rejects_path_traversal(client):
+    """Defense in depth: delete_dataset_from_db must reject ids that would
+    escape the per-user store directory (e.g., URL-encoded ../../etc)."""
+    import eval_mcp.core.user_storage as us
+    # A traversal-shaped id should never make it to the filesystem.
+    import pytest
+    with pytest.raises(ValueError, match="invalid dataset_id"):
+        us.delete_dataset_from_db(USER, "../../etc/passwd")
+
+
+def test_delete_judge_rejects_path_traversal(client):
+    import eval_mcp.core.user_storage as us
+    import pytest
+    with pytest.raises(ValueError, match="invalid judge_id"):
+        us.delete_judge_from_db(USER, "../../etc/passwd")
+
+
 def test_legacy_dataset_without_source_defaults_imported(client, tmp_path):
     """Records saved before provenance existed should still surface a source
     in API responses (defaulting to 'imported')."""

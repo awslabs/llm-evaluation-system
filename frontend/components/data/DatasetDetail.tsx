@@ -312,36 +312,36 @@ export default function DatasetDetailView({ datasetId, onRenamed, onDeleted }: P
                   <textarea
                     value={editingQ}
                     onChange={(e) => setEditingQ(e.target.value)}
-                    rows={2}
+                    rows={3}
                     placeholder="Question"
-                    className="w-full border border-rule bg-ink-raised p-2 text-[0.95rem] text-bone placeholder:text-bone-mute focus:border-ember focus:outline-none"
+                    className="w-full border border-rule bg-ink-raised p-3 text-[1.0625rem] leading-relaxed text-bone placeholder:text-bone-mute focus:border-ember focus:outline-none"
                   />
                   <textarea
                     value={editingA}
                     onChange={(e) => setEditingA(e.target.value)}
-                    rows={3}
+                    rows={6}
                     placeholder="Expected answer"
-                    className="w-full border border-rule bg-ink-raised p-2 font-serif text-[0.95rem] italic leading-relaxed text-bone placeholder:text-bone-mute focus:border-ember focus:outline-none"
+                    className="w-full border border-rule bg-ink-raised p-3 text-[1.0625rem] leading-relaxed text-bone-dim placeholder:text-bone-mute focus:border-ember focus:outline-none"
                   />
                 </div>
               ) : (
                 <>
-                  <p className="mt-2 whitespace-pre-wrap break-words text-[0.95rem] leading-relaxed text-bone">
+                  <p className="mt-3 whitespace-pre-wrap break-words text-[1.0625rem] leading-relaxed text-bone">
                     {q}
                   </p>
                   {a && (
-                    <p className="mt-2 whitespace-pre-wrap break-words border-l-2 border-ember-deep pl-3 font-serif text-[0.95rem] italic leading-relaxed text-bone-dim">
+                    <p className="mt-3 whitespace-pre-wrap break-words border-l-2 border-ember-deep pl-4 text-[1rem] leading-relaxed text-bone-dim">
                       {a}
                     </p>
                   )}
                   {extras.length > 0 && (
-                    <ul className="mt-2 flex flex-wrap gap-2">
+                    <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
                       {extras.map(([k, v]) => (
                         <li
                           key={k}
-                          className="font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute"
+                          className="font-mono text-[11px] uppercase tracking-eyebrow"
                         >
-                          <span className="text-bone-mute/60">{k}:</span>{" "}
+                          <span className="text-bone-mute">{k}:</span>{" "}
                           <span className="text-bone-dim">
                             {typeof v === "string" ? v : JSON.stringify(v)}
                           </span>

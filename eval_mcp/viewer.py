@@ -94,11 +94,13 @@ def create_viewer_app() -> FastAPI:
     # Auth stub for local viewer (only binds to 127.0.0.1, never deployed to AWS)
     @app.get("/api/auth/user")
     async def auth_user():
-        # Use a non-empty user object so the AuthContext treats the session
-        # as authenticated and renders pages like /data that gate on user.
+        # `mode: "viewer"` tells the frontend it's running against the local
+        # eval-mcp viewer (no chat backend, no Postgres). The Header uses
+        # this to hide nav entries that would otherwise 404.
         return {
             "user": {"id": "local", "name": "local", "email": "local@dev"},
             "logoutUrl": "#",
+            "mode": "viewer",
         }
 
     # ---------- Data Library (datasets + judges) ----------

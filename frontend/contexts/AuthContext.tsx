@@ -8,22 +8,27 @@ interface User {
   name?: string;
 }
 
+type AppMode = "full" | "viewer";
+
 interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   logoutUrl: string;
+  mode: AppMode;
 }
 
 const AuthContext = createContext<AuthContextType>({
   user: null,
   isLoading: true,
-  logoutUrl: "/oauth2/sign_out?rd=/"
+  logoutUrl: "/oauth2/sign_out?rd=/",
+  mode: "full",
 });
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [logoutUrl, setLogoutUrl] = useState("/oauth2/sign_out?rd=/");
+  const [mode, setMode] = useState<AppMode>("full");
 
   useEffect(() => {
     fetch("/api/auth/user")
@@ -33,13 +38,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (data.logoutUrl) {
           setLogoutUrl(data.logoutUrl);
         }
+        if (data.mode === "viewer") {
+          setMode("viewer");
+        }
       })
       .catch(() => setUser(null))
       .finally(() => setIsLoading(false));
   }, []);
 
   return (
-    <AuthContext.Provider value={{ user, isLoading, logoutUrl }}>
+    <AuthContext.Provider value={{ user, isLoading, logoutUrl, mode }}>
       {children}
     </AuthContext.Provider>
   );

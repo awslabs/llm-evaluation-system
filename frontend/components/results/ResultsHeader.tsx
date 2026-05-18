@@ -9,16 +9,24 @@ interface ResultsHeaderProps {
   sessionId?: string | null;
 }
 
-const NAV: Array<{ href: string; label: string }> = [
-  { href: "/chat", label: "Chat" },
+interface NavItem {
+  href: string;
+  label: string;
+  fullOnly?: boolean;
+}
+
+const NAV: NavItem[] = [
+  { href: "/chat", label: "Chat", fullOnly: true },
+  { href: "/data", label: "Data" },
   { href: "/results", label: "Results" },
-  { href: "/history", label: "History" },
+  { href: "/history", label: "History", fullOnly: true },
 ];
 
 export default function ResultsHeader({ groupId }: ResultsHeaderProps) {
-  const { user, logoutUrl } = useAuth();
+  const { user, logoutUrl, mode } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
+  const visibleNav = NAV.filter((item) => !(mode === "viewer" && item.fullOnly));
   const [downloading, setDownloading] = useState(false);
 
   const handleDownloadReport = async () => {
@@ -58,7 +66,7 @@ export default function ResultsHeader({ groupId }: ResultsHeaderProps) {
       <div className="flex items-center justify-between px-6 py-3">
         <div className="flex items-baseline gap-4">
           <button
-            onClick={() => router.push("/chat")}
+            onClick={() => router.push(mode === "viewer" ? "/data" : "/chat")}
             className="font-display text-xl italic leading-none text-bone transition-opacity hover:opacity-80"
           >
             Observatory
@@ -83,7 +91,7 @@ export default function ResultsHeader({ groupId }: ResultsHeaderProps) {
 
         <nav className="absolute left-1/2 -translate-x-1/2">
           <ul className="flex items-center gap-1">
-            {NAV.map((item) => {
+            {visibleNav.map((item) => {
               const active = pathname?.startsWith(item.href);
               return (
                 <li key={item.href}>

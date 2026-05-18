@@ -1,7 +1,7 @@
 "use client";
 
 import type { DatasetSummary } from "@/lib/data-types";
-import { formatTimestamp, sourceGlyph, sourceLabel } from "@/lib/data-types";
+import { formatTimestamp, sourceGlyph } from "@/lib/data-types";
 
 interface Props {
   datasets: DatasetSummary[];
@@ -82,26 +82,24 @@ export default function DatasetList({
                             active ? "text-ember" : "text-bone-mute"
                           }`}
                           aria-hidden
+                          title={ds.source.kind}
                         >
                           {sourceGlyph(ds.source)}
                         </span>
                         <span
-                          className={`truncate text-[13px] leading-tight ${
+                          className={`truncate text-[14px] leading-snug ${
                             active ? "text-bone" : "text-bone-dim"
                           }`}
                         >
                           {ds.name || "Untitled dataset"}
                         </span>
                       </div>
-                      <div className="mt-1 flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
+                      <div className="mt-1.5 flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
                         <span className="tabular-nums">
                           {ds.num_samples.toString().padStart(3, "0")} samples
                         </span>
                         <span aria-hidden>·</span>
                         <span>{formatTimestamp(ds.created_at)}</span>
-                      </div>
-                      <div className="mt-0.5 truncate font-mono text-[9px] uppercase tracking-eyebrow text-bone-mute/70">
-                        {sourceLabel(ds.source)}
                       </div>
                     </div>
                   </button>

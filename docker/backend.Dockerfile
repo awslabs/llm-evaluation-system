@@ -1,17 +1,49 @@
 # Backend Dockerfile - FastAPI + Python MCP servers + Inspect AI
 FROM public.ecr.aws/docker/library/python:3.12-slim
 
-# Install system dependencies: tini (PID 1 signal handling)
+# Install tini (PID 1 signal handling)
 RUN apt-get update && apt-get install -y --no-install-recommends tini \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Install Helm CLI (required by inspect-k8s-sandbox)
-COPY --from=alpine/helm:3.17.3 /usr/bin/helm /usr/local/bin/helm
+# kubectl + Helm — installed via direct download from canonical upstream
+# CDNs with pinned versions + SHA256 verification. Replaces multi-stage
+# `COPY --from=bitnami/kubectl:latest` / `alpine/helm:...` which (a) pulled
+# from Docker Hub and tripped its anonymous-pull rate limit in CodeBuild,
+# and (b) gave us an unpinned `:latest` with no checksum check.
+#
+# curl is installed for the download, then PURGED in the same RUN layer so
+# it never persists in the final image (no new runtime attack surface).
+#
+# To bump: edit the version + paste the new SHA256 from
+#   https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/arm64/kubectl.sha256
+#   https://get.helm.sh/helm-v${HELM_VERSION}-linux-arm64.tar.gz.sha256sum
+ARG KUBECTL_VERSION=1.32.4
+ARG KUBECTL_SHA256=c6f96d0468d6976224f5f0d81b65e1a63b47195022646be83e49d38389d572c2
+ARG HELM_VERSION=3.17.3
+ARG HELM_SHA256=7944e3defd386c76fd92d9e6fec5c2d65a323f6fadc19bfb5e704e3eee10348e
 
-# Install kubectl (for agent pod management and code extraction)
-COPY --from=bitnami/kubectl:latest /opt/bitnami/kubectl/bin/kubectl /usr/local/bin/kubectl
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends curl ca-certificates; \
+    \
+    curl -fsSL --retry 3 --retry-delay 5 \
+      "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/arm64/kubectl" \
+      -o /usr/local/bin/kubectl; \
+    echo "${KUBECTL_SHA256}  /usr/local/bin/kubectl" | sha256sum -c -; \
+    chmod +x /usr/local/bin/kubectl; \
+    \
+    curl -fsSL --retry 3 --retry-delay 5 \
+      "https://get.helm.sh/helm-v${HELM_VERSION}-linux-arm64.tar.gz" \
+      -o /tmp/helm.tar.gz; \
+    echo "${HELM_SHA256}  /tmp/helm.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/helm.tar.gz -C /usr/local/bin --strip-components=1 linux-arm64/helm; \
+    rm /tmp/helm.tar.gz; \
+    \
+    apt-get purge -y --auto-remove curl; \
+    apt-get clean; \
+    rm -rf /var/lib/apt/lists/*
 
-# Install uv for reproducible Python builds
+# Install uv for reproducible Python builds (GHCR, not rate-limited)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
 WORKDIR /app

@@ -115,7 +115,12 @@ terraform.tfvars
 
 # Local tool installs (deploy.sh auto-installs terraform/kubectl/helm here)
 .tools/
-.claude/
+.claude/*
+# Track repo-scoped skills (read by Claude Code, Cursor, Codex, etc. —
+# see https://code.claude.com/docs/en/skills). Everything else under
+# .claude/ (sessions, worktrees, cache, settings) stays local.
+!.claude/skills/
+!.claude/skills/**
 
 # Project-scope MCP config — must not be committed: it shadows users' user-scope
 # eval-mcp install for anyone who cd's into this repo (Claude Code scope

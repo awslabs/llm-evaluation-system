@@ -18,35 +18,33 @@ export default function Sidebar() {
   const { chatSessions, currentSessionId, isLoading, createNewChat, loadChat } = useChat();
 
   return (
-    <aside className="flex w-64 flex-col border-r border-rule bg-ink-elev">
-      <div className="px-4 pb-3 pt-4">
-        <button
-          onClick={createNewChat}
-          disabled={isLoading}
-          className="group flex w-full items-center justify-between border border-bone px-3 py-2 text-left text-sm tracking-wide transition-colors hover:bg-bone hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <span className="font-mono text-[11px] uppercase tracking-eyebrow">
-            New session
-          </span>
-          <span className="font-mono text-base transition-transform group-hover:translate-x-0.5">
-            +
-          </span>
-        </button>
-      </div>
-
-      <div className="flex items-baseline justify-between border-t border-rule-soft px-4 pb-1 pt-3">
-        <span className="eyebrow">Archive</span>
+    <aside className="flex w-80 flex-col border-r border-rule bg-ink-elev">
+      <div className="flex items-baseline justify-between border-b border-rule-soft px-5 py-4">
+        <p className="eyebrow">Sessions</p>
         <span className="font-mono text-[10px] tabular-nums text-bone-mute">
-          {chatSessions.length.toString().padStart(2, "0")}
+          {chatSessions.length.toString().padStart(3, "0")} total
         </span>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-2 pb-3">
+      <div className="border-b border-rule-soft px-5 py-3">
+        <button
+          onClick={createNewChat}
+          disabled={isLoading}
+          className="group inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-eyebrow text-bone-dim transition-colors hover:text-ember disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <span className="font-mono text-sm leading-none">+</span>
+          New session
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
         {chatSessions.length === 0 ? (
-          <p className="px-3 py-4 text-xs italic leading-relaxed text-bone-mute">
-            <span className="font-display text-sm not-italic">No sessions yet.</span>
+          <p className="px-5 py-6 text-sm italic leading-relaxed text-bone-mute">
+            <span className="font-display not-italic text-bone">
+              No sessions yet.
+            </span>
             <br />
-            Start a new one to begin recording.
+            Open a new session to begin a conversation with the instrument.
           </p>
         ) : (
           <ul>
@@ -57,10 +55,10 @@ export default function Sidebar() {
                   <button
                     onClick={() => !isLoading && loadChat(session.id)}
                     disabled={isLoading}
-                    className={`group relative flex w-full items-baseline gap-3 border-l-2 px-3 py-2 text-left transition-colors ${
+                    className={`group flex w-full items-baseline gap-3 border-b border-rule-soft border-l-2 px-4 py-3 text-left transition-colors ${
                       isActive
-                        ? "border-ember bg-ink-raised"
-                        : "border-transparent hover:border-rule hover:bg-ink-raised/40"
+                        ? "border-l-ember bg-ink-raised"
+                        : "border-l-transparent hover:border-l-rule hover:bg-ink-raised/40"
                     } ${isLoading && !isActive ? "cursor-not-allowed opacity-50" : ""}`}
                   >
                     <span
@@ -68,22 +66,22 @@ export default function Sidebar() {
                         isActive ? "text-ember" : "text-bone-mute"
                       }`}
                     >
-                      {(chatSessions.length - idx).toString().padStart(2, "0")}
+                      {(chatSessions.length - idx).toString().padStart(3, "0")}
                     </span>
-                    <span className="min-w-0 flex-1">
-                      <span
-                        className={`block truncate text-sm leading-tight ${
+                    <div className="min-w-0 flex-1">
+                      <div
+                        className={`truncate text-[14px] leading-snug ${
                           isActive ? "text-bone" : "text-bone-dim"
                         }`}
                       >
                         {session.title || "Untitled session"}
-                      </span>
+                      </div>
                       {session.createdAt && (
-                        <span className="mt-0.5 block font-mono text-[10px] uppercase tracking-wider text-bone-mute">
+                        <div className="mt-1 font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
                           {formatDate(session.createdAt)}
-                        </span>
+                        </div>
                       )}
-                    </span>
+                    </div>
                   </button>
                 </li>
               );

@@ -3,6 +3,7 @@
 import { useAuth, login } from "@/contexts/AuthContext";
 import { useEffect } from "react";
 import ChatInterface from "@/components/ChatInterface";
+import Header from "@/components/Header";
 import Sidebar from "@/components/Sidebar";
 
 export default function ChatPage() {
@@ -30,9 +31,12 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex h-screen bg-ink">
-      <Sidebar />
-      <ChatInterface />
+    <div className="flex h-screen flex-col bg-ink">
+      <Header />
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar />
+        <ChatInterface />
+      </div>
     </div>
   );
 }

@@ -21,8 +21,14 @@ terraform {
       version = "~> 2.12"
     }
     kubectl = {
-      source  = "alekc/kubectl"
-      version = "~> 2.0"
+      source = "alekc/kubectl"
+      # Pin to 2.1.x — v2.2.0 ships an incompatible provider schema
+      # (gRPC v6 attributes nil → fully populated) that surfaces in
+      # CodeBuild as: "Invalid Provider Server Combination: differing
+      # provider schema implementations across providers". CodeBuild runs
+      # `terraform init -upgrade` which ignores the lockfile, so the
+      # constraint here must exclude 2.2.x.
+      version = "~> 2.1.3"
     }
     random = {
       source  = "hashicorp/random"

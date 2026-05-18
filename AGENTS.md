@@ -25,36 +25,24 @@ Update both files:
 
 ## Releasing
 
-Releases are automated by [release-please](https://github.com/googleapis/release-please).
-You do not run `make release` in normal flow — the bot does it for you.
+The version lives in git tags. `pyproject.toml` has no `version` field —
+`setuptools-scm` derives it from the latest `v*` tag at build time.
 
-**Normal flow:**
+After merging a PR with user-visible changes, publish to PyPI from main:
 
-1. Open a PR with a Conventional Commits title (`feat: ...`, `fix: ...`, `docs: ...`).
-   The PR title lint blocks merge if the prefix is missing.
-2. Merge the PR to main.
-3. `release-please` reads commits since the last release tag and, if any
-   `feat:` / `fix:` are present, opens (or updates) a "Release PR"
-   titled `chore(main): release X.Y.Z` with an auto-generated
-   `CHANGELOG.md` entry and a new version computed via semver:
-   - `feat:` → minor bump
-   - `fix:` / `perf:` → patch bump
-   - any `BREAKING CHANGE:` footer → major bump
-4. Merge the Release PR when you're ready to ship. The bot creates the
-   `vX.Y.Z` tag, which triggers `publish.yml` → build → PyPI upload.
+```bash
+git checkout main && git pull
+make release         # patch bump (e.g. 0.3.5 → 0.3.6) — bug fixes only
+make release-minor   # minor bump (e.g. 0.3.5 → 0.4.0) — new features, backwards-compat
+make release-major   # major bump (e.g. 0.3.5 → 1.0.0) — breaking changes
+```
 
-The version itself lives in git tags. `pyproject.toml` has no `version`
-field — `setuptools-scm` derives it from the tag at build time. The
-`.release-please-manifest.json` file tracks the current released
-version for release-please's own bookkeeping; you don't edit it by hand.
+Each target reads the latest tag, computes the next, tags it, and pushes
+the tag. No source file is bumped; no "Release vX.Y.Z" commits land on
+main. The `publish.yml` workflow runs on tag push and publishes to PyPI
+via trusted publisher (setuptools-scm bakes the tag's version into the
+built artifacts).
 
-**Manual escape hatch (rare):**
-
-If you ever need to release out of band — e.g. a security fix that
-shouldn't wait for the next Release PR cycle — `make release` /
-`make release-minor` / `make release-major` still work. They read the
-latest tag, compute the next version, tag, and push. Use only when the
-release-please flow can't be used.
-
-Don't tag manually outside the Makefile — the targets enforce clean
-tree + on main + up-to-date.
+Pick the bump from semver: new public API = minor, only bug fixes =
+patch, backwards-incompatible = major. Don't tag manually outside the
+Makefile — the targets enforce clean tree + on main + up-to-date.

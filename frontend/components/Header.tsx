@@ -3,27 +3,17 @@
 import { useAuth } from "@/contexts/AuthContext";
 import { usePathname, useRouter } from "next/navigation";
 
-interface NavItem {
-  href: string;
-  label: string;
-  // Routes that need the full FastAPI/Postgres backend (chat, history).
-  // Hidden in `viewer` mode so they don't 404 against the local eval-mcp viewer.
-  fullOnly?: boolean;
-}
-
-const NAV: NavItem[] = [
-  { href: "/chat", label: "Chat", fullOnly: true },
+const NAV: Array<{ href: string; label: string }> = [
+  { href: "/chat", label: "Chat" },
   { href: "/data", label: "Data" },
   { href: "/results", label: "Results" },
-  { href: "/history", label: "History", fullOnly: true },
+  { href: "/history", label: "History" },
 ];
 
 export default function Header() {
   const { user, logoutUrl, mode } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
-
-  const visibleNav = NAV.filter((item) => !(mode === "viewer" && item.fullOnly));
 
   return (
     <header className="relative border-b border-rule bg-ink">
@@ -38,7 +28,7 @@ export default function Header() {
 
         <nav className="absolute left-1/2 -translate-x-1/2">
           <ul className="flex items-center gap-1">
-            {visibleNav.map((item) => {
+            {NAV.map((item) => {
               const active = pathname?.startsWith(item.href);
               return (
                 <li key={item.href}>

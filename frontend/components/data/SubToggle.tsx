@@ -16,8 +16,11 @@ interface Props {
 
 export default function SubToggle({ active, counts, onChange }: Props) {
   return (
-    <div className="flex items-baseline gap-1 border-b border-rule px-6 py-3">
-      <p className="eyebrow mr-4">Library</p>
+    <div className="flex items-baseline gap-4 border-b border-rule px-6 py-3">
+      <p className="font-serif italic text-[15px] leading-none text-bone-dim">
+        Library
+      </p>
+      <span className="h-3 w-px bg-rule" aria-hidden />
       {TABS.map((tab) => {
         const isActive = active === tab.id;
         const count = counts[tab.id];

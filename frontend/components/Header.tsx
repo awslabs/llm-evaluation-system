@@ -5,9 +5,9 @@ import { usePathname, useRouter } from "next/navigation";
 
 const NAV: Array<{ href: string; label: string }> = [
   { href: "/chat", label: "Chat" },
-  { href: "/data", label: "Data" },
-  { href: "/results", label: "Results" },
   { href: "/history", label: "History" },
+  { href: "/results", label: "Results" },
+  { href: "/data", label: "Data" },
 ];
 
 export default function Header() {

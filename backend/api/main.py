@@ -545,7 +545,12 @@ async def process_qa_dataset_content(
                         base_name = Path(filename).stem
                         dataset_name = generate_dataset_name(base_name)
                         test_cases = [{"vars": {"question": p["question"], "golden_answer": p["golden_answer"]}} for p in qa_pairs]
-                        dataset_id = save_dataset_to_db(user_id, dataset_name, test_cases)
+                        dataset_id = save_dataset_to_db(
+                            user_id,
+                            dataset_name,
+                            test_cases,
+                            source={"kind": "imported", "origin": filename},
+                        )
 
                         return {
                             "success": True,
@@ -587,7 +592,12 @@ async def process_qa_dataset_content(
             }
 
         dataset_name = generate_dataset_name(Path(filename).stem)
-        dataset_id = save_dataset_to_db(user_id, dataset_name, test_cases)
+        dataset_id = save_dataset_to_db(
+            user_id,
+            dataset_name,
+            test_cases,
+            source={"kind": "imported", "origin": filename},
+        )
 
         return {
             "success": True,
@@ -1312,6 +1322,239 @@ async def get_current_user(request: Request):
         logout_url = "/oauth2/sign_out?rd=/"
 
     return {"user": user, "logoutUrl": logout_url}
+
+
+# ============== Data Library (datasets + judges) ==============
+
+
+class DatasetPatch(BaseModel):
+    name: Optional[str] = None
+    tests: Optional[List[Dict]] = None
+
+
+@app.get("/api/datasets")
+async def list_datasets(
+    search: str = "",
+    user_id: str = Depends(get_current_user_id),
+):
+    """List the authenticated user's datasets without test payloads (cheap)."""
+    from eval_mcp.core.user_storage import list_datasets_from_db
+
+    try:
+        entries = list_datasets_from_db(user_id, search)
+        # Strip the heavy `tests` field — the list view only needs metadata.
+        summaries = [
+            {k: v for k, v in e.items() if k != "tests"}
+            for e in entries
+        ]
+        return {"datasets": summaries}
+    except Exception:
+        _, safe_msg = _user_safe_error("list_datasets endpoint")
+        raise HTTPException(status_code=500, detail=safe_msg)
+
+
+@app.get("/api/datasets/{dataset_id}")
+async def get_dataset_detail(
+    dataset_id: str,
+    offset: int = 0,
+    limit: int = 50,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Get a dataset with a windowed slice of its tests."""
+    from eval_mcp.core.user_storage import get_dataset_from_db
+
+    try:
+        data = get_dataset_from_db(user_id, dataset_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+
+        tests = data.get("tests", [])
+        total = len(tests)
+        if limit <= 0 or limit > 500:
+            limit = 50
+        if offset < 0:
+            offset = 0
+        window = tests[offset : offset + limit]
+
+        return {
+            "id": data["id"],
+            "name": data.get("name", ""),
+            "source": data.get("source", {"kind": "imported"}),
+            "created_at": data["created_at"],
+            "updated_at": data.get("updated_at"),
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+            "tests": window,
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        _, safe_msg = _user_safe_error("get_dataset_detail endpoint")
+        raise HTTPException(status_code=500, detail=safe_msg)
+
+
+@app.delete("/api/datasets/{dataset_id}")
+async def delete_dataset(
+    dataset_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    from eval_mcp.core.user_storage import delete_dataset_from_db
+
+    try:
+        ok = delete_dataset_from_db(user_id, dataset_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        return {"deleted": True}
+    except HTTPException:
+        raise
+    except Exception:
+        _, safe_msg = _user_safe_error("delete_dataset endpoint")
+        raise HTTPException(status_code=500, detail=safe_msg)
+
+
+@app.patch("/api/datasets/{dataset_id}")
+async def patch_dataset(
+    dataset_id: str,
+    patch: DatasetPatch,
+    user_id: str = Depends(get_current_user_id),
+):
+    from eval_mcp.core.user_storage import update_dataset_in_db
+
+    try:
+        updated = update_dataset_in_db(
+            user_id,
+            dataset_id,
+            name=patch.name,
+            tests=patch.tests,
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        return {
+            "id": updated["id"],
+            "name": updated.get("name", ""),
+            "source": updated.get("source", {"kind": "imported"}),
+            "created_at": updated["created_at"],
+            "updated_at": updated.get("updated_at"),
+            "total": len(updated.get("tests", [])),
+        }
+    except HTTPException:
+        raise
+    except Exception:
+        _, safe_msg = _user_safe_error("patch_dataset endpoint")
+        raise HTTPException(status_code=500, detail=safe_msg)
+
+
+@app.get("/api/datasets/{dataset_id}/export")
+async def export_dataset_csv(
+    dataset_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    """Stream a CSV with question/golden_answer + any extra vars."""
+    import csv
+    import io
+    from eval_mcp.core.user_storage import get_dataset_from_db
+
+    data = get_dataset_from_db(user_id, dataset_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+
+    tests = data.get("tests", [])
+    # Discover the union of var keys across tests so extra fields (tags,
+    # expected_tools, etc) round-trip even for non-uniform datasets.
+    keys: list[str] = []
+    seen: set[str] = set()
+    for t in tests:
+        for k in (t.get("vars") or {}).keys():
+            if k not in seen:
+                seen.add(k)
+                keys.append(k)
+    # Ensure the canonical columns lead, in a stable order.
+    for col in ("golden_answer", "question"):
+        if col in keys:
+            keys.remove(col)
+            keys.insert(0, col)
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(keys)
+    for t in tests:
+        v = t.get("vars") or {}
+        writer.writerow([v.get(k, "") for k in keys])
+
+    csv_bytes = buf.getvalue().encode("utf-8")
+    safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in (data.get("name") or "dataset"))[:80]
+    return StreamingResponse(
+        iter([csv_bytes]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f'attachment; filename="{safe_name}.csv"',
+        },
+    )
+
+
+@app.get("/api/judges")
+async def list_judges(
+    search: str = "",
+    user_id: str = Depends(get_current_user_id),
+):
+    from eval_mcp.core.user_storage import list_judges_from_db
+
+    try:
+        entries = list_judges_from_db(user_id, search)
+        # Shape the list view to what the UI needs (omit full config body).
+        summaries = []
+        for e in entries:
+            cfg = e.get("config") or {}
+            summaries.append({
+                "id": e["id"],
+                "name": e.get("name", ""),
+                "domain": cfg.get("domain", "general"),
+                "criteria": [c.get("name") for c in cfg.get("criteria", [])],
+                "created_at": e.get("created_at"),
+            })
+        return {"judges": summaries}
+    except Exception:
+        _, safe_msg = _user_safe_error("list_judges endpoint")
+        raise HTTPException(status_code=500, detail=safe_msg)
+
+
+@app.get("/api/judges/{judge_id}")
+async def get_judge_detail(
+    judge_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    from eval_mcp.core.user_storage import get_judge_from_db
+
+    try:
+        data = get_judge_from_db(user_id, judge_id)
+        if not data:
+            raise HTTPException(status_code=404, detail="Judge not found")
+        return data
+    except HTTPException:
+        raise
+    except Exception:
+        _, safe_msg = _user_safe_error("get_judge_detail endpoint")
+        raise HTTPException(status_code=500, detail=safe_msg)
+
+
+@app.delete("/api/judges/{judge_id}")
+async def delete_judge(
+    judge_id: str,
+    user_id: str = Depends(get_current_user_id),
+):
+    from eval_mcp.core.user_storage import delete_judge_from_db
+
+    try:
+        ok = delete_judge_from_db(user_id, judge_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="Judge not found")
+        return {"deleted": True}
+    except HTTPException:
+        raise
+    except Exception:
+        _, safe_msg = _user_safe_error("delete_judge endpoint")
+        raise HTTPException(status_code=500, detail=safe_msg)
 
 
 # ============== Inspect AI Viewer ==============

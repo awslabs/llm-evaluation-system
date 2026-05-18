@@ -493,7 +493,12 @@ def list_eval_configs_from_db(user_id: str, search_term: str = "") -> list[dict[
 # ============== Datasets ==============
 
 
-def save_dataset_to_db(user_id: str, name: str, tests: list[dict[str, Any]]) -> str:
+def save_dataset_to_db(
+    user_id: str,
+    name: str,
+    tests: list[dict[str, Any]],
+    source: Optional[dict[str, Any]] = None,
+) -> str:
     import hashlib
 
     hash_json = json.dumps(tests, sort_keys=True)
@@ -505,7 +510,9 @@ def save_dataset_to_db(user_id: str, name: str, tests: list[dict[str, Any]]) -> 
         "name": name,
         "type": "dataset",
         "tests": tests,
+        "source": source or {"kind": "manual"},
         "created_at": now,
+        "updated_at": now,
     }
 
     if _s3_enabled():
@@ -527,8 +534,11 @@ def get_dataset_from_db(user_id: str, dataset_id: str) -> Optional[dict[str, Any
     if data:
         return {
             "id": data["id"],
+            "name": data.get("name", ""),
             "tests": data["tests"],
+            "source": data.get("source", {"kind": "imported"}),
             "created_at": data["created_at"],
+            "updated_at": data.get("updated_at", data["created_at"]),
         }
     return None
 
@@ -546,6 +556,7 @@ def get_dataset_by_name(user_id: str, name: str) -> Optional[dict[str, Any]]:
                 "id": entry["id"],
                 "name": entry["name"],
                 "tests": entry["tests"],
+                "source": entry.get("source", {"kind": "imported"}),
                 "created_at": entry["created_at"],
             }
     return None
@@ -569,9 +580,59 @@ def list_datasets_from_db(user_id: str, search_term: str = "") -> list[dict[str,
             "name": name,
             "tests": tests,
             "num_samples": len(tests) if isinstance(tests, list) else 0,
+            "source": entry.get("source", {"kind": "imported"}),
             "created_at": entry["created_at"],
+            "updated_at": entry.get("updated_at", entry["created_at"]),
         })
     return results
+
+
+def delete_dataset_from_db(user_id: str, dataset_id: str) -> bool:
+    if _s3_enabled():
+        return _s3_delete_json(user_id, "datasets", f"{dataset_id}.json")
+    store_dir = _get_json_store_dir(user_id, "datasets")
+    path = store_dir / f"{dataset_id}.json"
+    if path.exists():
+        path.unlink()
+        return True
+    return False
+
+
+def update_dataset_in_db(
+    user_id: str,
+    dataset_id: str,
+    *,
+    name: Optional[str] = None,
+    tests: Optional[list[dict[str, Any]]] = None,
+) -> Optional[dict[str, Any]]:
+    """Update a dataset's name and/or tests. Returns the updated record or None if not found.
+
+    Note: dataset_id stays stable across content edits so frontend URLs and
+    history references don't break. Hash collision risk on edits is accepted —
+    the id is from the initial save's content fingerprint.
+    """
+    if _s3_enabled():
+        data = _s3_load_json(user_id, "datasets", f"{dataset_id}.json")
+    else:
+        store_dir = _get_json_store_dir(user_id, "datasets")
+        data = _load_json_file(store_dir / f"{dataset_id}.json")
+
+    if not data:
+        return None
+
+    if name is not None:
+        data["name"] = name
+    if tests is not None:
+        data["tests"] = tests
+    data["updated_at"] = int(datetime.now().timestamp() * 1000)
+
+    if _s3_enabled():
+        _s3_save_json(user_id, "datasets", f"{dataset_id}.json", data)
+    else:
+        store_dir = _get_json_store_dir(user_id, "datasets")
+        _save_json_file(store_dir / f"{dataset_id}.json", data, user_id)
+
+    return data
 
 
 # ============== Eval Results (pre-computed JSON for fast reads) ==============

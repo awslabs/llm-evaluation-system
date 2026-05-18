@@ -1,7 +1,6 @@
 "use client";
 
 import { useState } from "react";
-import Link from "next/link";
 import { useAuth } from "@/contexts/AuthContext";
 import { usePathname, useRouter } from "next/navigation";
 
@@ -76,21 +75,9 @@ export default function ResultsHeader({ groupId }: ResultsHeaderProps) {
             className="hidden h-3 w-px bg-rule sm:inline-block"
             aria-hidden
           />
-          {groupId ? (
-            // Plain anchor on purpose: Next.js optimizes <Link> clicks as no-ops
-            // when only searchParams change on the same pathname, leaving the
-            // user stuck on the detail. A full nav reloads the page in placeholder mode.
-            <a
-              href="/results"
-              className="eyebrow inline-flex items-center gap-1 transition-colors hover:text-bone-dim"
-            >
-              <span className="font-mono">←</span> All evaluations
-            </a>
-          ) : (
-            <span className="eyebrow hidden sm:inline-block">
-              Evaluation index
-            </span>
-          )}
+          <span className="eyebrow hidden sm:inline-block">
+            Evaluation index
+          </span>
         </div>
 
         <nav className="absolute left-1/2 -translate-x-1/2">

@@ -22,7 +22,7 @@ function Today() {
       }),
     );
   }, []);
-  return <span className="eyebrow tabular-nums">{label || " "}</span>;
+  return <span className="eyebrow tabular-nums">{label || " "}</span>;
 }
 
 export default function Home() {
@@ -37,14 +37,22 @@ export default function Home() {
 
   const status = isLoading ? "Identifying" : user ? "Redirecting" : null;
 
+  // Auth handler — kept verbatim. oauth2-proxy is a separate service, not a
+  // Next route, so this MUST be a hard navigation, not router.push. Do not
+  // touch this logic without re-checking the oauth2-proxy + Cognito flow.
+  const startSignIn = () => {
+    window.location.href = "/oauth2/start";
+  };
+
   return (
     <main className="relative flex min-h-screen flex-col bg-ink text-bone">
       <header className="flex items-center justify-between border-b border-rule-soft px-8 py-5">
-        <div className="flex items-baseline gap-3">
-          <span className="eyebrow">LLM Evaluation</span>
-          <span className="font-mono text-[10px] text-bone-mute tabular-nums">
-            v0.1
+        <div className="flex items-baseline gap-4">
+          <span className="font-display text-xl italic leading-none text-bone">
+            Observatory
           </span>
+          <span className="hidden h-3 w-px bg-rule sm:inline-block" aria-hidden />
+          <span className="eyebrow hidden sm:inline-block">LLM Evaluation</span>
         </div>
         <Today />
       </header>
@@ -75,10 +83,8 @@ export default function Home() {
                 </span>
               ) : (
                 <button
-                  onClick={() => {
-                    window.location.href = "/oauth2/start";
-                  }}
-                  className="group inline-flex items-center gap-3 border border-bone px-6 py-3 text-sm font-medium tracking-wide transition-colors hover:bg-bone hover:text-ink focus:outline-none focus:ring-1 focus:ring-bone focus:ring-offset-2 focus:ring-offset-ink"
+                  onClick={startSignIn}
+                  className="group inline-flex items-center gap-3 border border-bone px-6 py-3 font-mono text-[11px] uppercase tracking-eyebrow text-bone transition-colors hover:bg-bone hover:text-ink focus:outline-none focus:ring-1 focus:ring-bone focus:ring-offset-2 focus:ring-offset-ink"
                 >
                   Sign in to continue
                   <span className="font-mono transition-transform group-hover:translate-x-1">
@@ -109,8 +115,8 @@ export default function Home() {
       </section>
 
       <footer className="flex items-center justify-between border-t border-rule-soft px-8 py-5">
-        <span className="eyebrow">Open source · MIT</span>
-        <span className="eyebrow tabular-nums">Build · llm-evaluation-system</span>
+        <span className="eyebrow">Open source · Apache 2.0</span>
+        <span className="eyebrow tabular-nums">awslabs · llm-evaluation-system</span>
       </footer>
     </main>
   );

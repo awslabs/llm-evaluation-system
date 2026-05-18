@@ -130,3 +130,109 @@ resource "aws_secretsmanager_secret_version" "oauth2_proxy" {
     cookieSecret = base64encode(random_password.oauth2_proxy_cookie_secret.result)
   })
 }
+
+#------------------------------------------------------------------------------
+# Cognito Hosted UI customization
+#
+# Paint-job only. AWS still owns the password flow, form layout, MFA,
+# brute-force protection, OIDC compliance, and token issuance. We only
+# upload a CSS string (Cognito enforces a whitelist of selectors and
+# properties) so the hosted login page renders in the Observatory palette
+# instead of stock white. No security boundary moved.
+#
+# The whitelist means this CSS cannot:
+#   - inject scripts
+#   - hide or modify the password field
+#   - change the form action or redirect target
+#   - capture credentials
+# Cognito validates the CSS server-side before serving it.
+#------------------------------------------------------------------------------
+
+resource "aws_cognito_user_pool_ui_customization" "main" {
+  user_pool_id = aws_cognito_user_pool.main.id
+  client_id    = aws_cognito_user_pool_client.main.id
+
+  css = <<-CSS
+    .background-customizable {
+      background-color: #0c0a08;
+      background-image: linear-gradient(180deg, #15120e 0%, #0c0a08 100%);
+    }
+    .banner-customizable {
+      background-color: #0c0a08;
+      padding: 32px 0 16px;
+    }
+    .logo-customizable {
+      max-width: 0;
+      max-height: 0;
+    }
+    .label-customizable {
+      color: #ece6d8;
+      font-weight: 500;
+      letter-spacing: 0.02em;
+    }
+    .textDescription-customizable {
+      color: #a39a87;
+    }
+    .idpDescription-customizable {
+      color: #a39a87;
+    }
+    .legalText-customizable {
+      color: #6f6759;
+      font-size: 11px;
+    }
+    .inputField-customizable {
+      background-color: #15120e;
+      color: #ece6d8;
+      border: 1px solid #2a241d;
+      border-radius: 2px;
+      padding: 12px 14px;
+    }
+    .inputField-customizable:focus {
+      border-color: #d97757;
+      outline: none;
+    }
+    .submitButton-customizable {
+      background-color: #d97757;
+      color: #0c0a08;
+      border: 1px solid #d97757;
+      border-radius: 2px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 12px 18px;
+    }
+    .submitButton-customizable:hover {
+      background-color: #c25a36;
+      border-color: #c25a36;
+      color: #0c0a08;
+    }
+    .errorMessage-customizable {
+      background-color: #3a1f15;
+      color: #d97757;
+      border: 1px solid #a35336;
+    }
+    .idpButton-customizable {
+      background-color: #15120e;
+      color: #ece6d8;
+      border: 1px solid #2a241d;
+    }
+    .idpButton-customizable:hover {
+      background-color: #1d1812;
+      border-color: #a39a87;
+    }
+    .socialButton-customizable {
+      background-color: #15120e;
+      color: #ece6d8;
+      border: 1px solid #2a241d;
+    }
+    .redirect-customizable {
+      color: #d97757;
+    }
+    .passwordCheck-notValid-customizable {
+      color: #c4524d;
+    }
+    .passwordCheck-valid-customizable {
+      color: #9bb556;
+    }
+  CSS
+}

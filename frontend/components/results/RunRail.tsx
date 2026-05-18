@@ -15,6 +15,7 @@ interface EvalGroup {
 
 interface Props {
   selectedId: string | null;
+  onSelect: (id: string) => void;
 }
 
 function relativeTime(iso: string): string {
@@ -72,7 +73,7 @@ function bestScore(group: EvalGroup): number | undefined {
   return best;
 }
 
-export default function RunRail({ selectedId }: Props) {
+export default function RunRail({ selectedId, onSelect }: Props) {
   const [groups, setGroups] = useState<EvalGroup[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -170,10 +171,8 @@ export default function RunRail({ selectedId }: Props) {
               const title = group.configName || group.task || "Untitled run";
               return (
                 <li key={group.id}>
-                  {/* Plain anchor: Next.js Link no-ops when only searchParams
-                      change on the same pathname (static export quirk). */}
-                  <a
-                    href={`/results?group=${encodeURIComponent(group.id)}`}
+                  <button
+                    onClick={() => onSelect(group.id)}
                     className={`group flex w-full flex-col gap-2 border-b border-rule-soft border-l-2 px-4 py-3.5 text-left transition-colors ${
                       active
                         ? "border-l-ember bg-ink-raised"
@@ -217,7 +216,7 @@ export default function RunRail({ selectedId }: Props) {
                       <span aria-hidden>·</span>
                       <span>{relativeTime(group.created)}</span>
                     </div>
-                  </a>
+                  </button>
                 </li>
               );
             })}

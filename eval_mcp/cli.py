@@ -18,50 +18,174 @@ def main(ctx):
 
 
 @main.command()
-@click.option("--print-only", is_flag=True, help="Only print the guidance, don't warm the uvx cache.")
-def install(print_only):
-    """Print installation guidance for a coding agent to follow.
+@click.option(
+    "--ide",
+    default=None,
+    help="Comma-separated IDE names to install into (claude-code, kiro, vscode, cursor, codex). "
+         "Default: auto-detect all installed IDEs.",
+)
+@click.option("--yes", "-y", is_flag=True, help="Non-interactive: install into all selected IDEs without prompting.")
+@click.option("--force", is_flag=True, help="Overwrite an existing 'eval' registration instead of skipping.")
+@click.option("--no-warm-cache", is_flag=True, help="Skip the uvx cache warm-up step.")
+@click.option(
+    "--print-only",
+    is_flag=True,
+    help="Just print the bundled INSTALL.md guide and exit. For coding agents that want to do the install themselves.",
+)
+def install(ide, yes, force, no_warm_cache, print_only):
+    """Install eval-mcp into the IDEs on this machine.
 
     \b
-    This prints the bundled INSTALL.md — instructions for a coding agent
-    (Claude Code, Cursor, etc.) to install eval-mcp into a user's IDE. The
-    agent reads the guidance, detects the IDE, edits the right config file
-    safely, and warms the uvx cache so the first IDE launch is instant.
+    Detects Claude Code, Kiro, VS Code, Cursor, and Codex. Asks which to
+    configure (or honors --ide / --yes), registers the MCP server in each,
+    and warms the uvx cache so first launch isn't 60s of "disconnected".
 
-    Run this from any coding agent and follow the instructions it emits.
+    \b
+    Examples:
+      eval-mcp install                              # detect + ask
+      eval-mcp install --yes                        # detect + install all
+      eval-mcp install --ide claude-code,kiro --yes # explicit list
+      eval-mcp install --print-only                 # print guide, do nothing
     """
-    from pathlib import Path
-    import subprocess
-    import sys as _sys
-
-    guide = Path(__file__).parent / "INSTALL.md"
-    if not guide.exists():
-        click.echo("INSTALL.md not bundled with this install — reinstall the package.", err=True)
-        _sys.exit(1)
-
-    click.echo(guide.read_text())
+    from eval_mcp.installers import REGISTRY
 
     if print_only:
+        _print_install_guide()
         return
 
-    # Warm the uvx cache so the user's first IDE launch after install is
-    # instant. The agent shows its usual progress UI while we wait.
-    click.echo("\n---\nWarming uvx cache (first run only, may take ~60s)...", err=True)
+    requested = _parse_ide_flag(ide) if ide else None
+    targets = _select_targets(REGISTRY, requested=requested, assume_yes=yes)
+    if not targets:
+        return
+
+    results = [(inst, inst.install(force=force)) for inst in targets]
+    _print_summary(results)
+
+    any_installed = any(r.status in ("installed", "replaced") for _, r in results)
+    if any_installed and not no_warm_cache:
+        _warm_uvx_cache()
+    if any_installed:
+        click.echo("\nNext steps:")
+        for inst, r in results:
+            if r.status in ("installed", "replaced"):
+                click.echo(f"  • {inst.display}: {inst.restart_hint()}")
+
+
+def _parse_ide_flag(value: str) -> list[str]:
+    """Split `--ide a,b,c` into `["a","b","c"]` and validate each name."""
+    from eval_mcp.installers import REGISTRY
+    names = [n.strip() for n in value.split(",") if n.strip()]
+    unknown = [n for n in names if n not in REGISTRY]
+    if unknown:
+        valid = ", ".join(REGISTRY.keys())
+        raise click.BadParameter(
+            f"unknown IDE(s): {', '.join(unknown)}. Valid: {valid}"
+        )
+    return names
+
+
+def _select_targets(registry, *, requested, assume_yes):
+    """Decide which installers to run. Returns a list of Installer instances.
+
+    Rules:
+      • If --ide given: use that list verbatim (even if not detected — user knows best).
+      • Else: detect all, then ask interactively unless --yes.
+      • Empty result → print a friendly message and return [].
+    """
+    if requested:
+        return [registry[name] for name in requested]
+
+    detected = [inst for inst in registry.values() if inst.detect()]
+    if not detected:
+        click.echo("No supported IDEs detected on this machine.")
+        click.echo("Supported: " + ", ".join(registry.keys()))
+        return []
+
+    click.echo("Detected IDEs:")
+    for inst in registry.values():
+        marker = "x" if inst in detected else " "
+        suffix = "" if inst in detected else "    (not detected)"
+        click.echo(f"  [{marker}] {inst.display}{suffix}")
+
+    if assume_yes or len(detected) == 1:
+        return detected
+
+    # Interactive: ask which subset
+    names = ",".join(i.name for i in detected)
+    choice = click.prompt(
+        f"\nInstall into [a]ll detected / comma-separated names ({names}) / [q]uit",
+        default="a",
+    ).strip().lower()
+    if choice in ("q", "quit"):
+        return []
+    if choice in ("a", "all", ""):
+        return detected
+    picked = _parse_ide_flag(choice)
+    return [registry[name] for name in picked]
+
+
+def _print_summary(results):
+    click.echo("\nInstall summary:")
+    glyphs = {
+        "installed": "✓",
+        "replaced": "✓",
+        "skipped": "-",
+        "failed": "✗",
+        "not-detected": "-",
+    }
+    for inst, r in results:
+        g = glyphs.get(r.status, "?")
+        line = f"  {g} {inst.display}: {r.status}"
+        if r.message:
+            line += f" — {r.message}"
+        click.echo(line)
+
+
+def _warm_uvx_cache():
+    """Pre-fetch the uvx-cached package so the IDE's first MCP launch is fast."""
+    import subprocess
+
+    click.echo("\nWarming uvx cache (first run only, may take ~60s)...", err=True)
     try:
         subprocess.run(
             ["uvx", "--from", "llm-evaluation-system", "eval-mcp", "--help"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True,
-            timeout=180,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            check=True, timeout=180,
         )
         click.echo("uvx cache warmed.", err=True)
     except FileNotFoundError:
-        click.echo("uvx not found on PATH. Install uv first: curl -LsSf https://astral.sh/uv/install.sh | sh", err=True)
+        click.echo(
+            "uvx not found on PATH. Install uv first: "
+            "curl -LsSf https://astral.sh/uv/install.sh | sh",
+            err=True,
+        )
     except subprocess.TimeoutExpired:
-        click.echo("uvx warm-up timed out after 3 min — the IDE may need a longer timeout on first launch.", err=True)
+        click.echo(
+            "uvx warm-up timed out after 3 min — the IDE may need a longer "
+            "timeout on first launch.",
+            err=True,
+        )
     except subprocess.CalledProcessError as e:
-        click.echo(f"uvx warm-up failed with exit {e.returncode} — the IDE may slow-start on first launch.", err=True)
+        click.echo(
+            f"uvx warm-up failed with exit {e.returncode} — the IDE may "
+            "slow-start on first launch.",
+            err=True,
+        )
+
+
+def _print_install_guide():
+    """Back-compat: ``--print-only`` still emits the bundled INSTALL.md
+    so coding agents that prefer to drive the install themselves can."""
+    from pathlib import Path
+
+    guide = Path(__file__).parent / "INSTALL.md"
+    if not guide.exists():
+        click.echo(
+            "INSTALL.md not bundled with this install — reinstall the package.",
+            err=True,
+        )
+        sys.exit(1)
+    click.echo(guide.read_text())
 
 
 @main.command()

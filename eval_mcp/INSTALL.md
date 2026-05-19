@@ -2,47 +2,35 @@
 
 Follow this when a user asks you to install eval-mcp into their IDE.
 
-## 1. Prerequisite check
-
-User needs `uv`. Check: `command -v uv`. If missing, tell them to run `curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv` on macOS).
-
-## 2. Pick the IDE
-
-Detect from what's present in the user's home:
-
-| IDE | Check |
-|---|---|
-| Claude Code | `claude` on PATH or `~/.claude/` exists |
-| Cursor | `~/.cursor/` exists |
-| VS Code | `code` on PATH |
-| Kiro | `~/.kiro/` exists |
-| Codex CLI | `~/.codex/` exists |
-
-If multiple, ask the user which.
-
-## 3. Install
-
-Run the one-command install for that IDE:
-
-- **Claude Code**: `claude mcp add eval -s user -- uvx --from llm-evaluation-system eval-mcp`
-- **Cursor**: open `cursor://anysphere.cursor-deeplink/mcp/install?name=eval&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJsbG0tZXZhbHVhdGlvbi1zeXN0ZW0iLCJldmFsLW1jcCJdfQ==` (or edit `~/.cursor/mcp.json`)
-- **VS Code**: `code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}'`
-- **Kiro**: merge into `~/.kiro/settings/mcp.json` under `mcpServers.eval` — same JSON shape as Cursor. Back up first, atomic write.
-- **Codex**: append to `~/.codex/config.toml`: `[mcp_servers.eval]\ncommand = "uvx"\nargs = ["--from", "llm-evaluation-system", "eval-mcp"]`
-
-For any manual JSON/TOML edit: back up first, merge — never clobber, atomic write.
-
-Do **not** use `llm-evaluation-system@latest` in the IDE config — it forces a PyPI resolution on every MCP start (~20s cold start) and causes the MCP to show "disconnected" on first connect after any new release. Plain `llm-evaluation-system` is what's documented across the MCP ecosystem (reference servers, `mcp-atlassian`, etc.). Upgrade separately via `uv cache clean llm-evaluation-system`.
-
-## 4. Warm the cache
-
-Run this so the user's first IDE launch is instant instead of waiting for uvx to fetch the package:
+## Happy path (one command)
 
 ```bash
-uvx --from llm-evaluation-system eval-mcp --help >/dev/null
+uvx --from llm-evaluation-system eval-mcp install --yes
 ```
 
-## 5. Ask about S3 team sharing
+The subcommand detects which IDEs are present (Claude Code, Kiro, VS Code,
+Cursor, Codex), registers `eval` in each, and warms the uvx cache so the
+first IDE launch isn't 60s of "disconnected". Then tell the user to
+restart whichever IDE(s) it touched.
+
+If the user wants a single IDE only:
+```bash
+uvx --from llm-evaluation-system eval-mcp install --ide claude-code --yes
+```
+
+Valid `--ide` values: `claude-code`, `kiro`, `vscode`, `cursor`, `codex`.
+Comma-separate for multiple.
+
+If `eval` is already registered, the subcommand skips with a message.
+Pass `--force` to overwrite.
+
+## Prerequisite
+
+User needs `uv`. Check: `command -v uv`. If missing, tell them to run
+`curl -LsSf https://astral.sh/uv/install.sh | sh` (or `brew install uv`
+on macOS).
+
+## After install: S3 team sharing prompt
 
 > Want to share eval results, datasets, judges, and reports with teammates via a shared S3 bucket?
 
@@ -64,12 +52,37 @@ Suggested bucket name if they don't have a preference: `eval-mcp-$(aws sts get-c
 
 If **no**: skip. They can enable it later with `eval-mcp init <bucket>`.
 
-## 6. Tell the user to restart
+## Fallback: manual per-IDE install
+
+If `eval-mcp install` won't run for some reason (e.g. corporate network blocks PyPI
+mid-install and the cache warm-up fails), here are the same operations done by hand:
+
+- **Claude Code**: `claude mcp add eval -s user -- uvx --from llm-evaluation-system eval-mcp`
+- **VS Code**: `code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}'`
+- **Kiro**: merge into `~/.kiro/settings/mcp.json` under `mcpServers.eval`:
+  ```json
+  {"mcpServers": {"eval": {"command": "uvx", "args": ["--from", "llm-evaluation-system", "eval-mcp"]}}}
+  ```
+- **Cursor**: same JSON shape, in `~/.cursor/mcp.json`. Or use the one-click deeplink: `cursor://anysphere.cursor-deeplink/mcp/install?name=eval&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJsbG0tZXZhbHVhdGlvbi1zeXN0ZW0iLCJldmFsLW1jcCJdfQ==`
+- **Codex**: append to `~/.codex/config.toml`: `[mcp_servers.eval]\ncommand = "uvx"\nargs = ["--from", "llm-evaluation-system", "eval-mcp"]`
+
+For any manual JSON/TOML edit: back up first, merge — never clobber, atomic write.
+
+Do **not** use `llm-evaluation-system@latest` in the IDE config — it forces a PyPI
+resolution on every MCP start (~20s cold start) and causes the MCP to show
+"disconnected" on first connect after any new release. Plain `llm-evaluation-system`
+is what's documented across the MCP ecosystem (reference servers, `mcp-atlassian`,
+etc.). Upgrade separately via `uv cache clean llm-evaluation-system`.
+
+## Tell the user to restart
+
+The `install` subcommand prints per-IDE restart hints. Quick recap:
 
 - Claude Code / Cursor / VS Code: reload/restart the window or app
-- Kiro: save mcp.json — picks up automatically
+- Kiro: picks up `mcp.json` automatically — no restart needed
 - Codex: must restart the CLI
 
 ## Uninstall
 
-Reverse step 3 (remove the `eval` entry), restart.
+Per IDE: remove the `eval` entry from the relevant config (Claude Code:
+`claude mcp remove eval -s user`; others: edit the JSON/TOML). Then restart.

@@ -44,6 +44,9 @@ dependencies = [
     # PDF reports + document QA generation
     "pypdf>=4.0.0",
     "fpdf2>=2.8.0",
+    # TOML round-trip for the Codex installer (preserves user comments
+    # and key order when merging the [mcp_servers.eval] table).
+    "tomlkit>=0.13.0",
 ]
 
 [project.optional-dependencies]

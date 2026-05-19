@@ -22,40 +22,48 @@ An LLM evaluation system where you describe what you want to evaluate in natural
 
 ### Install
 
-Pick your IDE and paste / click.
+One command — auto-detects which IDEs are on your machine (Claude Code,
+Kiro, VS Code, Cursor, Codex), asks which to configure, registers the
+MCP server in each, and warms the uvx cache:
 
-**Claude Code** — one CLI command:
+```bash
+uvx --from llm-evaluation-system eval-mcp install
+```
+
+Add `--yes` to skip prompts, `--ide claude-code` (or comma-separated)
+to target a specific subset, `--force` to overwrite an existing entry.
+Then restart your IDE.
+
+<details>
+<summary>Manual install (if you'd rather not use <code>eval-mcp install</code>)</summary>
+
+**Claude Code:**
 ```bash
 claude mcp add eval -s user -- uvx --from llm-evaluation-system eval-mcp
 ```
 
 **Cursor** — one-click deeplink: [Install eval-mcp in Cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=eval&config=eyJjb21tYW5kIjoidXZ4IiwiYXJncyI6WyItLWZyb20iLCJsbG0tZXZhbHVhdGlvbi1zeXN0ZW0iLCJldmFsLW1jcCJdfQ==)
 
-**Kiro** — add to `~/.kiro/settings/mcp.json`:
+**Kiro** — `~/.kiro/settings/mcp.json`:
 ```json
-{
-  "mcpServers": {
-    "eval": {
-      "command": "uvx",
-      "args": ["--from", "llm-evaluation-system", "eval-mcp"]
-    }
-  }
-}
+{"mcpServers": {"eval": {"command": "uvx", "args": ["--from", "llm-evaluation-system", "eval-mcp"]}}}
 ```
 
-**Codex CLI** — add to `~/.codex/config.toml`, then restart Codex:
+**Codex** — `~/.codex/config.toml`:
 ```toml
 [mcp_servers.eval]
 command = "uvx"
 args = ["--from", "llm-evaluation-system", "eval-mcp"]
 ```
 
-**VS Code** (with GitHub Copilot MCP) — one CLI command:
+**VS Code:**
 ```bash
 code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-system","eval-mcp"]}'
 ```
 
-Using a coding agent to install? Point it at [INSTALL.md](INSTALL.md) — it handles the config edit and asks about optional S3 team sharing.
+</details>
+
+Using a coding agent to install? Point it at [INSTALL.md](INSTALL.md) — it just runs `eval-mcp install --yes` and asks about optional S3 team sharing.
 
 ### Upgrading
 

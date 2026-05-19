@@ -101,7 +101,12 @@ async def handle_get_evaluation_details(args: Dict[str, Any]) -> List[TextConten
             },
         }
 
-        # Sample results (first 10)
+        # Sample results (first 10). We surface Score.metadata so callers
+        # see the per-criterion vote breakdown (votes_for/total/score) and
+        # the improvement_notes that the jury attached when a criterion
+        # scored 0. The prompt optimizer reads this metadata when picking
+        # failures to feed back to the proposer; the UI uses it to show
+        # why a sample failed without re-opening the .eval file.
         sample_results = []
         if log.samples:
             for sample in log.samples[:10]:
@@ -113,9 +118,14 @@ async def handle_get_evaluation_details(args: Dict[str, Any]) -> List[TextConten
                 if sample.output and sample.output.completion:
                     s["output"] = sample.output.completion[:200]
                 if sample.scores:
-                    s["scores"] = {
-                        k: v.value for k, v in sample.scores.items()
-                    }
+                    score_rows: Dict[str, Any] = {}
+                    for k, v in sample.scores.items():
+                        row: Dict[str, Any] = {"value": v.value}
+                        meta = getattr(v, "metadata", None) or {}
+                        if meta.get("criteria_results"):
+                            row["criteria_results"] = meta["criteria_results"]
+                        score_rows[k] = row
+                    s["scores"] = score_rows
                 sample_results.append(s)
 
         eval_data["sampleResults"] = sample_results

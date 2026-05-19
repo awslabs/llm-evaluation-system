@@ -24,7 +24,14 @@ from eval_mcp.core.user_storage import (
 
 
 def build_judge_system_prompt(criteria: List[Dict[str, str]]) -> str:
-    """Build the judge system prompt from criteria."""
+    """Build the judge system prompt from criteria.
+
+    Includes the per-criterion improvement-note protocol used by the
+    prompt optimizer: when a criterion scores 0, the judge fills in a
+    sibling ``<criterion>_improvement`` field with a one-sentence hint
+    about what the answer should change. The optimizer reads these
+    notes when proposing a better prompt.
+    """
     criteria_lines = "\n".join([
         f"- {c['name']}: {c['description']}"
         for c in criteria
@@ -34,6 +41,10 @@ def build_judge_system_prompt(criteria: List[Dict[str, str]]) -> str:
         "You are a judge evaluating an AI answer against a reference answer.\n"
         "Score each criterion as 1 (pass) or 0 (fail), "
         "then call the submit_scores tool with your scores.\n\n"
+        "Whenever you score a criterion 0, also fill in its sibling "
+        "<criterion>_improvement field with ONE short sentence describing "
+        "what the answer should change to score 1. Leave it empty when "
+        "you score 1.\n\n"
         f"Criteria:\n{criteria_lines}"
     )
 
@@ -87,6 +98,11 @@ SYSTEM_PROMPT = CONFIG["system_prompt"]
 
 
 def _build_scoring_tool():
+    # Schema is intentionally flat: each criterion gets a sibling
+    # `<name>_improvement` string slot. Nested objects-per-criterion would
+    # be cleaner but Inspect's tool-forced output handles flat int/string
+    # fields most reliably across models. Improvement slots are optional —
+    # old judge runs without them still parse fine.
     properties = {{}}
     required = []
     for c in CRITERIA:
@@ -96,23 +112,37 @@ def _build_scoring_tool():
             "enum": [0, 1],
         }}
         required.append(c["name"])
+        properties[f"{{c['name']}}_improvement"] = {{
+            "type": "string",
+            "description": (
+                f"If {{c['name']}} scored 0, ONE short sentence on what the "
+                "answer should change to satisfy the criterion. Empty string "
+                "when scored 1."
+            ),
+        }}
     properties["reason"] = {{
         "type": "string",
-        "description": "Brief explanation of the scoring decision",
+        "description": "Brief overall explanation of the scoring decision",
     }}
     required.append("reason")
 
     return ToolInfo(
         name="submit_scores",
-        description="Submit binary scores for each evaluation criterion",
+        description="Submit binary scores plus per-criterion improvement hints",
         parameters=ToolParams(type="object", properties=properties, required=required),
     )
 
 
 def _extract_scores(output, criteria_names):
+    """Pull scores + per-criterion improvement notes + shared reason out
+    of the judge's submit_scores call. Returns
+    ``(scores, reason, improvements, error)`` where improvements maps
+    criterion name -> string (empty when the judge passed the criterion
+    or omitted the hint).
+    """
     if not output or not output.message or not output.message.tool_calls:
         text = output.completion[:200] if output and output.completion else "(empty)"
-        return None, None, f"No tool call. Response: {{text}}"
+        return None, None, None, f"No tool call. Response: {{text}}"
 
     args = {{}}
     for tc in output.message.tool_calls:
@@ -120,14 +150,18 @@ def _extract_scores(output, criteria_names):
             args.update(tc.arguments)
 
     if not args:
-        return None, None, f"No submit_scores tool call found"
+        return None, None, None, f"No submit_scores tool call found"
 
     missing = [n for n in criteria_names if n not in args]
     if missing:
-        return None, None, f"Missing criteria: {{missing}}. Got: {{list(args.keys())}}"
+        return None, None, None, f"Missing criteria: {{missing}}. Got: {{list(args.keys())}}"
 
     scores = {{n: int(bool(args[n])) for n in criteria_names}}
-    return scores, args.get("reason", ""), None
+    improvements = {{
+        n: str(args.get(f"{{n}}_improvement", "") or "").strip()
+        for n in criteria_names
+    }}
+    return scores, args.get("reason", ""), improvements, None
 
 
 @scorer(metrics=[mean(), stderr()])
@@ -143,6 +177,11 @@ def jury_scorer():
         tool = _build_scoring_tool()
 
         votes = {{n: [] for n in criteria_names}}
+        # Per-criterion improvement hints collected from judges that
+        # scored 0. List of {{judge, note}} pairs so downstream
+        # consumers (optimizer, report) can attribute hints to judges
+        # and de-dupe across them.
+        improvements_per_criterion = {{n: [] for n in criteria_names}}
         details = []
         errors = []
 
@@ -160,10 +199,14 @@ def jury_scorer():
                     tool_choice="any",
                 )
 
-                scores, reason, err = _extract_scores(result, criteria_names)
+                scores, reason, improvements, err = _extract_scores(result, criteria_names)
                 if scores is not None:
                     for n in criteria_names:
                         votes[n].append(scores[n])
+                        if scores[n] == 0 and improvements and improvements.get(n):
+                            improvements_per_criterion[n].append(
+                                {{"judge": label, "note": improvements[n]}}
+                            )
                     details.append(f"  {{label}}: {{scores}} - {{reason}}")
                 else:
                     errors.append(f"  {{label}}: {{err}}")
@@ -179,7 +222,10 @@ def jury_scorer():
                 results.append({{"name": n, "votes_for": 0, "total": 0, "score": 0.0, "note": "no valid responses"}})
             else:
                 vf = sum(v)
-                results.append({{"name": n, "votes_for": vf, "total": len(v), "score": vf / len(v)}})
+                entry = {{"name": n, "votes_for": vf, "total": len(v), "score": vf / len(v)}}
+                if improvements_per_criterion[n]:
+                    entry["improvement_notes"] = improvements_per_criterion[n]
+                results.append(entry)
 
         # Sample score = mean of per-criterion judge-fractions. No thresholds.
         scored = [r for r in results if "note" not in r]
@@ -244,7 +290,14 @@ def create_inspect_task_file(
     )
     header = TASK_FILE_HEADER.format(config_name=config_name)
 
-    if prompts and len(prompts) > 1:
+    # Apply prompt_template whenever a non-default prompt is given, even
+    # for a single prompt. The old guard `len > 1` silently dropped
+    # single custom templates — caller passes a wrapper, Inspect runs
+    # without it. The optimizer triggered this (it always evaluates one
+    # candidate prompt at a time); single-prompt evals created from the
+    # chat agent path hit the same latent bug.
+    has_custom_prompt = bool(prompts) and any(p and p != "{question}" for p in prompts)
+    if has_custom_prompt:
         tasks = ""
         for i, prompt in enumerate(prompts):
             # prompt_template() uses {prompt} as the placeholder for input text

@@ -244,6 +244,26 @@ def create_viewer_app() -> FastAPI:
         except Exception:
             return {"documents": [], "storage": "disk"}
 
+    # ---------- Prompts Optimized ----------
+    #
+    # Mirrors backend/api/optimizations.py but resolves the user from
+    # EVAL_MCP_USER (same pattern as the datasets/judges routes above)
+    # so the local viewer surfaces the same data the full backend would.
+
+    @app.get("/api/optimizations/list")
+    async def list_optimizations(search: str = ""):
+        from eval_mcp.core.user_storage import list_optimizations_from_db
+        rows = list_optimizations_from_db(_viewer_user(), search_term=search)
+        return {"optimizations": rows}
+
+    @app.get("/api/optimizations/detail")
+    async def get_optimization_detail(id: str):
+        from eval_mcp.core.user_storage import get_optimization_from_db
+        record = get_optimization_from_db(_viewer_user(), id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Optimization not found")
+        return record
+
     # Serve static files
     if STATIC_DIR.exists():
         @app.get("/results")
@@ -254,6 +274,10 @@ def create_viewer_app() -> FastAPI:
         async def data_page():
             # The Next static export emits one .html per route.
             return FileResponse(STATIC_DIR / "data.html")
+
+        @app.get("/optimizations")
+        async def optimizations_page():
+            return FileResponse(STATIC_DIR / "optimizations.html")
 
         @app.get("/")
         async def index():

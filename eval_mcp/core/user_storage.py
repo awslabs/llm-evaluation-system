@@ -610,6 +610,107 @@ def delete_dataset_from_db(user_id: str, dataset_id: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# Optimizations — prompt-optimizer runs persist a single JSON record linking
+# the per-iteration eval config names + the best prompt. Each iteration is
+# still a real eval in its own .eval log, so list_evaluations keeps working;
+# this layer just lets the optimization tab group them.
+# ---------------------------------------------------------------------------
+
+
+def save_optimization_to_db(user_id: str, record: dict[str, Any]) -> str:
+    """Persist an optimization run. ``record`` is the full plan-shaped
+    dict (id, dataset, judge, providers, initial_prompt, winner_prompt,
+    history, test_results, created_at). Returns the optimization id."""
+    optimization_id = record.get("id") or _generate_id("opt")
+    record["id"] = optimization_id
+    record["type"] = "optimization"
+    if "created_at" not in record:
+        record["created_at"] = int(datetime.now().timestamp() * 1000)
+    record["updated_at"] = int(datetime.now().timestamp() * 1000)
+
+    if _s3_enabled():
+        _s3_save_json(user_id, "optimizations", f"{optimization_id}.json", record)
+    else:
+        store_dir = _get_json_store_dir(user_id, "optimizations")
+        _save_json_file(store_dir / f"{optimization_id}.json", record, user_id)
+
+    return optimization_id
+
+
+def get_optimization_from_db(
+    user_id: str, optimization_id: str
+) -> Optional[dict[str, Any]]:
+    if _s3_enabled():
+        data = _s3_load_json(user_id, "optimizations", f"{optimization_id}.json")
+    else:
+        store_dir = _get_json_store_dir(user_id, "optimizations")
+        data = _load_json_file(store_dir / f"{optimization_id}.json")
+
+    if data and data.get("type") == "optimization":
+        return data
+    return None
+
+
+def list_optimizations_from_db(
+    user_id: str, search_term: str = ""
+) -> list[dict[str, Any]]:
+    """Return optimization summary rows newest-first. Filter by
+    case-insensitive substring match on dataset / initial_prompt /
+    winner_prompt when ``search_term`` is non-empty."""
+    if _s3_enabled():
+        entries = _s3_list_json(user_id, "optimizations")
+    else:
+        store_dir = _get_json_store_dir(user_id, "optimizations")
+        entries = _list_json_files(store_dir)
+
+    out: list[dict[str, Any]] = []
+    needle = search_term.lower().strip()
+    for entry in entries:
+        if entry.get("type") != "optimization":
+            continue
+        if needle:
+            haystack = " ".join([
+                str(entry.get("dataset", "")),
+                str(entry.get("initial_prompt", "")),
+                str(entry.get("winner_prompt", "")),
+            ]).lower()
+            if needle not in haystack:
+                continue
+        out.append({
+            "id": entry["id"],
+            "dataset": entry.get("dataset"),
+            "judge": entry.get("judge"),
+            "providers": entry.get("providers", []),
+            "winner_iter": entry.get("winner_iter"),
+            "winner_test_score": entry.get("winner_test_score"),
+            "iterations_run": len(entry.get("history", [])),
+            "status": entry.get("status", "complete"),
+            "created_at": entry.get("created_at"),
+        })
+    out.sort(key=lambda r: r.get("created_at") or 0, reverse=True)
+    return out
+
+
+def delete_optimization_from_db(user_id: str, optimization_id: str) -> bool:
+    if _s3_enabled():
+        return _s3_delete_json(
+            user_id, "optimizations", f"{optimization_id}.json"
+        )
+    store_dir = _get_json_store_dir(user_id, "optimizations")
+    safe_id = os.path.basename(optimization_id)
+    if not safe_id or safe_id != optimization_id:
+        raise ValueError(f"invalid optimization_id: {optimization_id!r}")
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    target_real = os.path.realpath(str(store_dir / f"{safe_id}.json"))
+    if not target_real.startswith(base_real + os.sep):
+        raise ValueError(f"path escape attempt: {target_real}")
+    if os.path.exists(target_real):
+        os.unlink(target_real)
+        return True
+    return False
+
+
 def update_dataset_in_db(
     user_id: str,
     dataset_id: str,

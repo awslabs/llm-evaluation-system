@@ -24,6 +24,7 @@ const nextConfig: NextConfig = {
       { source: "/api/judges", destination: `${backendUrl}/api/judges` },
       { source: "/api/judges/:path*", destination: `${backendUrl}/api/judges/:path*` },
       { source: "/api/compare/:path*", destination: `${backendUrl}/api/compare/:path*` },
+      { source: "/api/optimizations/:path*", destination: `${backendUrl}/api/optimizations/:path*` },
       { source: "/api/inspect/:path*", destination: `${backendUrl}/api/inspect/:path*` },
       { source: "/inspect/:path*", destination: `${backendUrl}/inspect/:path*` },
     ];

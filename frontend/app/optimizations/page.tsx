@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { useAuth, login } from "@/contexts/AuthContext";
 import { useSearchParams } from "next/navigation";
+import Header from "@/components/Header";
 import OptimizationRail from "@/components/optimizations/OptimizationRail";
 import OptimizationDetail from "@/components/optimizations/OptimizationDetail";
 
@@ -60,9 +61,7 @@ function OptimizationsContent() {
 
   return (
     <div className="flex h-screen flex-col bg-ink">
-      <div className="border-b border-rule px-6 py-3">
-        <span className="eyebrow">Prompts Optimized</span>
-      </div>
+      <Header />
 
       <div className="flex flex-1 overflow-hidden">
         <OptimizationRail selectedId={selectedId} onSelect={handleSelect} />

@@ -33,6 +33,9 @@ from eval_mcp.tools.list_datasets import handle_list_datasets
 from eval_mcp.tools.list_judges import handle_list_judges
 from eval_mcp.tools.list_evaluations import handle_list_evaluations
 from eval_mcp.tools.get_evaluation_details import handle_get_evaluation_details
+from eval_mcp.tools.optimize_prompt import handle_optimize_prompt
+from eval_mcp.tools.list_optimizations import handle_list_optimizations
+from eval_mcp.tools.get_optimization_details import handle_get_optimization_details
 from eval_mcp.tools.run_eval import (
     handle_run_evaluation,
     handle_retry_evaluation,
@@ -827,6 +830,116 @@ async def get_evaluation_details(
     _auto_pull(user_id)
     args = {"evalId": evalId, "user_id": _user(user_id)}
     result = await handle_get_evaluation_details(args)
+    return result[0].text
+
+
+@mcp.tool(annotations=CREATE_REMOTE)
+async def optimize_prompt(
+    dataset: DatasetName,
+    judge: JudgeName,
+    initial_prompt: str = "{question}",
+    providers: ProvidersList = None,
+    max_iterations: int = 3,
+    sample_size: int = 10,
+    test_holdout: float = 0.4,
+    user_id: str = None,
+) -> str:
+    """
+    Iteratively improve a prompt template against a dataset using
+    failure-driven LLM feedback. Analog of skill-creator's run_loop.py.
+
+    Splits the dataset into train (60%) / test (40%). Each iteration:
+      1. Score the current prompt on a random train sample.
+      2. Show the optimizer LLM the failures + per-criterion improvement
+         notes from the judges.
+      3. The optimizer proposes a new prompt — edits, not rewrites, when
+         the current prompt is long and structured.
+      4. Repeat up to `max_iterations` or until train converges.
+    Finally evaluates every attempted prompt on the held-out test set;
+    winner is the highest test pass rate. Ties broken by earlier iter.
+
+    Args:
+        dataset: Dataset name from list_datasets.
+        judge: Judge name from list_judges (provides the criteria).
+        initial_prompt: Starting prompt template. MUST contain `{question}`.
+            Defaults to `{question}` (pass-through, no wrapping).
+        providers: Provider model IDs. Stored for reference; v1 scores
+            in-process via the default Bedrock model singleton.
+        max_iterations: Hard ceiling on refinement passes (default 3).
+        sample_size: Train samples scored per iteration (default 10).
+        test_holdout: Fraction of dataset held out for test scoring (default 0.4).
+
+    Returns:
+        JSON: optimization_id, winner_iter, winner_test_score, winner_prompt,
+        per-iter train pass rates, status.
+    """
+    _auto_pull(user_id)
+    args = {
+        "user_id": _user(user_id),
+        "dataset": dataset,
+        "judge": judge,
+        "initial_prompt": initial_prompt,
+        "providers": providers or [],
+        "max_iterations": max_iterations,
+        "sample_size": sample_size,
+        "test_holdout": test_holdout,
+    }
+    result = await handle_optimize_prompt(bedrock, args)
+    _auto_push(user_id)
+    return result[0].text
+
+
+@mcp.tool(annotations=READ_LOCAL)
+async def list_optimizations(
+    user_id: str = None,
+    limit: LimitParam = 20,
+    offset: OffsetParam = 0,
+    search: str = "",
+    response_format: ResponseFormat = "json",
+) -> str:
+    """
+    List prompt-optimization runs newest-first.
+
+    Args:
+        limit: Page size (default 20).
+        offset: Page start (default 0).
+        search: Optional substring filter on dataset / initial / winner prompt.
+        response_format: "json" (default) or "markdown".
+
+    Returns:
+        JSON or markdown listing with pagination metadata.
+    """
+    _auto_pull(user_id)
+    args = {
+        "user_id": _user(user_id),
+        "limit": limit,
+        "offset": offset,
+        "search": search,
+        "response_format": response_format,
+    }
+    result = await handle_list_optimizations(args)
+    return result[0].text
+
+
+@mcp.tool(annotations=READ_LOCAL)
+async def get_optimization_details(
+    optimization_id: str,
+    user_id: str = None,
+) -> str:
+    """
+    Get the full record for a single optimization run.
+
+    Returns: initial_prompt, winner_prompt, winner_iter, per-iteration
+    history (prompt text + train pass rate), per-iteration test scores,
+    rationales for each proposal, and metadata (dataset, judge,
+    providers, status).
+
+    Args:
+        optimization_id: ID from list_optimizations.
+    """
+    _auto_pull(user_id)
+    args = {"user_id": _user(user_id), "optimization_id": optimization_id}
+    result = await handle_get_optimization_details(args)
     return result[0].text
 
 

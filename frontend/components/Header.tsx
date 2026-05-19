@@ -15,6 +15,7 @@ const NAV: NavItem[] = [
   { href: "/chat", label: "Chat", fullOnly: true },
   { href: "/history", label: "History", fullOnly: true },
   { href: "/results", label: "Results" },
+  { href: "/optimizations", label: "Prompts Optimized" },
   { href: "/data", label: "Data" },
 ];
 

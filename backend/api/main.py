@@ -1560,6 +1560,7 @@ async def delete_judge(
 # ============== Inspect AI Viewer ==============
 
 from backend.api.compare import router as compare_router
+from backend.api.optimizations import router as optimizations_router
 from backend.core.inspect_viewer import create_viewer_app, get_viewer_dist_directory
 from inspect_ai._view.fastapi_server import _InspectStaticFiles
 from inspect_ai._util.file import filesystem
@@ -1567,6 +1568,7 @@ from inspect_ai._view._dist import resolve_dist_directory
 
 # Mount comparison API before the Inspect viewer (include_router takes priority over mount)
 app.include_router(compare_router, prefix="/api/compare")
+app.include_router(optimizations_router, prefix="/api/optimizations")
 
 _log_dir = os.environ.get("INSPECT_LOG_DIR", os.environ.get("USER_STORAGE_BASE", "backend/users"))
 _fs = filesystem(_log_dir)

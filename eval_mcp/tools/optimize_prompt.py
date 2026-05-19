@@ -75,6 +75,10 @@ from eval_mcp.core.user_storage import (
 )
 from eval_mcp.tools.create_config import create_inspect_task_file
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
+from eval_mcp.tools.run_eval import (
+    _running_evaluations,
+    _terminate_process_gracefully,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -323,6 +327,7 @@ async def _snapshot_log_set(log_dir: str) -> set:
 
 
 async def _spawn_inspect_eval(
+    user_id: str,
     user_dir: Path,
     config_name: str,
     providers: List[str],
@@ -336,6 +341,12 @@ async def _spawn_inspect_eval(
     providers were validated when the optimization started), no S3 sync
     per iter, no retry pass. Those are correct for an interactive eval;
     inside a tight loop they're wasted work.
+
+    Registers the subprocess in ``run_eval._running_evaluations`` so the
+    chat backend's stop button (which calls ``cancel_user_evaluation``)
+    can kill the entire process group. Without this, hitting stop
+    mid-optimization left orphaned Inspect subprocesses that kept
+    writing to the user's storage while subsequent requests read it.
     """
     _refresh_keys_from_file()
     env = os.environ.copy()
@@ -365,14 +376,31 @@ async def _spawn_inspect_eval(
         cwd=str(user_dir),
         start_new_session=True,
     )
+    # Register so ``cancel_user_evaluation`` can SIGTERM the process
+    # group. The eval_id is descriptive enough that the chat backend's
+    # cancel response surfaces "optimizer iter X" rather than a bare
+    # config name.
+    _running_evaluations[user_id] = {
+        "process": process,
+        "eval_id": f"optim_{config_name}",
+        "config_name": config_name,
+    }
     try:
-        await asyncio.wait_for(process.wait(), timeout=ITER_SUBPROCESS_TIMEOUT_S)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
-        raise RuntimeError(
-            f"inspect eval timed out after {ITER_SUBPROCESS_TIMEOUT_S}s for {config_name}"
-        )
+        try:
+            await asyncio.wait_for(process.wait(), timeout=ITER_SUBPROCESS_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            await _terminate_process_gracefully(process)
+            raise RuntimeError(
+                f"inspect eval timed out after {ITER_SUBPROCESS_TIMEOUT_S}s for {config_name}"
+            )
+        except asyncio.CancelledError:
+            # Chat backend cancelled the task. Kill the process group
+            # so we don't leak inspect subprocesses, then re-raise so
+            # the optimizer loop can record status="partial".
+            await _terminate_process_gracefully(process)
+            raise
+    finally:
+        _running_evaluations.pop(user_id, None)
 
     # Always capture stderr — even on success — so we can include it in
     # error context when the subprocess "succeeds" but produces no log
@@ -465,7 +493,7 @@ async def _run_inspect_iteration(
     )
 
     before = await _snapshot_log_set(log_dir)
-    await _spawn_inspect_eval(user_dir, config_name, providers, log_dir)
+    await _spawn_inspect_eval(user_id, user_dir, config_name, providers, log_dir)
     new_logs = await _new_logs_since(log_dir, before)
     if not new_logs:
         raise RuntimeError(
@@ -511,7 +539,7 @@ async def _run_inspect_test_ranking(
     )
 
     before = await _snapshot_log_set(log_dir)
-    await _spawn_inspect_eval(user_dir, config_name, providers, log_dir)
+    await _spawn_inspect_eval(user_id, user_dir, config_name, providers, log_dir)
     new_logs = await _new_logs_since(log_dir, before)
     if not new_logs:
         return None, {}

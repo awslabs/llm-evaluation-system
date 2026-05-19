@@ -1,6 +1,7 @@
 "use client";
 
 import { useAuth, login } from "@/contexts/AuthContext";
+import { useChat } from "@/contexts/ChatContext";
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Header from "@/components/Header";
@@ -38,6 +39,7 @@ function preview(session: ChatSession): string {
 export default function HistoryPage() {
   const router = useRouter();
   const { user, isLoading: authLoading } = useAuth();
+  const { createNewChat } = useChat();
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState("");
@@ -101,7 +103,14 @@ export default function HistoryPage() {
               </h1>
             </div>
             <button
-              onClick={() => router.push("/chat")}
+              onClick={() => {
+                // Explicit "start fresh" — push a new session into the
+                // context BEFORE navigating, so /chat's useEffect sees a
+                // newly-set currentSessionId rather than the previous
+                // chat's id and keeps it instead of starting over.
+                createNewChat();
+                router.push("/chat");
+              }}
               className="eyebrow inline-flex items-center gap-2 border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone"
             >
               <span className="font-mono text-sm leading-none">+</span>

@@ -36,8 +36,9 @@ DEFAULT_CRITERIA: List[Dict[str, str]] = [
     },
 ]
 
-# Maximum criteria allowed (5 or fewer recommended for clearest signal)
-MAX_CRITERIA = 10
+# Maximum criteria allowed. The critic loop in generate_judge.py picks
+# the final count within this ceiling — most domains converge around 6–10.
+MAX_CRITERIA = 15
 
 # Minimum responses for reliable scoring
 MIN_RESPONSES_FOR_JURY = 50

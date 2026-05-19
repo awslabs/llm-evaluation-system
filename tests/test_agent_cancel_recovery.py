@@ -110,6 +110,35 @@ def test_multiple_orphan_tool_uses_all_get_results():
     assert {tr["tool_use_id"] for tr in tool_results} == {"toolu_a", "toolu_b"}
 
 
+def test_cancel_mid_bedrock_stream_inserts_synthetic_assistant():
+    """The other cancel-recovery case: the previous request was cancelled
+    BEFORE any assistant turn was appended (cancel landed inside the
+    Bedrock streaming await, before `_agentic_loop_streaming` reached
+    its `conversation_history.append` step). History ends with a user
+    message; naively appending another user message produces two
+    consecutive user messages and Bedrock 400s.
+
+    Build a user message in that state, and the call site must end up
+    with a synthetic assistant turn between the two user messages so
+    alternation is preserved.
+    """
+    agent = _new_agent()
+    # Prior turn started but was cancelled mid-Bedrock-stream — only
+    # the user message landed.
+    agent.conversation_history = [
+        {"role": "user", "content": "run a simple eval"},
+    ]
+
+    msg = agent._build_user_message("run a simple eval for me")
+
+    # The build call should have injected a synthetic assistant turn
+    # into history, and returned a fresh user message.
+    assert msg == {"role": "user", "content": "run a simple eval for me"}
+    assert len(agent.conversation_history) == 2
+    assert agent.conversation_history[-1]["role"] == "assistant"
+    assert "cancelled" in agent.conversation_history[-1]["content"].lower()
+
+
 def test_history_after_build_alternates_roles():
     """Integration check: after _build_user_message is appended, the
     history walks user/assistant/user/assistant — no two consecutive
@@ -127,3 +156,15 @@ def test_history_after_build_alternates_roles():
     # No two consecutive same-role entries
     for prev, curr in zip(roles, roles[1:]):
         assert prev != curr, f"consecutive same-role messages: {roles}"
+
+
+def test_history_after_mid_stream_cancel_alternates():
+    """Same alternation invariant for the mid-Bedrock-stream cancel
+    shape: history starts with [user] only, and after the new user
+    message is appended the result must still alternate."""
+    agent = _new_agent()
+    agent.conversation_history = [{"role": "user", "content": "first"}]
+    agent.conversation_history.append(agent._build_user_message("second"))
+
+    roles = [m["role"] for m in agent.conversation_history]
+    assert roles == ["user", "assistant", "user"], roles

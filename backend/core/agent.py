@@ -208,20 +208,60 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
         ]
 
     def _build_user_message(self, user_text: str) -> Dict[str, Any]:
-        """Build the next user message, prepending orphan tool_result
-        blocks if the prior turn was cancelled mid-tool-call. Returns a
-        single ``{role: "user", content: ...}`` dict — never two messages.
+        """Build the next user message, healing whatever role-alternation
+        breakage the prior cancel may have left behind. Returns a single
+        ``{role: "user", content: ...}`` dict — caller appends it once.
+
+        Three breakage shapes we have to cover:
+
+        1. Prior assistant turn ended with unanswered ``tool_use`` blocks
+           (cancelled mid-tool-execution). Bundle synthetic ``tool_result``
+           blocks for each one into THIS user message — Bedrock requires
+           every tool_use to have a matching tool_result, AND requires
+           the closing-out message and the user's new text to be one
+           message (consecutive same-role messages also error out).
+
+        2. No assistant turn was appended at all because the cancel
+           landed mid-Bedrock-stream, before the streaming loop reached
+           its "append assistant" step. ``conversation_history`` ends
+           with a user message, and naively appending another user
+           message would hit the same alternation error. Insert a
+           synthetic assistant ack first so the new turn follows an
+           assistant turn.
+
+        3. Normal — last message is from assistant, no orphan tool_use.
+           Just return the new user message as a plain string.
         """
         orphan_blocks = self._orphan_tool_result_blocks()
-        if not orphan_blocks:
-            return {"role": "user", "content": user_text}
-        return {
-            "role": "user",
-            "content": [
-                *orphan_blocks,
-                {"type": "text", "text": user_text},
-            ],
-        }
+        if orphan_blocks:
+            # Case 1 — last msg is assistant with tool_use; bundle
+            # tool_results + new text into one user message.
+            return {
+                "role": "user",
+                "content": [
+                    *orphan_blocks,
+                    {"type": "text", "text": user_text},
+                ],
+            }
+
+        # Case 2 — last msg is user (cancelled before any assistant
+        # turn was appended). Insert a synthetic assistant message so
+        # the alternation invariant holds.
+        if (
+            self.conversation_history
+            and self.conversation_history[-1].get("role") == "user"
+        ):
+            agent_logger.debug(
+                "Inserting synthetic assistant turn between two user messages "
+                "(cancel landed mid-Bedrock-stream before assistant turn was appended)"
+            )
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": "[Previous request was cancelled.]",
+            })
+
+        # Case 3 — straightforward.
+        return {"role": "user", "content": user_text}
 
     async def run_conversation_turn(self, user_message: str) -> str:
         """

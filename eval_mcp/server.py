@@ -885,7 +885,6 @@ async def optimize_prompt(
         "test_holdout": test_holdout,
     }
     result = await handle_optimize_prompt(bedrock, args)
-    _auto_push(user_id)
     return result[0].text
 
 

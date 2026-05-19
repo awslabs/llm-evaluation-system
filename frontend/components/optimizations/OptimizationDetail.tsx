@@ -1,12 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 
 interface IterationRecord {
   iter: number;
   prompt: string;
   train_pass_rate: number;
   n_train_samples: number;
+  // run_id of the Inspect AI eval that scored this iteration. Each
+  // iteration is a real eval, so this lets the UI deep-link straight
+  // to the Results tab for the underlying samples and judge votes.
+  eval_run_id?: string | null;
 }
 
 interface OptimizationRecord {
@@ -20,6 +24,9 @@ interface OptimizationRecord {
   winner_test_score: number;
   history: IterationRecord[];
   test_scores_by_iter: Record<string, number>;
+  // run_id of the final test-time ranking eval (one Inspect run scoring
+  // all history prompts against the held-out test split).
+  test_run_id?: string | null;
   rationales: Record<string, string>;
   train_size: number;
   test_size: number;
@@ -251,6 +258,15 @@ export default function OptimizationDetail({ optimizationId }: Props) {
             {fmtPct(record.winner_test_score)}
           </p>
           <p className="font-mono text-[10px] text-bone-mute">iter #{record.winner_iter}</p>
+          {record.test_run_id && (
+            <a
+              href={`/results?group=${encodeURIComponent(record.test_run_id)}`}
+              className="eyebrow mt-2 inline-block border border-rule px-2 py-1 transition-colors hover:border-bone-mute hover:text-bone-dim"
+              title="Open the test-time ranking eval in Results"
+            >
+              View test eval →
+            </a>
+          )}
         </div>
       </div>
 
@@ -294,8 +310,8 @@ export default function OptimizationDetail({ optimizationId }: Props) {
             const testScore = record.test_scores_by_iter?.[String(h.iter)];
             const rationale = record.rationales?.[String(h.iter)];
             return (
-              <>
-                <tr key={`row-${h.iter}`} className={isWinner ? "bg-ink-elev/30" : ""}>
+              <Fragment key={`iter-${h.iter}`}>
+                <tr className={isWinner ? "bg-ink-elev/30" : ""}>
                   <td className="border-b border-rule-soft px-3 py-2 font-mono tabular-nums">
                     {isWinner ? <span className="text-ember">★ {h.iter}</span> : h.iter}
                   </td>
@@ -313,16 +329,27 @@ export default function OptimizationDetail({ optimizationId }: Props) {
                     {h.prompt && h.prompt.length > 120 ? "…" : ""}
                   </td>
                   <td className="border-b border-rule-soft px-3 py-2 text-right">
-                    <button
-                      onClick={() => setExpandedIter(isOpen ? null : h.iter)}
-                      className="eyebrow border border-rule px-2 py-1 transition-colors hover:border-bone-mute hover:text-bone-dim"
-                    >
-                      {isOpen ? "Close" : "Open"}
-                    </button>
+                    <div className="inline-flex items-center gap-2">
+                      <button
+                        onClick={() => setExpandedIter(isOpen ? null : h.iter)}
+                        className="eyebrow inline-flex h-7 items-center border border-rule px-2 leading-none transition-colors hover:border-bone-mute hover:text-bone-dim"
+                      >
+                        {isOpen ? "Close" : "Open"}
+                      </button>
+                      {h.eval_run_id && (
+                        <a
+                          href={`/results?group=${encodeURIComponent(h.eval_run_id)}`}
+                          className="eyebrow inline-flex h-7 items-center border border-rule px-2 leading-none transition-colors hover:border-bone-mute hover:text-bone-dim"
+                          title="Open this iteration's eval in Results"
+                        >
+                          Eval →
+                        </a>
+                      )}
+                    </div>
                   </td>
                 </tr>
                 {isOpen && (
-                  <tr key={`exp-${h.iter}`}>
+                  <tr>
                     <td colSpan={5} className="border-b border-rule-soft bg-ink-elev/20 px-3 py-3">
                       {rationale && (
                         <div className="mb-3">
@@ -337,7 +364,7 @@ export default function OptimizationDetail({ optimizationId }: Props) {
                     </td>
                   </tr>
                 )}
-              </>
+              </Fragment>
             );
           })}
         </tbody>

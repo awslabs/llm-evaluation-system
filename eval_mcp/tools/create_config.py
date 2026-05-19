@@ -290,7 +290,14 @@ def create_inspect_task_file(
     )
     header = TASK_FILE_HEADER.format(config_name=config_name)
 
-    if prompts and len(prompts) > 1:
+    # Apply prompt_template whenever a non-default prompt is given, even
+    # for a single prompt. The old guard `len > 1` silently dropped
+    # single custom templates — caller passes a wrapper, Inspect runs
+    # without it. The optimizer triggered this (it always evaluates one
+    # candidate prompt at a time); single-prompt evals created from the
+    # chat agent path hit the same latent bug.
+    has_custom_prompt = bool(prompts) and any(p and p != "{question}" for p in prompts)
+    if has_custom_prompt:
         tasks = ""
         for i, prompt in enumerate(prompts):
             # prompt_template() uses {prompt} as the placeholder for input text

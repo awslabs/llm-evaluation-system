@@ -2,39 +2,47 @@
 
 Analog of skill-creator's ``run_loop.py``: starting from an initial prompt
 template (with ``{question}`` placeholder), iteratively propose better
-versions based on per-sample failures, then pick the winner by held-out
-test score so the chosen prompt isn't overfit to the iteration sample.
+versions based on per-sample failures from the multi-judge jury, then
+pick the winner by held-out test score so the chosen prompt isn't
+overfit to the iteration sample.
 
-## Simplification vs the plan
+## How a single iteration works
 
-The plan called for each iteration to be a "real eval" via Inspect AI's
-subprocess so it shows up in ``list_evaluations``. For v1 we instead
-score in-process via direct Bedrock calls — same Jury, same criteria,
-same per-criterion improvement-note capture, just no Inspect subprocess.
-Reasons:
+Each iteration is a real Inspect AI evaluation — same subprocess, same
+``jury_scorer()``, same ``.eval`` log, same provider validation as any
+other eval in this system. The optimizer never duplicates scoring code;
+it routes through the same pipeline a hand-run benchmark would.
 
-- ~10× faster per iteration (no subprocess startup, no log file IO).
-- Reuses the proven pattern from ``generate_judge.refine_criteria_loop``.
-- Iterations show up in the new optimizations tab; users who want a
-  full-fledged eval entry for the winner can run
-  ``create_eval_config(prompts=[winner])`` afterward.
+1. Sample N pairs from the train split.
+2. Write them to a temp dataset file in the user dir.
+3. Build a task file via ``create_inspect_task_file`` with the current
+   prompt template + judge config + providers.
+4. Spawn ``inspect eval`` as a subprocess.
+5. Read the ``.eval`` log: per sample, pull score and
+   ``metadata['criteria_results']`` (with per-criterion improvement notes
+   from each judge that scored 0).
+6. Feed failures to the optimizer LLM, get a new prompt, recurse.
+
+Each iteration produces a real ``run_id`` stored in the optimization
+record. From the "Prompts Optimized" tab the user can click an iteration
+and jump straight to its evaluation in Results.
 
 ## Anti-overfit
 
-- Stratified random train/test split with a fixed seed.
-- Optimizer LLM sees only train results — never test scores during
-  iteration.
+- Random train/test split with a fixed seed.
+- Optimizer LLM sees only train results — never test scores during the
+  loop.
 - Winner picked by **test** pass rate, not train.
-- History feed includes prior attempts with explicit "don't repeat"
-  framing so the model proposes structurally different variants.
+- History feed shows prior attempts with explicit "don't repeat" framing
+  so the model proposes structurally different variants.
 - Full current prompt is passed to the optimizer (no truncation) so it
   can do targeted edits instead of rewrites.
 
 ## Crash safety
 
 Any uncaught exception inside an iteration returns the most recent
-known-good prompt + the partial history. A flaky round never wipes out
-useful work.
+known-good prompt plus the partial history. A flaky subprocess never
+wipes out useful work.
 """
 
 from __future__ import annotations
@@ -44,18 +52,29 @@ import json
 import logging
 import os
 import random
+import re
+import shlex
+import sys
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from mcp.types import TextContent
 
+from inspect_ai._view.common import list_eval_logs_async
+from inspect_ai.log import read_eval_log_async
+
 from eval_mcp.core.bedrock_client import BedrockClient
-from eval_mcp.core.judge_config import JUDGE_MODELS
+from eval_mcp.core.judge_config import JUDGE_MODELS, JudgeConfig
 from eval_mcp.core.user_storage import (
     get_dataset_by_name,
     get_judge_by_name,
+    get_user_dir,
+    get_user_log_dir,
     save_optimization_to_db,
 )
+from eval_mcp.tools.create_config import create_inspect_task_file
+from eval_mcp.tools.external_providers import _refresh_keys_from_file
 
 logger = logging.getLogger(__name__)
 
@@ -63,52 +82,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ITERATIONS = int(os.environ.get("EVAL_MCP_OPTIMIZE_MAX_ITERATIONS", "3"))
 DEFAULT_SAMPLE_SIZE = int(os.environ.get("EVAL_MCP_OPTIMIZE_SAMPLE_SIZE", "10"))
 DEFAULT_TEST_HOLDOUT = float(os.environ.get("EVAL_MCP_OPTIMIZE_TEST_HOLDOUT", "0.4"))
-RNG_SEED = 42  # Fixed so splits and history are reproducible across calls.
+RNG_SEED = 42
 
 # Maximum prompt-side failures rendered into the optimizer's context. More
-# than this and the LLM struggles to read it; we already have the aggregate
-# pass rate as a separate signal.
+# than this and the LLM struggles to read it; the aggregate pass rate is
+# already a separate signal in the history block.
 MAX_FAILURES_IN_CONTEXT = 10
 
-
-# ---------------------------------------------------------------------------
-# Tool schemas — forced-tool output so we never have to parse free text
-# ---------------------------------------------------------------------------
-
-
-# Per-criterion scoring tool. Built dynamically because criterion names
-# come from the judge config and we want each one to be a required field.
-def _build_scoring_tool(criteria: List[Dict[str, str]]) -> Dict[str, Any]:
-    properties: Dict[str, Any] = {}
-    required: List[str] = []
-    for c in criteria:
-        properties[c["name"]] = {
-            "type": "integer",
-            "enum": [0, 1],
-            "description": c["description"],
-        }
-        required.append(c["name"])
-        properties[f"{c['name']}_improvement"] = {
-            "type": "string",
-            "description": (
-                f"If {c['name']} scored 0, one short sentence on what the "
-                "answer should change. Empty string when scored 1."
-            ),
-        }
-    properties["reason"] = {
-        "type": "string",
-        "description": "One sentence summarizing the overall judgment.",
-    }
-    required.append("reason")
-    return {
-        "name": "submit_scores",
-        "description": "Score each criterion 0 or 1 with per-criterion improvement notes.",
-        "input_schema": {
-            "type": "object",
-            "properties": properties,
-            "required": required,
-        },
-    }
+# Per-iter subprocess timeout. Inspect runs of 10 samples × 3 judges
+# typically complete in 30-90s; the cap is generous so flaky Bedrock
+# retries don't bite.
+ITER_SUBPROCESS_TIMEOUT_S = int(os.environ.get("EVAL_MCP_OPTIMIZE_ITER_TIMEOUT_S", "900"))
 
 
 OPTIMIZER_TOOL: Dict[str, Any] = {
@@ -141,7 +125,7 @@ _OPTIMIZER_SYSTEM_PROMPT = (
     "dataset. The template wraps each user question and is fed as the user "
     "message to a model under test. You see the current template, the "
     "failures it produced on a sample of questions, and per-criterion "
-    "improvement notes from the judges.\n\n"
+    "improvement notes from each judge in the jury.\n\n"
     "Your job is to propose a new template that addresses the failures.\n\n"
     "Rules:\n"
     "- PRESERVE STRUCTURE ON LONG PROMPTS. If the current prompt is "
@@ -160,7 +144,7 @@ _OPTIMIZER_SYSTEM_PROMPT = (
 
 
 # ---------------------------------------------------------------------------
-# Pure helpers — testable without Bedrock
+# Pure helpers — testable without Bedrock or Inspect subprocess
 # ---------------------------------------------------------------------------
 
 
@@ -169,18 +153,11 @@ def _split_train_test(
     holdout: float = DEFAULT_TEST_HOLDOUT,
     seed: int = RNG_SEED,
 ) -> Tuple[List[Dict[str, str]], List[Dict[str, str]]]:
-    """Random split with a fixed seed. Floor of 1 per side when possible.
-
-    Not stratified by class because QA pairs don't have a class label —
-    'stratified' from the plan referred to should_trigger in skill-creator,
-    which doesn't apply here. We just need a deterministic random split.
-    """
+    """Random split with a fixed seed. Floor of 1 per side when possible."""
     n = len(qa_pairs)
     if n == 0:
         return [], []
     if n == 1:
-        # Can't split — use the single pair for both. Caller will get a
-        # degenerate eval but at least it runs.
         return list(qa_pairs), list(qa_pairs)
 
     rng = random.Random(seed)
@@ -188,7 +165,7 @@ def _split_train_test(
     rng.shuffle(shuffled)
 
     n_test = max(1, int(round(n * holdout)))
-    n_test = min(n_test, n - 1)  # leave at least one for train
+    n_test = min(n_test, n - 1)
     test = shuffled[:n_test]
     train = shuffled[n_test:]
     return train, test
@@ -199,12 +176,7 @@ def _pick_winner(
     test_scores_by_iter: Dict[int, float],
 ) -> Tuple[int, str, float]:
     """Pick the highest-test-score iteration. Ties go to the earlier one
-    so users get the simplest version of structurally-equivalent winners.
-
-    ``iteration_records`` is the per-iter history (iter 0 = initial).
-    ``test_scores_by_iter`` maps iter index -> pass rate on the test set.
-    Returns ``(winner_iter, winner_prompt, winner_test_score)``.
-    """
+    so users get the simplest version of structurally-equivalent winners."""
     best_iter = -1
     best_score = -1.0
     for rec in iteration_records:
@@ -216,28 +188,33 @@ def _pick_winner(
             best_iter = i
             best_score = score
     if best_iter < 0:
-        # Nothing scored — fall back to initial.
         return 0, iteration_records[0]["prompt"], 0.0
     winner_prompt = next(r["prompt"] for r in iteration_records if r["iter"] == best_iter)
     return best_iter, winner_prompt, best_score
 
 
 def _format_failures_for_optimizer(failures: List[Dict[str, Any]]) -> str:
-    """Render per-sample failures into a compact text block for the
-    optimizer LLM. Includes question, golden, model answer, and the
-    failing criteria with their improvement notes."""
+    """Render per-sample failures for the optimizer LLM. Each failing
+    criterion shows the jury vote count and the per-judge improvement
+    notes captured by ``jury_scorer``'s ``metadata['criteria_results']``."""
     lines: List[str] = []
     for i, f in enumerate(failures, start=1):
         lines.append(f"Sample {i}:")
         lines.append(f"  Q: {f['question'][:300]}")
         lines.append(f"  Golden: {f['golden'][:400]}")
         lines.append(f"  Model answer: {f['answer'][:400]}")
-        failed = [c for c in f.get("criteria", []) if c.get("score") == 0]
+        failed = [c for c in f.get("criteria_results", []) if c.get("score", 1.0) < 1.0]
         if failed:
-            lines.append("  Failed criteria:")
+            lines.append("  Failed criteria (jury):")
             for c in failed:
-                note = c.get("improvement_note", "")
-                lines.append(f"    - {c['name']}: {note}" if note else f"    - {c['name']}")
+                vf = c.get("votes_for", 0)
+                tot = c.get("total", 0)
+                lines.append(f"    - {c['name']} ({vf}/{tot} judges passed):")
+                for note_entry in c.get("improvement_notes", []) or []:
+                    judge = note_entry.get("judge", "?")
+                    note = note_entry.get("note", "")
+                    if note:
+                        lines.append(f"        [{judge}] {note}")
         lines.append("")
     return "\n".join(lines)
 
@@ -258,129 +235,12 @@ def _format_history_for_optimizer(history: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-# ---------------------------------------------------------------------------
-# In-process eval: produce model answer for a question, then score with jury
-# ---------------------------------------------------------------------------
-
-
-async def _produce_answer(
-    bedrock: BedrockClient,
-    prompt_template: str,
-    question: str,
-) -> str:
-    """Render the prompt with {question} substituted, send as user
-    message to the model under test. Returns the model's text reply."""
-    user_message = prompt_template.replace("{question}", question)
-    response = await asyncio.to_thread(
-        bedrock.create_message,
-        messages=[{"role": "user", "content": user_message}],
-        max_tokens=2048,
-        temperature=0.0,
-    )
-    text_parts = [
-        block.get("text", "")
-        for block in response.get("content", [])
-        if block.get("type") == "text"
-    ]
-    return "".join(text_parts).strip()
-
-
-async def _score_one_with_jury(
-    bedrock: BedrockClient,
-    criteria: List[Dict[str, str]],
-    question: str,
-    golden: str,
-    answer: str,
-) -> Dict[str, Any]:
-    """Run the same per-criterion judge call we use at eval time, but
-    in-process. For v1 we use a single judge (Sonnet 4.6 via the
-    BedrockClient singleton); multi-judge jury during the loop would 3×
-    the per-sample cost for a signal the optimizer doesn't really need.
-    Returns ``{criterion_name: {"score": 0|1, "improvement": "..."}}``.
-    """
-    tool = _build_scoring_tool(criteria)
-    criteria_block = "\n".join(f"- {c['name']}: {c['description']}" for c in criteria)
-    user_prompt = (
-        "Score the AI answer against each criterion. For criteria scored 0, "
-        "fill in the corresponding <criterion>_improvement field with ONE "
-        "short sentence on what the answer should change.\n\n"
-        f"Criteria:\n{criteria_block}\n\n"
-        f"[Question]\n{question}\n\n"
-        f"[AI Answer]\n{answer}\n\n"
-        f"[Reference Answer]\n{golden}\n\n"
-        "Call submit_scores with your assessment."
-    )
-    response = await asyncio.to_thread(
-        bedrock.create_message,
-        messages=[{"role": "user", "content": user_prompt}],
-        tools=[tool],
-        tool_choice={"type": "tool", "name": "submit_scores"},
-        max_tokens=2000,
-        temperature=0.0,
-    )
-    for block in response.get("content", []):
-        if block.get("type") == "tool_use" and block.get("name") == "submit_scores":
-            args = block.get("input", {}) or {}
-            out: Dict[str, Any] = {}
-            for c in criteria:
-                name = c["name"]
-                out[name] = {
-                    "score": int(bool(args.get(name, 0))),
-                    "improvement": str(args.get(f"{name}_improvement", "") or "").strip(),
-                }
-            return out
-    raise ValueError("Judge returned no submit_scores tool_use")
-
-
-async def _eval_one_sample(
-    bedrock: BedrockClient,
-    prompt_template: str,
-    criteria: List[Dict[str, str]],
-    qa_pair: Dict[str, str],
-) -> Dict[str, Any]:
-    """Full eval of a single QA pair: produce answer, score it. Returns
-    a row ready for failure aggregation."""
-    answer = await _produce_answer(bedrock, prompt_template, qa_pair["question"])
-    scored = await _score_one_with_jury(
-        bedrock, criteria, qa_pair["question"], qa_pair["golden_answer"], answer
-    )
-    n_criteria = len(criteria)
-    passes = sum(1 for c in scored.values() if c["score"] == 1)
-    sample_score = passes / n_criteria if n_criteria else 0.0
-    criteria_rows = [
-        {
-            "name": c["name"],
-            "score": scored[c["name"]]["score"],
-            "improvement_note": scored[c["name"]]["improvement"],
-        }
-        for c in criteria
-    ]
-    return {
-        "question": qa_pair["question"],
-        "golden": qa_pair["golden_answer"],
-        "answer": answer,
-        "sample_score": sample_score,
-        "criteria": criteria_rows,
-    }
-
-
-async def _eval_samples(
-    bedrock: BedrockClient,
-    prompt_template: str,
-    criteria: List[Dict[str, str]],
-    samples: List[Dict[str, str]],
-) -> List[Dict[str, Any]]:
-    """Eval many samples in parallel. Individual failures are caught and
-    excluded from the result rather than aborting the whole batch."""
-    tasks = [_eval_one_sample(bedrock, prompt_template, criteria, s) for s in samples]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    rows: List[Dict[str, Any]] = []
-    for sample, r in zip(samples, results):
-        if isinstance(r, Exception):
-            logger.warning("Dropping sample during iteration eval: %s", r)
-            continue
-        rows.append(r)
-    return rows
+def _select_failures(rows: List[Dict[str, Any]], max_n: int = MAX_FAILURES_IN_CONTEXT) -> List[Dict[str, Any]]:
+    """Pick the most-failing samples to feed the optimizer. Samples that
+    fully passed (sample_score == 1.0) are dropped — nothing to teach."""
+    failing = [r for r in rows if r["sample_score"] < 1.0]
+    failing.sort(key=lambda r: r["sample_score"])
+    return failing[:max_n]
 
 
 def _pass_rate(rows: List[Dict[str, Any]]) -> float:
@@ -389,17 +249,301 @@ def _pass_rate(rows: List[Dict[str, Any]]) -> float:
     return sum(r["sample_score"] for r in rows) / len(rows)
 
 
-def _select_failures(rows: List[Dict[str, Any]], max_n: int = MAX_FAILURES_IN_CONTEXT) -> List[Dict[str, Any]]:
-    """Pick the most-failing samples to feed the optimizer. Sorted by
-    sample_score ascending, capped at ``max_n``. Filters out samples that
-    fully passed (those have nothing to teach the optimizer)."""
-    failing = [r for r in rows if r["sample_score"] < 1.0]
-    failing.sort(key=lambda r: r["sample_score"])
-    return failing[:max_n]
+# ---------------------------------------------------------------------------
+# Inspect AI subprocess: per-iteration eval + final test-time ranking
+# ---------------------------------------------------------------------------
+
+
+_INSPECT_CMD = [sys.executable, "-m", "inspect_ai"]
+
+
+def _safe_name_fragment(s: str) -> str:
+    """Sanitize a string for use inside an Inspect config filename. Same
+    constraints as ``run_eval._VALID_CONFIG_NAME_PATTERN`` — alphanumerics,
+    underscores, dashes only."""
+    return re.sub(r"[^a-zA-Z0-9_-]", "_", s)[:64]
+
+
+def _write_temp_dataset(user_dir: Path, fragment: str, samples: List[Dict[str, str]]) -> Path:
+    """Write a subset of QA pairs to ``temp/<fragment>.json`` in the user
+    directory. Inspect's ``json_dataset`` reads from this path."""
+    temp_dir = user_dir / "temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    out_path = temp_dir / f"{fragment}.json"
+    inspect_samples = [
+        {"question": s["question"], "golden_answer": s["golden_answer"]}
+        for s in samples
+    ]
+    out_path.write_text(json.dumps(inspect_samples, indent=2))
+    return out_path
+
+
+def _write_inspect_config(
+    user_dir: Path,
+    config_name: str,
+    dataset_path: Path,
+    providers: List[str],
+    judge_config: JudgeConfig,
+    prompts: Optional[List[str]],
+    description: str,
+) -> Path:
+    """Generate task file + config JSON via ``create_inspect_task_file``
+    and write both to ``<user_dir>/configs/``. Returns the .py path."""
+    config_dir = user_dir / "configs"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    task_code, config_data = create_inspect_task_file(
+        dataset_path=str(dataset_path),
+        providers=providers,
+        config_name=config_name,
+        config_dir=str(config_dir),
+        judge_config=judge_config,
+        description=description,
+        prompts=prompts,
+    )
+    py_path = config_dir / f"{config_name}.py"
+    py_path.write_text(task_code)
+    (config_dir / f"{config_name}.json").write_text(json.dumps(config_data, indent=2))
+    return py_path
+
+
+async def _snapshot_log_set(log_dir: str) -> set:
+    """Return the set of ``.eval`` log paths currently in ``log_dir``.
+
+    Used to compute the delta after an ``inspect eval`` subprocess
+    finishes — Inspect names logs after the task function (e.g.
+    ``eval_task``, ``eval_1``), not after our config file, so we identify
+    the run's logs by what's new rather than by filename matching.
+    """
+    try:
+        infos = await list_eval_logs_async(log_dir)
+        return {info.name for info in infos}
+    except Exception:
+        return set()
+
+
+async def _spawn_inspect_eval(
+    user_dir: Path,
+    config_name: str,
+    providers: List[str],
+    log_dir: str,
+) -> None:
+    """Run ``inspect eval`` as a subprocess.
+
+    Reuses the same flags as ``handle_run_evaluation`` (adaptive
+    parallelism, no-fail-on-error, log-shared) but skips the user-facing
+    ceremony — no browser pop-up, no provider validation (the dataset's
+    providers were validated when the optimization started), no S3 sync
+    per iter, no retry pass. Those are correct for an interactive eval;
+    inside a tight loop they're wasted work.
+    """
+    _refresh_keys_from_file()
+    env = os.environ.copy()
+    env["INSPECT_LOG_DIR"] = log_dir
+    region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))
+    env["AWS_REGION"] = region
+    env["AWS_DEFAULT_REGION"] = region
+
+    relative_task = f"configs/{config_name}.py"
+    cmd: List[str] = [
+        *_INSPECT_CMD, "eval",
+        relative_task,
+        "--adaptive-connections", "true",
+        "--no-log-images",
+        "--no-fail-on-error",
+        "--log-shared", "10",
+    ]
+    if providers:
+        cmd.extend(["--model", ",".join(providers)])
+
+    logger.info("optimizer subprocess: %s", shlex.join(cmd))
+    process = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=env,
+        cwd=str(user_dir),
+        start_new_session=True,
+    )
+    try:
+        await asyncio.wait_for(process.wait(), timeout=ITER_SUBPROCESS_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        process.kill()
+        await process.wait()
+        raise RuntimeError(
+            f"inspect eval timed out after {ITER_SUBPROCESS_TIMEOUT_S}s for {config_name}"
+        )
+
+    # Always capture stderr — even on success — so we can include it in
+    # error context when the subprocess "succeeds" but produces no log
+    # (silent capture-pipeline failures used to look identical to "still
+    # running" before we surfaced this).
+    stderr_bytes = b""
+    if process.stderr:
+        try:
+            stderr_bytes = await asyncio.wait_for(process.stderr.read(), timeout=5)
+        except asyncio.TimeoutError:
+            pass
+    stderr = stderr_bytes.decode("utf-8", errors="replace")[:1500]
+
+    if process.returncode != 0:
+        raise RuntimeError(
+            f"inspect eval exited {process.returncode} for {config_name}: {stderr}"
+        )
+    if stderr:
+        # Subprocess succeeded but Inspect printed warnings — keep them
+        # for the caller's diagnostic logging.
+        logger.debug("inspect eval stderr (rc=0) for %s: %s", config_name, stderr)
+
+
+def _extract_rows_from_log(log: Any) -> List[Dict[str, Any]]:
+    """Pull per-sample rows out of an Inspect eval log. Each row carries
+    the question, golden, model answer, jury score, and the
+    ``criteria_results`` metadata where improvement notes live."""
+    rows: List[Dict[str, Any]] = []
+    for sample in (log.samples or []):
+        # jury_scorer is the only scorer; its key in sample.scores is
+        # the function name. Iterate defensively in case a future change
+        # adds another scorer.
+        score_obj = None
+        if sample.scores:
+            score_obj = next(iter(sample.scores.values()), None)
+
+        sample_score = 0.0
+        criteria_results: List[Dict[str, Any]] = []
+        if score_obj is not None:
+            try:
+                sample_score = float(score_obj.value) if score_obj.value is not None else 0.0
+            except (TypeError, ValueError):
+                sample_score = 0.0
+            meta = getattr(score_obj, "metadata", None) or {}
+            criteria_results = meta.get("criteria_results", []) or []
+
+        answer = ""
+        if sample.output and sample.output.completion:
+            answer = sample.output.completion
+
+        rows.append({
+            "question": str(sample.input),
+            "golden": str(sample.target),
+            "answer": answer,
+            "sample_score": sample_score,
+            "criteria_results": criteria_results,
+        })
+    return rows
+
+
+async def _new_logs_since(log_dir: str, before: set) -> List[str]:
+    """Return ``.eval`` log paths that appeared since ``before`` snapshot."""
+    after = await list_eval_logs_async(log_dir)
+    return [info.name for info in after if info.name not in before]
+
+
+async def _run_inspect_iteration(
+    user_id: str,
+    user_dir: Path,
+    log_dir: str,
+    config_name: str,
+    samples: List[Dict[str, str]],
+    prompt_template: str,
+    providers: List[str],
+    judge_config: JudgeConfig,
+) -> Tuple[Optional[str], List[Dict[str, Any]]]:
+    """Single optimizer iteration as a real Inspect AI eval. Returns
+    ``(run_id, rows)`` where ``rows`` is per-sample data ready for failure
+    selection. Raises on subprocess failure — the loop catches and
+    falls back to last-good."""
+    dataset_path = _write_temp_dataset(user_dir, config_name, samples)
+    _write_inspect_config(
+        user_dir=user_dir,
+        config_name=config_name,
+        dataset_path=dataset_path,
+        providers=providers,
+        judge_config=judge_config,
+        prompts=[prompt_template],
+        description=f"Optimizer iteration: {config_name}",
+    )
+
+    before = await _snapshot_log_set(log_dir)
+    await _spawn_inspect_eval(user_dir, config_name, providers, log_dir)
+    new_logs = await _new_logs_since(log_dir, before)
+    if not new_logs:
+        raise RuntimeError(
+            f"inspect eval succeeded but produced no .eval log for {config_name} "
+            f"(log_dir={log_dir})"
+        )
+    # Single-prompt iteration: exactly one task = one log. If Inspect
+    # for some reason wrote more than one, take the one with task name
+    # matching our convention.
+    log = await read_eval_log_async(new_logs[0])
+    return log.eval.run_id, _extract_rows_from_log(log)
+
+
+async def _run_inspect_test_ranking(
+    user_id: str,
+    user_dir: Path,
+    log_dir: str,
+    optimization_id: str,
+    test_samples: List[Dict[str, str]],
+    prompts_by_iter: List[Tuple[int, str]],
+    providers: List[str],
+    judge_config: JudgeConfig,
+) -> Tuple[Optional[str], Dict[int, float]]:
+    """Run every prompt in history against the test split in a single
+    Inspect job. ``prompts_by_iter`` preserves iteration order so we can
+    match the resulting ``eval_1/eval_2/...`` task logs back to iters.
+    Returns ``(run_id, test_pass_rate_per_iter)``."""
+    config_name = f"opt_{_safe_name_fragment(optimization_id)}_test"
+    dataset_path = _write_temp_dataset(user_dir, config_name, test_samples)
+
+    # create_inspect_task_file generates eval_1, eval_2, ... when given
+    # multiple prompts. Order is preserved, so prompts_by_iter[i] maps to
+    # the (i+1)-th task.
+    prompts_in_order = [p for _, p in prompts_by_iter]
+    _write_inspect_config(
+        user_dir=user_dir,
+        config_name=config_name,
+        dataset_path=dataset_path,
+        providers=providers,
+        judge_config=judge_config,
+        prompts=prompts_in_order,
+        description=f"Optimizer test-time ranking: {optimization_id}",
+    )
+
+    before = await _snapshot_log_set(log_dir)
+    await _spawn_inspect_eval(user_dir, config_name, providers, log_dir)
+    new_logs = await _new_logs_since(log_dir, before)
+    if not new_logs:
+        return None, {}
+
+    # Each new log corresponds to one task (eval_1, eval_2, ...). Read
+    # each, match by task name to the prompt index, compute pass rate.
+    scores_by_iter: Dict[int, float] = {}
+    run_id: Optional[str] = None
+    iter_order = [i for i, _ in prompts_by_iter]
+    for path in new_logs:
+        try:
+            log = await read_eval_log_async(path)
+        except Exception as e:
+            logger.warning("Could not read test log %s: %s", path, e)
+            continue
+        run_id = log.eval.run_id or run_id
+        task_name = (log.eval.task or "").rsplit("/", 1)[-1]
+        m = re.match(r"^eval_(\d+)$", task_name)
+        if not m:
+            continue
+        idx = int(m.group(1)) - 1  # 1-based in template, 0-based here
+        if idx < 0 or idx >= len(iter_order):
+            continue
+        iter_key = iter_order[idx]
+        rows = _extract_rows_from_log(log)
+        scores_by_iter[iter_key] = _pass_rate(rows)
+
+    return run_id, scores_by_iter
 
 
 # ---------------------------------------------------------------------------
-# Optimizer LLM call
+# Optimizer LLM call — proposes a new prompt from failures + history
 # ---------------------------------------------------------------------------
 
 
@@ -427,7 +571,7 @@ async def _propose_new_prompt(
         tools=[OPTIMIZER_TOOL],
         tool_choice={"type": "tool", "name": "submit_prompt"},
         max_tokens=4000,
-        temperature=0.4,  # Slight stochasticity helps explore prompt space.
+        temperature=0.4,
     )
     for block in response.get("content", []):
         if block.get("type") == "tool_use" and block.get("name") == "submit_prompt":
@@ -451,46 +595,67 @@ async def _propose_new_prompt(
 
 async def optimize_prompt_loop(
     bedrock: BedrockClient,
+    user_id: str,
+    optimization_id: str,
     qa_pairs: List[Dict[str, str]],
-    criteria: List[Dict[str, str]],
+    judge_config: JudgeConfig,
+    providers: List[str],
     initial_prompt: str,
     max_iter: int = DEFAULT_MAX_ITERATIONS,
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     test_holdout: float = DEFAULT_TEST_HOLDOUT,
 ) -> Dict[str, Any]:
-    """Run the optimization loop. Returns the full record ready for
-    persistence — does NOT save it (the handler does that, so unit tests
-    can exercise the loop without storage)."""
+    """Run the optimization loop. Each iteration is a real Inspect AI
+    eval; iteration ``eval_run_id`` is stored in history so the UI can
+    deep-link to it. Returns the full record ready for persistence."""
 
     train, test = _split_train_test(qa_pairs, holdout=test_holdout)
     if not train:
-        # Degenerate dataset; bail with the initial prompt as winner.
         return {
             "initial_prompt": initial_prompt,
             "winner_prompt": initial_prompt,
             "winner_iter": 0,
             "winner_test_score": 0.0,
-            "history": [{"iter": 0, "prompt": initial_prompt, "train_pass_rate": 0.0, "n_train_samples": 0}],
+            "history": [{"iter": 0, "prompt": initial_prompt, "train_pass_rate": 0.0, "n_train_samples": 0, "eval_run_id": None}],
             "test_scores_by_iter": {},
+            "test_run_id": None,
             "train_size": 0,
             "test_size": 0,
             "status": "no_train_data",
             "rationales": {},
         }
 
+    user_dir = get_user_dir(user_id)
+    log_dir = get_user_log_dir(user_id)
+    if not log_dir.startswith("s3://"):
+        Path(log_dir).mkdir(parents=True, exist_ok=True)
+
+    safe_id = _safe_name_fragment(optimization_id)
     last_good = initial_prompt
     history: List[Dict[str, Any]] = []
     rationales: Dict[int, str] = {}
     status = "complete"
+    last_rows: List[Dict[str, Any]] = []
 
-    # Iter 0 = initial prompt; score it on train so the optimizer has a
-    # baseline AND so the test-time comparison includes the initial.
     sample_n = min(sample_size, len(train))
     rng = random.Random(RNG_SEED)
-    initial_sample = rng.sample(train, sample_n) if sample_n < len(train) else list(train)
+
+    # Iter 0: score the initial prompt on a train sample.
+    iter_0_sample = rng.sample(train, sample_n) if sample_n < len(train) else list(train)
+    iter_0_config = f"opt_{safe_id}_iter_0"
     try:
-        initial_rows = await _eval_samples(bedrock, last_good, criteria, initial_sample)
-        initial_train_rate = _pass_rate(initial_rows)
+        run_id_0, iter_0_rows = await _run_inspect_iteration(
+            user_id=user_id,
+            user_dir=user_dir,
+            log_dir=log_dir,
+            config_name=iter_0_config,
+            samples=iter_0_sample,
+            prompt_template=initial_prompt,
+            providers=providers,
+            judge_config=judge_config,
+        )
+        last_rows = iter_0_rows
+        initial_train_rate = _pass_rate(iter_0_rows)
     except Exception as e:
         logger.warning("Initial eval failed: %s. Bailing with initial prompt.", e)
         return {
@@ -498,8 +663,9 @@ async def optimize_prompt_loop(
             "winner_prompt": initial_prompt,
             "winner_iter": 0,
             "winner_test_score": 0.0,
-            "history": [{"iter": 0, "prompt": initial_prompt, "train_pass_rate": 0.0, "n_train_samples": 0}],
+            "history": [{"iter": 0, "prompt": initial_prompt, "train_pass_rate": 0.0, "n_train_samples": 0, "eval_run_id": None}],
             "test_scores_by_iter": {},
+            "test_run_id": None,
             "train_size": len(train),
             "test_size": len(test),
             "status": f"error_initial: {type(e).__name__}",
@@ -510,49 +676,51 @@ async def optimize_prompt_loop(
         "iter": 0,
         "prompt": initial_prompt,
         "train_pass_rate": initial_train_rate,
-        "n_train_samples": len(initial_rows),
+        "n_train_samples": len(iter_0_rows),
+        "eval_run_id": run_id_0,
     })
 
     if initial_train_rate >= 1.0:
-        # Already perfect on train — no point iterating.
         status = "converged_initial"
 
     for i in range(1, max_iter + 1):
         if status.startswith("converged"):
             break
         try:
-            # Use the most recent iteration's rows as the failures to
-            # show the optimizer. We don't re-eval — initial_rows was
-            # just produced if iter 1; iter 2+ uses the rows from the
-            # previous iteration's eval.
-            current_rows = history[-1].get("_rows") or initial_rows
-            failures = _select_failures(current_rows)
+            failures = _select_failures(last_rows)
             if not failures:
                 status = "converged"
                 break
 
-            proposal = await _propose_new_prompt(
-                bedrock, last_good, failures, history[:-0] if False else history
-            )
+            proposal = await _propose_new_prompt(bedrock, last_good, failures, history)
             candidate = proposal["new_prompt"]
             rationales[i] = proposal["rationale"]
 
-            # Eval the candidate on a fresh random train sample to
-            # measure if it's actually better.
             cand_sample = rng.sample(train, sample_n) if sample_n < len(train) else list(train)
-            cand_rows = await _eval_samples(bedrock, candidate, criteria, cand_sample)
-            cand_train_rate = _pass_rate(cand_rows)
+            cand_config = f"opt_{safe_id}_iter_{i}"
+            cand_run_id, cand_rows = await _run_inspect_iteration(
+                user_id=user_id,
+                user_dir=user_dir,
+                log_dir=log_dir,
+                config_name=cand_config,
+                samples=cand_sample,
+                prompt_template=candidate,
+                providers=providers,
+                judge_config=judge_config,
+            )
+            cand_rate = _pass_rate(cand_rows)
 
             history.append({
                 "iter": i,
                 "prompt": candidate,
-                "train_pass_rate": cand_train_rate,
+                "train_pass_rate": cand_rate,
                 "n_train_samples": len(cand_rows),
-                "_rows": cand_rows,  # transient — used for next iter's failures
+                "eval_run_id": cand_run_id,
             })
             last_good = candidate
+            last_rows = cand_rows
 
-            if cand_train_rate >= 1.0:
+            if cand_rate >= 1.0:
                 status = "converged"
                 break
         except Exception as e:
@@ -560,28 +728,28 @@ async def optimize_prompt_loop(
             status = f"partial: {type(e).__name__}"
             break
 
-    # Strip transient _rows so they don't get persisted.
-    for h in history:
-        h.pop("_rows", None)
-
-    # Test-time ranking: evaluate every prompt in history against the
-    # held-out test set. Run in parallel by prompt.
+    # Test-time ranking — one Inspect run evaluating every prompt in history
+    # against the held-out test split. The .eval logs land in list_evaluations
+    # so a curious user can drill into the test scores per prompt.
+    test_run_id: Optional[str] = None
     test_scores_by_iter: Dict[int, float] = {}
-    if test:
-        async def _score_one_prompt(rec: Dict[str, Any]) -> Tuple[int, float]:
-            try:
-                rows = await _eval_samples(bedrock, rec["prompt"], criteria, test)
-                return rec["iter"], _pass_rate(rows)
-            except Exception as e:
-                logger.warning("Test eval for iter %d failed: %s", rec["iter"], e)
-                return rec["iter"], 0.0
+    if test and len(history) > 0:
+        try:
+            test_run_id, test_scores_by_iter = await _run_inspect_test_ranking(
+                user_id=user_id,
+                user_dir=user_dir,
+                log_dir=log_dir,
+                optimization_id=optimization_id,
+                test_samples=test,
+                prompts_by_iter=[(h["iter"], h["prompt"]) for h in history],
+                providers=providers,
+                judge_config=judge_config,
+            )
+        except Exception as e:
+            logger.warning("Test-time ranking failed: %s. Falling back to train scores.", e)
+            test_scores_by_iter = {h["iter"]: h["train_pass_rate"] for h in history}
 
-        results = await asyncio.gather(*(_score_one_prompt(h) for h in history))
-        test_scores_by_iter = {i: s for i, s in results}
-
-    winner_iter, winner_prompt, winner_test_score = _pick_winner(
-        history, test_scores_by_iter
-    )
+    winner_iter, winner_prompt, winner_test_score = _pick_winner(history, test_scores_by_iter)
 
     return {
         "initial_prompt": initial_prompt,
@@ -590,6 +758,7 @@ async def optimize_prompt_loop(
         "winner_test_score": winner_test_score,
         "history": history,
         "test_scores_by_iter": test_scores_by_iter,
+        "test_run_id": test_run_id,
         "train_size": len(train),
         "test_size": len(test),
         "status": status,
@@ -625,6 +794,8 @@ async def handle_optimize_prompt(
         return _err("dataset is required — use list_datasets to see what's available")
     if not judge_name:
         return _err("judge is required — use list_judges to see what's available")
+    if not providers:
+        return _err("providers is required — at least one model under test")
     if "{question}" not in initial_prompt:
         return _err("initial_prompt must contain {question} placeholder")
 
@@ -639,6 +810,13 @@ async def handle_optimize_prompt(
     if not criteria:
         return _err(f"Judge '{judge_name}' has no criteria")
 
+    # Build the JudgeConfig the same way create_eval_config does, so the
+    # jury_scorer template renders with identical judges + criteria as a
+    # normal eval would.
+    judge_models_arg = args.get("judge_models")
+    custom_judges = {m: m for m in judge_models_arg} if judge_models_arg else None
+    judge_config = JudgeConfig(criteria=criteria, judges=custom_judges)
+
     qa_pairs = [
         {"question": t["vars"]["question"], "golden_answer": t["vars"]["golden_answer"]}
         for t in dataset.get("tests", [])
@@ -651,8 +829,11 @@ async def handle_optimize_prompt(
 
     result = await optimize_prompt_loop(
         bedrock=bedrock,
+        user_id=user_id,
+        optimization_id=optimization_id,
         qa_pairs=qa_pairs,
-        criteria=criteria,
+        judge_config=judge_config,
+        providers=providers,
         initial_prompt=initial_prompt,
         max_iter=max_iter,
         sample_size=sample_size,
@@ -680,9 +861,10 @@ async def handle_optimize_prompt(
         "winner_test_score": result["winner_test_score"],
         "winner_prompt": result["winner_prompt"],
         "train_pass_rate_per_iter": [
-            {"iter": h["iter"], "train_pass_rate": h["train_pass_rate"]}
+            {"iter": h["iter"], "train_pass_rate": h["train_pass_rate"], "eval_run_id": h.get("eval_run_id")}
             for h in result["history"]
         ],
+        "test_run_id": result.get("test_run_id"),
         "test_size": result["test_size"],
         "train_size": result["train_size"],
     }

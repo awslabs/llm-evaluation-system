@@ -16,7 +16,7 @@ const NAV: NavItem[] = [
   { href: "/history", label: "History", fullOnly: true },
   { href: "/results", label: "Results" },
   { href: "/data", label: "Data" },
-  { href: "/optimizations", label: "Prompts Optimized" },
+  { href: "/optimizations", label: "Optimized" },
 ];
 
 export default function Header() {

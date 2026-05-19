@@ -1,9 +1,11 @@
 """List optimization runs from the user's persisted optimizations store.
 
 Mirrors ``list_evaluations`` shape: pagination + optional markdown
-format, but reads from the JSON store rather than Inspect ``.eval`` logs
-since optimization records are persisted by ``handle_optimize_prompt``
-directly (each iteration is in-process, not a full Inspect run).
+format, but reads from a per-user JSON store rather than Inspect
+``.eval`` logs. Each iteration inside an optimization IS a real Inspect
+eval (and therefore also shows up in ``list_evaluations``), but the
+optimization-level record — winner, history, rationales, train/test
+split — is its own artifact and lives here.
 """
 
 import json

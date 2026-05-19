@@ -644,9 +644,33 @@ async def chat_status(session_id: str, user_id: str = Depends(get_current_user_i
     return {"running": False}
 
 
+async def _cancel_eval_subprocess_and_reconnect(user_id: str) -> None:
+    """Background cleanup after a chat cancel: SIGTERM the user's eval
+    subprocess (with up to 5s SIGTERM-grace + SIGKILL internally), then
+    reconnect the eval MCP server so any in-flight RPC state from the
+    cancelled call is dropped. Runs detached from the HTTP request so
+    Stop returns to the user in <200ms instead of waiting ~10s for the
+    subprocess to exit gracefully.
+    """
+    try:
+        mcp_url = os.environ["EVAL_MCP_URL"]
+        base_url = mcp_url.replace("/mcp", "")
+        async with httpx.AsyncClient() as client:
+            await client.post(f"{base_url}/cancel/{user_id}", timeout=10.0)
+        await mcp_client.reconnect_server("eval")
+    except Exception as e:
+        logger.warning(f"[CANCEL bg] Failed to clean up eval state for {user_id}: {e}")
+
+
 @app.post("/api/chat/cancel/{session_id}")
 async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_id)):
-    """Cancel an ongoing chat request and any running evaluation."""
+    """Cancel an ongoing chat request and any running evaluation.
+
+    Returns as soon as the asyncio task is cancelled — the eval
+    subprocess kill and MCP reconnect run in the background. Without
+    this, the Stop button blocks for ~10s while the subprocess wraps
+    up SIGTERM grace + reconnect, which feels broken to the user.
+    """
     global cancelled_sessions, active_tasks
 
     # Check if there's an active task for this session
@@ -657,35 +681,34 @@ async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_i
     if task.done():
         return {"success": False, "message": "Request already completed"}
 
-    # Read eval info BEFORE cancelling (read-only, doesn't kill subprocess)
-    eval_info = {}
+    # Read eval info BEFORE cancelling — this needs to be synchronous
+    # because the agent's CancelledError handler reads cancelled_sessions
+    # to surface the resume hint in the cancel message. Short timeout
+    # so a slow MCP doesn't drag the Stop button.
+    eval_info: Dict[str, Any] = {}
     try:
         mcp_url = os.environ["EVAL_MCP_URL"]
         base_url = mcp_url.replace("/mcp", "")
         async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{base_url}/eval-info/{user_id}", timeout=2.0)
+            resp = await client.get(f"{base_url}/eval-info/{user_id}", timeout=1.0)
             eval_info = resp.json()
             logger.info(f"[CANCEL] Eval info: {eval_info}")
     except Exception as e:
         logger.warning(f"[CANCEL] Failed to get eval info: {e}")
 
-    # Store eval info so the CancelledError handler can include it in the cancel message
     cancelled_sessions[session_id] = eval_info
 
-    # Cancel the asyncio task immediately - triggers CancelledError handler
+    # task.cancel() is what actually stops the streaming response —
+    # the agent's CancelledError handler puts a "cancelled" event on
+    # the SSE queue, the frontend reads it and clears isLoading. So as
+    # soon as this returns, the UI's spinner stops.
     task.cancel()
 
-    # Kill the evaluation subprocess and reconnect MCP
-    try:
-        mcp_url = os.environ["EVAL_MCP_URL"]
-        base_url = mcp_url.replace("/mcp", "")
-        async with httpx.AsyncClient() as client:
-            await client.post(f"{base_url}/cancel/{user_id}", timeout=5.0)
-        await mcp_client.reconnect_server("eval")
-    except Exception as e:
-        logger.warning(f"[CANCEL] Failed to cancel evaluation: {e}")
+    # Fire-and-forget the slow cleanup. Captured as a Task so it's not
+    # garbage-collected before completing.
+    asyncio.create_task(_cancel_eval_subprocess_and_reconnect(user_id))
 
-    logger.info(f"[CANCEL] User {user_id} cancelled session {session_id}")
+    logger.info(f"[CANCEL] User {user_id} cancelled session {session_id} (cleanup in background)")
 
     return {"success": True, "message": "Cancellation requested", **eval_info}
 

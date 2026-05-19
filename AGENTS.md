@@ -39,6 +39,25 @@ cd .claude/worktrees/<name>
 Skip the worktree only for trivial single-file edits you'll merge in the
 next minute.
 
+## Don't fret about context budget
+
+Claude Code (and other agentic tools) auto-summarize prior conversation
+turns when the context window fills up — the conversation isn't capped
+by the window. So don't stop work mid-task, "save context" by being
+terser than the task requires, commit half-done changes prematurely, or
+suggest the user open a fresh session just because the chat has gotten
+long. Those impulses are anti-patterns:
+
+- Stopping mid-implementation loses momentum and forces awkward resume.
+- Compressing your writing to "save tokens" sacrifices the clarity the
+  user actually needs from you.
+- Splitting one logical PR into two because "context might run out"
+  fractures a coherent change set that the user has to stitch back
+  together later.
+
+If the limit is genuinely reached, the platform handles it. Focus on
+finishing what was asked.
+
 ## Shipping changes (commit → PR → release)
 
 Use the **[`ship-it` skill](./.claude/skills/ship-it/SKILL.md)** — it

@@ -790,11 +790,12 @@ async def run_agent_background(
                 full_response = event['data'].get('response', '')
                 logger.info(f"[AGENT COMPLETE] Session {session_id}, events: {event_count}")
 
-        # Save assistant message to DB (even partial if cancelled)
+        # Save assistant message to DB (even partial if cancelled).
+        # Bounded by timeout — see the matching block in the
+        # CancelledError handler below for why.
         if full_response:
             if was_cancelled:
                 full_response += "\n\n*[Response cancelled by user]*"
-                # Store cancel info on agent for _fix_orphaned_tool_uses
                 cancel_info = cancelled_sessions.get(session_id, {})
                 eval_id = cancel_info.get("evalId")
                 if eval_id:
@@ -802,14 +803,31 @@ async def run_agent_background(
                     if agent:
                         agent.cancel_info = cancel_info
             assistant_msg_id = str(uuid.uuid4())
-            await db.save_message(assistant_msg_id, session_id, "assistant", full_response)
-            logger.info(f"[DB SAVE] Saved assistant response for session {session_id}")
+            try:
+                await asyncio.wait_for(
+                    db.save_message(assistant_msg_id, session_id, "assistant", full_response),
+                    timeout=5.0,
+                )
+                logger.info(f"[DB SAVE] Saved assistant response for session {session_id}")
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"[DB SAVE] Failed/timed out saving response: {e}")
 
             # Update session title if this is the first message
-            messages = await db.get_session_messages(session_id)
-            if len(messages) == 2:
-                title = user_message_for_db[:50] + "..." if len(user_message_for_db) > 50 else user_message_for_db
-                await db.update_session_title(session_id, title)
+            try:
+                messages = await asyncio.wait_for(
+                    db.get_session_messages(session_id), timeout=2.0
+                )
+                if len(messages) == 2:
+                    title = (
+                        user_message_for_db[:50] + "..."
+                        if len(user_message_for_db) > 50
+                        else user_message_for_db
+                    )
+                    await asyncio.wait_for(
+                        db.update_session_title(session_id, title), timeout=2.0
+                    )
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"[DB] Failed/timed out updating title: {e}")
 
     except asyncio.CancelledError:
         # Task was cancelled via Stop button - this is expected
@@ -824,20 +842,41 @@ async def run_agent_background(
         if agent and eval_id:
             agent.cancel_info = cancel_info
 
-        # Save partial response to DB
+        # Save partial response to DB — but bounded by a timeout. The
+        # SSE stream can't close until this except handler returns
+        # (finally puts None on queue), so a slow DB save would leave
+        # the user's frontend hung indefinitely on the streaming reader,
+        # with isLoading/isCancelling stuck true. Symptom: "if i restart
+        # the page after stopping it works" — only a fresh React state
+        # unblocks the user. 5s is generous; the DB save normally takes
+        # <50ms.
         if full_response:
             full_response += "\n\n*[Response cancelled by user]*"
             assistant_msg_id = str(uuid.uuid4())
-            await db.save_message(assistant_msg_id, session_id, "assistant", full_response)
-            logger.info(f"[DB SAVE] Saved partial response for cancelled session {session_id}")
+            try:
+                await asyncio.wait_for(
+                    db.save_message(assistant_msg_id, session_id, "assistant", full_response),
+                    timeout=5.0,
+                )
+                logger.info(f"[DB SAVE] Saved partial response for cancelled session {session_id}")
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"[DB SAVE] Failed/timed out saving cancelled partial: {e}")
 
     except Exception:
         error_id, safe_msg = _user_safe_error(f"Agent background task session={session_id}")
         await queue.put({"type": "error", "data": {"error": safe_msg, "error_id": error_id}})
 
     finally:
-        # Signal completion to queue readers
-        await queue.put(None)
+        # Signal completion to queue readers FIRST — the SSE stream
+        # needs to close so the frontend can re-enable input. Anything
+        # else in finally that could block (cancelled_sessions cleanup
+        # is in-memory and instant, so safe to run after) must not
+        # delay this. queue.put on an asyncio.Queue is in-memory, but
+        # we wrap defensively anyway.
+        try:
+            await asyncio.wait_for(queue.put(None), timeout=2.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"[BACKGROUND END] queue.put(None) timed out for {session_id}")
 
         # Cleanup
         if session_id in active_tasks:

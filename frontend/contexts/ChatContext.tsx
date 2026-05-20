@@ -28,6 +28,7 @@ interface ChatContextType {
   chatSessions: ChatSession[];
   currentSessionId: string | null;
   isLoading: boolean;
+  isCancelling: boolean;
   sendMessage: (content: string) => Promise<void>;
   cancelRequest: () => Promise<void>;
   handleDocumentsUploaded: (result: UploadResult) => void;
@@ -43,6 +44,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
+  // isCancelling: true between the moment Stop is clicked and the
+  // moment the SSE stream actually terminates. Without this, the
+  // button has no visual state change on click — users mash it
+  // because they think it didn't register.
+  const [isCancelling, setIsCancelling] = useState(false);
 
   const loadUserSessions = async () => {
     if (!user?.name) return;
@@ -90,8 +96,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
 
   const cancelRequest = useCallback(async () => {
-    if (!currentSessionId || !isLoading) return;
+    if (!currentSessionId || !isLoading || isCancelling) return;
 
+    // Flip immediately so the Stop button shows "Stopping…" and goes
+    // disabled — no waiting for the HTTP fetch or SSE termination.
+    setIsCancelling(true);
     try {
       const response = await fetch(`/api/chat/cancel/${currentSessionId}`, {
         method: "POST",
@@ -102,7 +111,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     } catch (error) {
       console.error("Failed to cancel request:", error);
     }
-  }, [currentSessionId, isLoading]);
+  }, [currentSessionId, isLoading, isCancelling]);
 
   const sendMessage = useCallback(
     async (content: string) => {
@@ -374,6 +383,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setMessages((prev) => [...prev, errorMessage]);
       } finally {
         setIsLoading(false);
+        setIsCancelling(false);
       }
     },
     [user?.id, currentSessionId]
@@ -437,6 +447,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         chatSessions,
         currentSessionId,
         isLoading,
+        isCancelling,
         sendMessage,
         cancelRequest,
         handleDocumentsUploaded,

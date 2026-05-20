@@ -11,6 +11,7 @@ export default function ChatInterface() {
     cancelRequest,
     handleDocumentsUploaded,
     isLoading,
+    isCancelling,
     createNewChat,
   } = useChat();
   const [input, setInput] = useState("");
@@ -64,6 +65,7 @@ export default function ChatInterface() {
         onCancel={cancelRequest}
         disabled={isLoading}
         isStreaming={isLoading}
+        isCancelling={isCancelling}
         onDocumentsUploaded={handleDocumentsUploaded}
       />
     </div>

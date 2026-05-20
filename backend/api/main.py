@@ -719,6 +719,22 @@ async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_i
 
     cancelled_sessions[session_id] = eval_info
 
+    # Cross-pod cancel signal. Backend runs as a multi-pod Deployment,
+    # so the chat_stream task lives in one pod's event loop while this
+    # cancel HTTP request may have landed on a different pod (ALB
+    # lb_cookie stickiness is configured but doesn't always survive the
+    # CloudFront → ALB → browser → ALB round-trip in practice). The
+    # in-memory `cancelled_sessions` dict only signals THIS pod; we
+    # also write to the DB so the pod actually running the agent
+    # task picks it up on its next poll.
+    try:
+        await asyncio.wait_for(
+            db.mark_session_cancelled(session_id, json.dumps(eval_info)),
+            timeout=2.0,
+        )
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.warning(f"[CANCEL] Failed to mark session cancelled in DB: {e}")
+
     # task.cancel() is what actually stops the streaming response —
     # the agent's CancelledError handler puts a "cancelled" event on
     # the SSE queue, the frontend reads it and clears isLoading. So as
@@ -765,12 +781,56 @@ async def run_agent_background(
         user_msg_id = str(uuid.uuid4())
         await db.save_message(user_msg_id, session_id, "user", user_message_for_db)
 
+        # Clear any stale cross-pod cancellation flag — a new turn is
+        # starting, the user wants this one to run. Without this, a
+        # previous Stop's row in session_cancellations would make the
+        # very first iteration of THIS new turn immediately cancel.
+        try:
+            await asyncio.wait_for(
+                db.clear_session_cancellation(session_id), timeout=2.0
+            )
+        except (asyncio.TimeoutError, Exception):
+            pass
+
         logger.info(f"[AGENT START] Starting agent loop for session {session_id}")
 
+        # Throttle the cross-pod cancellation poll so we don't hammer
+        # the DB on every streamed text token (the async for below
+        # yields hundreds of events per second during Bedrock
+        # streaming). 500ms is fast enough to make Stop feel
+        # responsive but lets us read the flag at most twice/sec/pod.
+        import time as _time
+        last_xpod_poll = 0.0
+        XPOD_POLL_INTERVAL = 0.5
+
         async for event in agent.run_conversation_turn_streaming(final_message):
-            # Check for cancellation
+            # Check for cancellation — first the cheap in-memory check
+            # (handles the case where cancel landed on THIS pod), then
+            # the DB-backed cross-pod check (handles the case where
+            # cancel landed on a different pod).
+            cancel_info: Optional[Dict[str, Any]] = None
             if session_id in cancelled_sessions:
                 cancel_info = cancelled_sessions[session_id]
+            else:
+                now = _time.monotonic()
+                if now - last_xpod_poll >= XPOD_POLL_INTERVAL:
+                    last_xpod_poll = now
+                    try:
+                        row = await asyncio.wait_for(
+                            db.get_session_cancellation(session_id), timeout=1.0
+                        )
+                        if row is not None:
+                            try:
+                                cancel_info = json.loads(row.get("eval_info") or "{}") or {}
+                            except json.JSONDecodeError:
+                                cancel_info = {}
+                            # Mirror into local dict so subsequent
+                            # checks short-circuit on the cheap path.
+                            cancelled_sessions[session_id] = cancel_info
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+
+            if cancel_info is not None:
                 logger.info(f"[AGENT CANCELLED] Session {session_id} cancelled by user, eval info: {cancel_info}")
                 was_cancelled = True
                 await queue.put({"type": "cancelled", "data": {"message": "Request cancelled", **cancel_info}})

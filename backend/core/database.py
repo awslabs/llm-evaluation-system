@@ -206,6 +206,23 @@ class Database:
                 ON messages(session_id)
             """)
 
+            # Session cancellations table — used to propagate Stop
+            # across pods. Backend runs as a multi-pod Deployment;
+            # the chat request may land on pod A while the cancel
+            # HTTP arrives at pod B (ALB lb_cookie stickiness is
+            # configured but not reliably preserved through
+            # CloudFront → ALB → browser → ALB hops in practice).
+            # A simple row in this table is the cross-pod signal:
+            # cancel_chat writes it, the agent's per-iteration poll
+            # in run_agent_background reads it.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS session_cancellations (
+                    session_id TEXT PRIMARY KEY,
+                    cancelled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    eval_info TEXT
+                )
+            """)
+
     async def create_user(self, user_id: str, username: str) -> None:
         """Create a new user.
 
@@ -310,6 +327,68 @@ class Database:
                 )
         except asyncpg.PostgresError as e:
             raise DatabaseError(f"Failed to update session title {session_id}: {e}") from e
+
+    async def mark_session_cancelled(self, session_id: str, eval_info_json: str = "") -> None:
+        """Mark a chat session as cancelled. Picked up cross-pod by the
+        agent loop's poll in run_agent_background. UPSERT so a repeat
+        cancel within the same chat turn just refreshes the timestamp.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO session_cancellations (session_id, cancelled_at, eval_info)
+                    VALUES ($1, NOW(), $2)
+                    ON CONFLICT (session_id) DO UPDATE
+                      SET cancelled_at = NOW(), eval_info = EXCLUDED.eval_info
+                    """,
+                    session_id, eval_info_json,
+                )
+        except asyncpg.PostgresError as e:
+            raise DatabaseError(f"Failed to mark session {session_id} cancelled: {e}") from e
+
+    async def clear_session_cancellation(self, session_id: str) -> None:
+        """Clear the cancellation flag for a session. Called when a new
+        chat turn STARTS so a fresh user message doesn't immediately
+        see itself as already-cancelled from a previous Stop.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM session_cancellations WHERE session_id = $1",
+                    session_id,
+                )
+        except asyncpg.PostgresError as e:
+            # Non-fatal — worst case the next iteration immediately
+            # sees the stale flag and cancels itself. Just log.
+            logger.warning(f"Failed to clear cancellation for {session_id}: {e}")
+
+    async def get_session_cancellation(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return {cancelled_at, eval_info} if this session is marked
+        cancelled, else None. Used by the agent loop's per-iteration
+        cross-pod cancel check.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT cancelled_at, eval_info FROM session_cancellations WHERE session_id = $1",
+                    session_id,
+                )
+                if row is None:
+                    return None
+                return {
+                    "cancelled_at": row["cancelled_at"],
+                    "eval_info": row["eval_info"],
+                }
+        except asyncpg.PostgresError as e:
+            # Don't crash the agent loop on a transient DB hiccup —
+            # the worst case is the user clicks Stop again and the
+            # next poll catches it.
+            logger.warning(f"Failed to check cancellation for {session_id}: {e}")
+            return None
 
     async def close(self):
         """Close all connections in the pool."""

@@ -833,6 +833,20 @@ async def run_agent_background(
             if cancel_info is not None:
                 logger.info(f"[AGENT CANCELLED] Session {session_id} cancelled by user, eval info: {cancel_info}")
                 was_cancelled = True
+
+                # On EKS the cancel HTTP request can land on a different
+                # pod than the one running this task (CloudFront → ALB
+                # stickiness isn't reliable end-to-end). In that case the
+                # OTHER pod's cancel_chat already POSTed to ITS local
+                # /cancel/{user_id} — a no-op, because the Inspect
+                # subprocess and its _running_evaluations entry live in
+                # THIS pod's MCP sidecar. Fire the local cancel here so
+                # the subprocess actually dies. Safe to call even when
+                # cancel landed on this pod (same-pod cancel_chat already
+                # fired it; second call is harmless — the MCP endpoint
+                # is a no-op when nothing is registered).
+                asyncio.create_task(_cancel_eval_subprocess_and_reconnect(user_id))
+
                 await queue.put({"type": "cancelled", "data": {"message": "Request cancelled", **cancel_info}})
                 break
 

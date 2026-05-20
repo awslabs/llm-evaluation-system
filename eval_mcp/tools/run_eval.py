@@ -171,20 +171,28 @@ def get_running_eval_info(user_id: str) -> Dict[str, Any]:
 
 
 async def cancel_user_evaluation(user_id: str) -> Dict[str, Any]:
-    """Cancel a running evaluation for a user. Returns eval info so the agent can resume."""
+    """Cancel a running evaluation for a user. Returns eval info so the agent can resume.
+
+    Returns ``{"cancelled": False, "reason": "no running eval"}`` when
+    nothing was registered for this user. That happens routinely on EKS:
+    the cancel HTTP request can land on a different backend pod than the
+    one running the eval, and the wrong-pod sidecar correctly reports it
+    has nothing to kill. Surfacing that clearly in logs (vs. the
+    previous unconditional ``cancelled: True``) makes the cross-pod
+    case diagnosable.
+    """
     entry = _running_evaluations.get(user_id)
-    eval_id = None
-    config_name = None
+    if not entry:
+        logger.info(f"No running evaluation to cancel for user {user_id}")
+        return {"cancelled": False, "reason": "no running eval", "evalId": None, "configName": None}
 
-    if entry:
-        process = entry["process"]
-        eval_id = entry.get("eval_id")
-        config_name = entry.get("config_name")
-        if process.returncode is None:
-            await _terminate_process_gracefully(process)
-        _running_evaluations.pop(user_id, None)
-        logger.info(f"Cancelled evaluation {eval_id} for user {user_id}")
-
+    process = entry["process"]
+    eval_id = entry.get("eval_id")
+    config_name = entry.get("config_name")
+    if process.returncode is None:
+        await _terminate_process_gracefully(process)
+    _running_evaluations.pop(user_id, None)
+    logger.info(f"Cancelled evaluation {eval_id} for user {user_id}")
     return {"cancelled": True, "evalId": eval_id, "configName": config_name}
 
 

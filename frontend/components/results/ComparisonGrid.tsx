@@ -99,7 +99,7 @@ export default function ComparisonGrid({
 
   return (
     <div className="w-full overflow-x-auto border border-rule bg-ink-elev">
-      <table className="border-collapse">
+      <table className="min-w-full border-collapse">
         <thead>
           <tr>
             <th

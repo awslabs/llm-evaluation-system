@@ -734,12 +734,18 @@ async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_i
     # run_agent_background does the equivalent within ~500ms.
     if local_task_runnable:
         local_task.cancel()
-
-    # Fire-and-forget local MCP cancel + reconnect. If the eval is in
-    # this pod's sidecar this SIGTERMs the subprocess. If it's
-    # elsewhere this is a no-op — the right pod's agent loop fires
-    # its own local cancel when it picks up the DB row.
-    asyncio.create_task(_cancel_eval_subprocess_and_reconnect(user_id))
+        # Fire local MCP cancel + reconnect only when the task is
+        # local. The eval subprocess and the chat agent are always
+        # co-located (the agent calls its own pod's sidecar via
+        # localhost MCP), so the wrong-pod cancel has nothing to do
+        # here — and worse, the reconnect holds _reconnect_lock long
+        # enough that the user's next message's list_tools blocks on
+        # it (and eventually surfaces as "network error" in the
+        # browser when the streaming connection errors out). When the
+        # task is on a different pod, that pod's run_agent_background
+        # DB-poll branch fires its own _cancel_eval_subprocess_and_reconnect
+        # when it picks up the row.
+        asyncio.create_task(_cancel_eval_subprocess_and_reconnect(user_id))
 
     logger.info(
         f"[CANCEL] User {user_id} cancelled session {session_id} "

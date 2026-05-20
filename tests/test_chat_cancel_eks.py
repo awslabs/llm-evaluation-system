@@ -199,13 +199,21 @@ async def test_cross_pod_cancel_chat_writes_db_row_with_no_local_task(monkeypatc
 
     assert captured_session_id["sid"] == session_id
 
-    # The local MCP cancel must also fire — the eval might be in THIS
-    # pod's sidecar even though the chat agent task is elsewhere
-    # (unlikely but cheap to be safe; firing on no-eval is a no-op).
-    try:
-        await asyncio.wait_for(local_cancel_called.wait(), timeout=2.0)
-    except asyncio.TimeoutError:
-        pytest.fail("local MCP cancel was not scheduled by cancel_chat")
+    # The local MCP cancel must NOT fire on the wrong pod. The eval
+    # subprocess and the chat agent are always co-located (the agent
+    # calls its own pod's MCP via localhost), so a wrong-pod cancel
+    # has nothing to kill locally — and firing the reconnect anyway
+    # holds _reconnect_lock long enough that the user's next message
+    # races into a "network error". The right pod's
+    # run_agent_background DB-poll branch fires its own local cancel
+    # when it sees the row we just wrote.
+    await asyncio.sleep(0.1)  # give the (non-)task a tick to NOT fire
+    assert not local_cancel_called.is_set(), (
+        "cancel_chat fired local MCP cancel on the wrong pod — that's "
+        "wasted work AND blocks the next message's list_tools on "
+        "_reconnect_lock. Only fire local cancel when the task is local; "
+        "the right pod will fire its own."
+    )
 
     assert response.get("success") is True, (
         f"cancel_chat must return success when it signaled the cancel via DB, "

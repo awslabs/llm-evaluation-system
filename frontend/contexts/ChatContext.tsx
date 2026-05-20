@@ -373,10 +373,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       } catch (error) {
         console.error("Failed to send message:", error);
 
+        // Surface the actual error class + ref so the user (or whoever's
+        // tailing logs) can correlate. The backend's `_user_safe_error`
+        // gives us "ExceptionType (ref: <id>)" which is safe to show
+        // (no internal paths, no message text). Falls back to the
+        // generic phrase if we somehow lost the message.
+        const detail =
+          error instanceof Error && error.message
+            ? error.message
+            : "unknown error";
         const errorMessage: Message = {
           id: crypto.randomUUID(),
           role: "assistant",
-          content: "Sorry, I encountered an error processing your request.",
+          content: `Sorry, the request failed: ${detail}. Try again, or share the ref id if it keeps happening.`,
           timestamp: new Date().toISOString(),
         };
 

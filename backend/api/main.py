@@ -44,12 +44,18 @@ def _user_safe_error(context: str) -> tuple[str, str]:
 
     Use inside `except` blocks anywhere we'd otherwise put `str(e)` into a
     response. The full traceback goes to logs; the client sees only the
-    correlation id, so internal paths, SQL fragments, and class names don't
-    leak. Users can quote the id when contacting support.
+    correlation id plus the exception class name. The class name is safe
+    to leak (Python's standard exception taxonomy) and is enormously
+    useful for triage — distinguishing "BotoCoreError" from "ValueError"
+    tells us whether to look at AWS state or our own data shape. Users
+    can quote the id when contacting support.
     """
+    import sys as _sys
     error_id = uuid.uuid4().hex[:8]
+    exc = _sys.exc_info()[1]
+    exc_type = type(exc).__name__ if exc else "Unknown"
     logger.exception("[error_id=%s] %s", error_id, context)
-    return error_id, f"An internal error occurred (ref: {error_id})"
+    return error_id, f"{exc_type} (ref: {error_id})"
 
 
 # Global clients (initialized on startup)
@@ -645,39 +651,28 @@ async def chat_status(session_id: str, user_id: str = Depends(get_current_user_i
 
 
 async def _cancel_eval_subprocess_and_reconnect(user_id: str) -> None:
-    """Background cleanup after a chat cancel: SIGTERM the user's eval
-    subprocess if one is running (with up to 5s SIGTERM-grace + SIGKILL
-    internally), then reconnect the eval MCP server ONLY if a subprocess
-    was actually killed — otherwise the reconnect just creates a race
-    with the next message's list_tools (the agent's next turn calls
-    list_tools immediately; if we reconnect for no reason in the
-    background, list_tools spins on the lock for ~5s and the user sees
-    "Sorry, I encountered an error processing your request").
+    """Background cleanup after a chat cancel: same path regardless of
+    whether an eval subprocess was running.
 
-    For plain chat cancellations (no MCP tool call in flight — just a
-    cancelled Bedrock stream), there's no stale RPC state to clear,
-    so we skip the reconnect entirely.
+    The previous "skip reconnect when no eval was running" optimization
+    created two different code paths for plain-chat vs eval cancels,
+    which the user pushed back on. Unified behavior here — always do
+    both pieces (SIGTERM, reconnect MCP) — and rely on the
+    ``_reconnect_lock`` sync in ``MCPClient.list_tools`` to make the
+    inevitable race against the next message's list_tools safe (the
+    list_tools call simply waits for the reconnect to finish).
+
+    Runs as a background task so the Stop HTTP response returns
+    instantly. Cost: the user's next message may briefly wait for the
+    reconnect to drain (~1-2s typical, up to ~7s if an eval subprocess
+    is going through its SIGTERM grace period).
     """
     try:
         mcp_url = os.environ["EVAL_MCP_URL"]
         base_url = mcp_url.replace("/mcp", "")
-        eval_id = None
         async with httpx.AsyncClient() as client:
-            resp = await client.post(f"{base_url}/cancel/{user_id}", timeout=10.0)
-            try:
-                eval_id = (resp.json() or {}).get("evalId")
-            except Exception:
-                eval_id = None
-
-        if eval_id:
-            # An eval subprocess was actually mid-flight; its MCP RPC
-            # connection may be in a half-state. Reconnect to be safe.
-            await mcp_client.reconnect_server("eval")
-        else:
-            logger.info(
-                f"[CANCEL bg] No eval subprocess was running for {user_id}; "
-                f"skipping MCP reconnect"
-            )
+            await client.post(f"{base_url}/cancel/{user_id}", timeout=10.0)
+        await mcp_client.reconnect_server("eval")
     except Exception as e:
         logger.warning(f"[CANCEL bg] Failed to clean up eval state for {user_id}: {e}")
 

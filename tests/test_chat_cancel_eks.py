@@ -120,3 +120,94 @@ async def test_cross_pod_cancel_fires_local_mcp_cancel(monkeypatch):
         main.cancelled_sessions.pop(session_id, None)
         main.active_tasks.pop(session_id, None)
         main.event_queues.pop(session_id, None)
+
+
+@pytest.mark.asyncio
+async def test_cross_pod_cancel_chat_writes_db_row_with_no_local_task(monkeypatch):
+    """When the cancel HTTP request lands on the wrong pod (the task is
+    on Pod-A but cancel hit Pod-B), cancel_chat MUST still write to
+    session_cancellations so Pod-A's agent loop sees the cancel via DB
+    poll. Otherwise the cross-pod signal never reaches the right pod
+    and the SSE stream never closes — "Stopping…" frozen forever.
+
+    The original c222fee fix added the DB write but left an early
+    return above it (`if session_id not in active_tasks: return`), so
+    the write was unreachable in the cross-pod case it was meant to
+    fix. This test pins the corrected behavior.
+    """
+    from backend.api import main
+
+    session_id = "test-cross-pod-no-local-task"
+    user_id = "test-user-no-local"
+
+    # Empty active_tasks → simulates this pod not running the task
+    # (it's on another pod). This is the cross-pod case.
+    main.active_tasks.pop(session_id, None)
+    main.cancelled_sessions.pop(session_id, None)
+
+    db_write_called = asyncio.Event()
+    captured_session_id = {}
+
+    async def fake_mark_cancelled(sid, eval_info_json=""):
+        captured_session_id["sid"] = sid
+        db_write_called.set()
+
+    fake_db = MagicMock()
+    fake_db.mark_session_cancelled = fake_mark_cancelled
+    monkeypatch.setattr(main, "db", fake_db)
+
+    # The MCP /eval-info call would normally go to localhost:8002.
+    # On the wrong pod it returns {"running": False, ...}. Stub the
+    # entire httpx flow so the test doesn't depend on a live MCP.
+    class _FakeResp:
+        def json(self):
+            return {"running": False, "evalId": None, "configName": None}
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def get(self, *a, **k):
+            return _FakeResp()
+        async def post(self, *a, **k):
+            return _FakeResp()
+
+    monkeypatch.setattr(main, "httpx", MagicMock(AsyncClient=lambda: _FakeClient()))
+
+    local_cancel_called = asyncio.Event()
+
+    async def fake_local_cancel(uid):
+        local_cancel_called.set()
+
+    monkeypatch.setattr(main, "_cancel_eval_subprocess_and_reconnect", fake_local_cancel)
+
+    # Stub the auth dependency so we can call cancel_chat directly.
+    # cancel_chat is a FastAPI route; call the underlying function.
+    response = await main.cancel_chat(session_id=session_id, user_id=user_id)
+
+    try:
+        await asyncio.wait_for(db_write_called.wait(), timeout=2.0)
+    except asyncio.TimeoutError:
+        pytest.fail(
+            "cancel_chat did NOT write to session_cancellations when the "
+            "task was on a different pod. The cross-pod signal is therefore "
+            "never delivered, the agent loop never sees the cancel, and the "
+            "SSE stream stays open forever. This is the 'Stopping… forever' "
+            "bug on EKS."
+        )
+
+    assert captured_session_id["sid"] == session_id
+
+    # The local MCP cancel must also fire — the eval might be in THIS
+    # pod's sidecar even though the chat agent task is elsewhere
+    # (unlikely but cheap to be safe; firing on no-eval is a no-op).
+    try:
+        await asyncio.wait_for(local_cancel_called.wait(), timeout=2.0)
+    except asyncio.TimeoutError:
+        pytest.fail("local MCP cancel was not scheduled by cancel_chat")
+
+    assert response.get("success") is True, (
+        f"cancel_chat must return success when it signaled the cancel via DB, "
+        f"even if no local task existed. Got: {response!r}"
+    )

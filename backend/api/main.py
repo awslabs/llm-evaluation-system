@@ -687,25 +687,24 @@ async def _cancel_eval_subprocess_and_reconnect(user_id: str) -> None:
 async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_id)):
     """Cancel an ongoing chat request and any running evaluation.
 
-    Returns as soon as the asyncio task is cancelled — the eval
-    subprocess kill and MCP reconnect run in the background. Without
-    this, the Stop button blocks for ~10s while the subprocess wraps
-    up SIGTERM grace + reconnect, which feels broken to the user.
+    The task may live on a different pod (ALB stickiness isn't reliable
+    end-to-end through CloudFront). We DON'T early-return when the
+    task isn't local — the DB write below is the cross-pod signal that
+    reaches whichever pod is actually running the agent; without it,
+    that pod's SSE stream never closes and the user sees "Stopping…"
+    forever. The previous code had an early-return above the DB write,
+    which made the cross-pod path silently no-op — the exact bug
+    c222fee was meant to fix but didn't fully wire up.
     """
     global cancelled_sessions, active_tasks
 
-    # Check if there's an active task for this session
-    if session_id not in active_tasks:
-        return {"success": False, "message": "No active request to cancel"}
+    local_task: Optional[asyncio.Task] = active_tasks.get(session_id)
+    local_task_runnable = local_task is not None and not local_task.done()
 
-    task = active_tasks[session_id]
-    if task.done():
-        return {"success": False, "message": "Request already completed"}
-
-    # Read eval info BEFORE cancelling — this needs to be synchronous
-    # because the agent's CancelledError handler reads cancelled_sessions
-    # to surface the resume hint in the cancel message. Short timeout
-    # so a slow MCP doesn't drag the Stop button.
+    # Read eval info from THIS pod's MCP sidecar. Returns
+    # {"running": False, ...} if the eval is on another pod — that's
+    # fine; the other pod will surface the resume hint via its own
+    # CancelledError handler when it processes the cross-pod cancel.
     eval_info: Dict[str, Any] = {}
     try:
         mcp_url = os.environ["EVAL_MCP_URL"]
@@ -719,14 +718,9 @@ async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_i
 
     cancelled_sessions[session_id] = eval_info
 
-    # Cross-pod cancel signal. Backend runs as a multi-pod Deployment,
-    # so the chat_stream task lives in one pod's event loop while this
-    # cancel HTTP request may have landed on a different pod (ALB
-    # lb_cookie stickiness is configured but doesn't always survive the
-    # CloudFront → ALB → browser → ALB round-trip in practice). The
-    # in-memory `cancelled_sessions` dict only signals THIS pod; we
-    # also write to the DB so the pod actually running the agent
-    # task picks it up on its next poll.
+    # ALWAYS write the cross-pod signal — the task may live on a
+    # different pod, and that pod needs to see the cancel via its
+    # 500ms DB poll in run_agent_background.
     try:
         await asyncio.wait_for(
             db.mark_session_cancelled(session_id, json.dumps(eval_info)),
@@ -735,17 +729,22 @@ async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_i
     except (asyncio.TimeoutError, Exception) as e:
         logger.warning(f"[CANCEL] Failed to mark session cancelled in DB: {e}")
 
-    # task.cancel() is what actually stops the streaming response —
-    # the agent's CancelledError handler puts a "cancelled" event on
-    # the SSE queue, the frontend reads it and clears isLoading. So as
-    # soon as this returns, the UI's spinner stops.
-    task.cancel()
+    # task.cancel() is what stops the streaming response when the
+    # task is local. Cross-pod, the DB-poll path in
+    # run_agent_background does the equivalent within ~500ms.
+    if local_task_runnable:
+        local_task.cancel()
 
-    # Fire-and-forget the slow cleanup. Captured as a Task so it's not
-    # garbage-collected before completing.
+    # Fire-and-forget local MCP cancel + reconnect. If the eval is in
+    # this pod's sidecar this SIGTERMs the subprocess. If it's
+    # elsewhere this is a no-op — the right pod's agent loop fires
+    # its own local cancel when it picks up the DB row.
     asyncio.create_task(_cancel_eval_subprocess_and_reconnect(user_id))
 
-    logger.info(f"[CANCEL] User {user_id} cancelled session {session_id} (cleanup in background)")
+    logger.info(
+        f"[CANCEL] User {user_id} cancelled session {session_id} "
+        f"(local_task={local_task_runnable})"
+    )
 
     return {"success": True, "message": "Cancellation requested", **eval_info}
 

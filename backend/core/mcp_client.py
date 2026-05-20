@@ -218,6 +218,18 @@ class MultiMCPClient:
 
     async def list_tools(self, retry_on_empty: bool = True) -> List[Dict[str, Any]]:
         """List all available tools from all servers."""
+        # Wait for any in-flight reconnect to finish before reading
+        # self.sessions. Without this, the chat backend's cancel
+        # handler — which schedules `reconnect_server('eval')` as a
+        # background task for <200ms Stop response — races against
+        # the next agent turn's list_tools: reconnect deletes
+        # sessions['eval'] mid-loop, agent sees a half-state, and the
+        # whole next message fails with "Sorry, I encountered an error".
+        # The lock is held for nanoseconds outside actual reconnects;
+        # this is just a sync point.
+        async with self._reconnect_lock:
+            pass
+
         if not self.sessions:
             raise RuntimeError("Not connected to MCP servers")
 

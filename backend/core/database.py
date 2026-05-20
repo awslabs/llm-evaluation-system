@@ -5,6 +5,7 @@ Supports two authentication modes controlled by POSTGRES_USE_IAM_AUTH:
 - Password authentication: Uses POSTGRES_PASSWORD environment variable
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -50,6 +51,16 @@ class Database:
         # For IAM auth, track token generation time
         self._token_generated_at: float = 0
         self._pool: Optional[asyncpg.Pool] = None
+        # Serializes pool refresh so concurrent requests don't observe
+        # a half-closed pool. Without this lock, two coroutines arriving
+        # at _ensure_pool_fresh() simultaneously both call _create_pool()
+        # → A closes the old pool and starts opening a new one (~100ms-2s)
+        # → during that window, self._pool references a closed pool
+        # → any other request hitting self._pool.acquire() crashes with
+        #   InterfaceError: pool is closed. This was visible in EKS logs
+        #   as a chat_stream → db.create_user traceback every ~10 minutes
+        #   (IAM token TTL) plus more often under stress.
+        self._pool_lock: asyncio.Lock = asyncio.Lock()
 
     async def initialize(self):
         """Create connection pool and initialize schema. Must be called after __init__."""
@@ -88,18 +99,23 @@ class Database:
         return os.getenv("POSTGRES_PASSWORD", "")
 
     async def _create_pool(self):
-        """Create or recreate the connection pool."""
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.warning(f"Failed to close existing connection pool: {e}")
+        """Create or recreate the connection pool.
 
+        IMPORTANT: callers MUST hold ``self._pool_lock`` to serialize
+        recreation, otherwise concurrent callers double-close and race
+        on assigning self._pool. The two callers in this class do:
+          - ``initialize()`` at startup — single-threaded, no race
+          - ``_ensure_pool_fresh()`` — acquires the lock itself
+        Build the new pool FIRST, then swap self._pool atomically, then
+        close the old one. That way self._pool never references a closed
+        pool, even if some weird code path doesn't go through the
+        _ensure_pool_fresh guard.
+        """
         connect_kwargs = {}
         if self.use_iam_auth:
             connect_kwargs["ssl"] = "require"
 
-        self._pool = await asyncpg.create_pool(
+        new_pool = await asyncpg.create_pool(
             host=self.host,
             port=self.port,
             database=self.database,
@@ -109,15 +125,39 @@ class Database:
             max_size=20,
             **connect_kwargs,
         )
+
+        old_pool = self._pool
+        self._pool = new_pool
         self._token_generated_at = time.time()
 
+        if old_pool is not None:
+            try:
+                await old_pool.close()
+            except Exception as e:
+                logger.warning(f"Failed to close previous connection pool: {e}")
+
     async def _ensure_pool_fresh(self):
-        """Ensure the connection pool has a fresh IAM token."""
+        """Ensure the connection pool has a fresh IAM token.
+
+        Serialized: the first caller that finds the token stale
+        recreates the pool; subsequent callers wait on the lock and,
+        when they get in, find the token already fresh (within the
+        last ~ms) and return without recreating.
+        """
         if not self.use_iam_auth:
             return  # No token refresh needed for password auth
 
+        # Cheap check first — avoid lock contention in the common case
         elapsed = time.time() - self._token_generated_at
-        if elapsed >= self.TOKEN_REFRESH_SECONDS:
+        if elapsed < self.TOKEN_REFRESH_SECONDS:
+            return
+
+        async with self._pool_lock:
+            # Re-check under the lock — by the time we got it, another
+            # coroutine may have already refreshed.
+            elapsed = time.time() - self._token_generated_at
+            if elapsed < self.TOKEN_REFRESH_SECONDS:
+                return
             logger.info("Refreshing database connection pool (IAM token expiring)")
             await self._create_pool()
 

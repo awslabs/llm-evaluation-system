@@ -203,12 +203,14 @@ class BedrockClient:
     """Client for interacting with Claude on AWS Bedrock.
 
     Singleton pattern: Only one boto3 client instance is created per region.
-    Concurrency limiting: Semaphore limits concurrent Bedrock API calls to 100
-    to avoid overwhelming AWS Bedrock's infrastructure capacity.
+    Concurrency is managed by boto3's adaptive retry mode (configured in
+    create_boto3_bedrock_client) which dynamically backs off on throttling
+    and ramps up on success. Per-customer Bedrock quotas are auto-handled
+    without configuration; the HTTP connection pool (max_pool_connections)
+    is the hard ceiling on parallel in-flight calls.
     """
 
     _instances: Dict[str, "BedrockClient"] = {}
-    _semaphore = threading.Semaphore(100)  # Max 100 concurrent Bedrock API calls
 
     def __new__(cls, region: str = "us-west-2") -> "BedrockClient":
         """Singleton: Return existing instance for this region if it exists."""
@@ -303,26 +305,25 @@ class BedrockClient:
         if tool_choice:
             request_body["tool_choice"] = tool_choice
 
-        # Use semaphore to limit concurrent Bedrock API calls
-        with self._semaphore:
-            for attempt in range(3):
-                try:
-                    response = self.client.invoke_model(
-                        modelId=self.model_id,
-                        body=json.dumps(request_body),
-                    )
+        # Concurrency / throttling handled by boto3 adaptive retry mode.
+        for attempt in range(3):
+            try:
+                response = self.client.invoke_model(
+                    modelId=self.model_id,
+                    body=json.dumps(request_body),
+                )
 
-                    response_body = json.loads(response["body"].read())
-                    return response_body
+                response_body = json.loads(response["body"].read())
+                return response_body
 
-                except ClientError as e:
-                    if e.response["Error"]["Code"] == "InvalidSignatureException" and attempt < 2:
-                        logger.warning("Clock skew detected, retrying in %ds...", attempt + 1)
-                        time.sleep(attempt + 1)
-                        continue
-                    raise RuntimeError(f"Bedrock API call failed: {e}")
-                except Exception as e:
-                    raise RuntimeError(f"Bedrock API call failed: {e}")
+            except ClientError as e:
+                if e.response["Error"]["Code"] == "InvalidSignatureException" and attempt < 2:
+                    logger.warning("Clock skew detected, retrying in %ds...", attempt + 1)
+                    time.sleep(attempt + 1)
+                    continue
+                raise RuntimeError(f"Bedrock API call failed: {e}")
+            except Exception as e:
+                raise RuntimeError(f"Bedrock API call failed: {e}")
 
     async def create_message_streaming(
         self,
@@ -363,19 +364,18 @@ class BedrockClient:
         loop = asyncio.get_event_loop()
 
         def _invoke():
-            with self._semaphore:
-                for attempt in range(3):
-                    try:
-                        return self.client.invoke_model_with_response_stream(
-                            modelId=self.model_id,
-                            body=json.dumps(request_body),
-                        )
-                    except ClientError as e:
-                        if e.response["Error"]["Code"] == "InvalidSignatureException" and attempt < 2:
-                            logger.warning("Clock skew detected, retrying in %ds...", attempt + 1)
-                            time.sleep(attempt + 1)
-                            continue
-                        raise
+            for attempt in range(3):
+                try:
+                    return self.client.invoke_model_with_response_stream(
+                        modelId=self.model_id,
+                        body=json.dumps(request_body),
+                    )
+                except ClientError as e:
+                    if e.response["Error"]["Code"] == "InvalidSignatureException" and attempt < 2:
+                        logger.warning("Clock skew detected, retrying in %ds...", attempt + 1)
+                        time.sleep(attempt + 1)
+                        continue
+                    raise
 
         response = await loop.run_in_executor(None, _invoke)
 

@@ -623,29 +623,38 @@ async def _generate_qa_from_text_chunks(
     base_pairs = max(1, min(MAX_QA_PER_CHUNK, num_pairs // len(chunks)))
     remainder = num_pairs % len(chunks)
 
-    all_qa_pairs = []
-
-    for i, chunk in enumerate(chunks):
-        # First 'remainder' chunks get one extra pair
+    async def _one_chunk(i: int, chunk) -> List[Dict[str, Any]]:
         pairs_for_this_chunk = base_pairs + (1 if i < remainder else 0)
         pairs_for_this_chunk = min(pairs_for_this_chunk, MAX_QA_PER_CHUNK)
-
-        # Format chunk with context separation
         formatted_content = format_chunk_prompt_text(chunk)
-
         chunk_qa = await _generate_qa_from_content(
             bedrock, user_id, doc_path,
             formatted_content, "text/plain",
             pairs_for_this_chunk, prompt, instructions,
             chunk_info=f"This is chunk {i + 1} of {len(chunks)} from the document."
         )
-
-        all_qa_pairs.extend(chunk_qa)
-
         log_event(logger, "info", "chunk_processed",
                   user_id=user_id, document=doc_path,
                   chunk=i + 1, total_chunks=len(chunks),
                   qa_count=len(chunk_qa))
+        return chunk_qa
+
+    # Fan chunks out concurrently. boto3 adaptive retry handles per-account
+    # Bedrock throttling automatically; no artificial caps needed at this layer.
+    results = await asyncio.gather(
+        *(_one_chunk(i, c) for i, c in enumerate(chunks)),
+        return_exceptions=True,
+    )
+
+    all_qa_pairs: List[Dict[str, Any]] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            log_event(logger, "error", "chunk_error",
+                      user_id=user_id, document=doc_path,
+                      chunk=i + 1, error=str(result),
+                      error_type=type(result).__name__)
+        else:
+            all_qa_pairs.extend(result)
 
     return all_qa_pairs
 
@@ -684,14 +693,9 @@ async def _generate_qa_from_pdf_chunks(
     base_pairs = max(1, min(MAX_QA_PER_CHUNK, num_pairs // len(chunks)))
     remainder = num_pairs % len(chunks)
 
-    all_qa_pairs = []
-
-    for i, chunk in enumerate(chunks):
-        # First 'remainder' chunks get one extra pair
+    async def _one_chunk(i: int, chunk) -> List[Dict[str, Any]]:
         pairs_for_this_chunk = base_pairs + (1 if i < remainder else 0)
         pairs_for_this_chunk = min(pairs_for_this_chunk, MAX_QA_PER_CHUNK)
-
-        # Encode this chunk's extracted PDF
         chunk_b64 = base64.standard_b64encode(chunk.pdf_bytes).decode("utf-8")
         doc_content = {
             "type": "document",
@@ -701,24 +705,36 @@ async def _generate_qa_from_pdf_chunks(
                 "data": chunk_b64,
             },
         }
-
-        # Format chunk context (informational, not instructional)
         page_instructions = format_chunk_prompt_pdf(chunk, i, len(chunks))
-
         chunk_qa = await _generate_qa_from_content(
             bedrock, user_id, doc_path,
             doc_content, "application/pdf",
             pairs_for_this_chunk, prompt, instructions,
             chunk_info=page_instructions
         )
-
-        all_qa_pairs.extend(chunk_qa)
-
         log_event(logger, "info", "pdf_chunk_processed",
                   user_id=user_id, document=doc_path,
                   chunk=i + 1, total_chunks=len(chunks),
                   pages=f"{chunk.chunk_start_page}-{chunk.chunk_end_page}",
                   qa_count=len(chunk_qa))
+        return chunk_qa
+
+    # Fan chunks out concurrently. boto3 adaptive retry handles per-account
+    # Bedrock throttling automatically; no artificial caps needed at this layer.
+    results = await asyncio.gather(
+        *(_one_chunk(i, c) for i, c in enumerate(chunks)),
+        return_exceptions=True,
+    )
+
+    all_qa_pairs: List[Dict[str, Any]] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            log_event(logger, "error", "pdf_chunk_error",
+                      user_id=user_id, document=doc_path,
+                      chunk=i + 1, error=str(result),
+                      error_type=type(result).__name__)
+        else:
+            all_qa_pairs.extend(result)
 
     return all_qa_pairs
 

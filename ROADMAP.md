@@ -31,7 +31,7 @@ The evaluation engine (Inspect AI) already routes to OpenAI, Anthropic, Google, 
 
 ### Coming soon
 - Cross-OS / cross-IDE install canary in CI — automated verification on macOS, Linux, and Windows with each release
-- Concurrency hardening — load-test the 100-call Bedrock semaphore and the HTTP transport beyond the current ~43 lines of coverage
+- Concurrency hardening — load-test boto3 adaptive throttling against Bedrock and the HTTP transport beyond the current ~43 lines of coverage
 
 ### Researching
 - Multi-tenant eval queue for shared deployments
@@ -122,7 +122,7 @@ Two agentic frameworks are tested end-to-end (Strands, LangChain+LangGraph). RAG
 - Real failure-mode regression tests (today `test_run_eval_fail_loud.py` only tests the predicate)
 
 ### Coming soon
-- Concurrent eval scaling tests against the 100-call Bedrock semaphore
+- Concurrent eval scaling tests against Bedrock adaptive throttling
 - HTTP transport coverage parity with stdio
 
 ### Researching

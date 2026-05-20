@@ -105,7 +105,6 @@ NumSamples = Annotated[
     int,
     Field(
         ge=1,
-        le=500,
         description="How many QA samples / test cases to generate.",
         examples=[10, 15, 50],
     ),

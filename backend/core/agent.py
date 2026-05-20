@@ -685,56 +685,29 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
 
         Yields progress events every 30 seconds to prevent body timeout.
         Final event has type='result' with the actual result data.
-
-        Cancellation: ``asyncio.wait()`` does NOT propagate cancellation
-        to its child tasks (this is well-documented but easy to miss).
-        We use ``create_task`` to fork an MCP call so the keepalive can
-        run independently, but that means clicking Stop while a tool is
-        in flight only cancels the agent's outer await — the actual
-        tool_task keeps running, the chat backend's MCP call keeps
-        consuming Bedrock budget, and worst of all the SSE stream stays
-        open behind the orphan, leaving "Stopping…" frozen on the UI.
-
-        Explicitly cancel the child task in a finally so cancellation
-        propagates correctly.
         """
         import asyncio
 
         tool_task = asyncio.create_task(self._execute_tool(tool_name, arguments))
         elapsed = 0
 
-        try:
-            while True:
-                done, _ = await asyncio.wait({tool_task}, timeout=30)
+        while True:
+            done, _ = await asyncio.wait({tool_task}, timeout=30)
 
-                if tool_task in done:
-                    result = tool_task.result()
-                    yield {"type": "result", "data": result}
-                    return
+            if tool_task in done:
+                result = tool_task.result()
+                yield {"type": "result", "data": result}
+                return
 
-                # Send keepalive every 30 seconds
-                elapsed += 30
-                yield {
-                    "type": "progress",
-                    "data": {
-                        "message": f"Still working on {tool_name}... ({elapsed}s elapsed)",
-                        "elapsed": elapsed
-                    }
+            # Send keepalive every 30 seconds
+            elapsed += 30
+            yield {
+                "type": "progress",
+                "data": {
+                    "message": f"Still working on {tool_name}... ({elapsed}s elapsed)",
+                    "elapsed": elapsed
                 }
-        finally:
-            # Propagate cancellation/cleanup to the forked tool call.
-            # Without this, the MCP call leaks: outer task is cancelled,
-            # but the inner task keeps running, holding the SSE stream
-            # open until the eval completes naturally (could be minutes).
-            if not tool_task.done():
-                tool_task.cancel()
-                try:
-                    await tool_task
-                except BaseException:
-                    # CancelledError is expected; any other exception
-                    # is from the tool itself and irrelevant now (we're
-                    # already unwinding).
-                    pass
+            }
 
     def clear_history(self) -> None:
         """Clear conversation history."""

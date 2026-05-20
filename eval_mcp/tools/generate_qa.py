@@ -623,29 +623,38 @@ async def _generate_qa_from_text_chunks(
     base_pairs = max(1, min(MAX_QA_PER_CHUNK, num_pairs // len(chunks)))
     remainder = num_pairs % len(chunks)
 
-    all_qa_pairs = []
-
-    for i, chunk in enumerate(chunks):
-        # First 'remainder' chunks get one extra pair
+    async def _one_chunk(i: int, chunk) -> List[Dict[str, Any]]:
         pairs_for_this_chunk = base_pairs + (1 if i < remainder else 0)
         pairs_for_this_chunk = min(pairs_for_this_chunk, MAX_QA_PER_CHUNK)
-
-        # Format chunk with context separation
         formatted_content = format_chunk_prompt_text(chunk)
-
         chunk_qa = await _generate_qa_from_content(
             bedrock, user_id, doc_path,
             formatted_content, "text/plain",
             pairs_for_this_chunk, prompt, instructions,
             chunk_info=f"This is chunk {i + 1} of {len(chunks)} from the document."
         )
-
-        all_qa_pairs.extend(chunk_qa)
-
         log_event(logger, "info", "chunk_processed",
                   user_id=user_id, document=doc_path,
                   chunk=i + 1, total_chunks=len(chunks),
                   qa_count=len(chunk_qa))
+        return chunk_qa
+
+    # Fan chunks out concurrently. boto3 adaptive retry handles per-account
+    # Bedrock throttling automatically; no artificial caps needed at this layer.
+    results = await asyncio.gather(
+        *(_one_chunk(i, c) for i, c in enumerate(chunks)),
+        return_exceptions=True,
+    )
+
+    all_qa_pairs: List[Dict[str, Any]] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            log_event(logger, "error", "chunk_error",
+                      user_id=user_id, document=doc_path,
+                      chunk=i + 1, error=str(result),
+                      error_type=type(result).__name__)
+        else:
+            all_qa_pairs.extend(result)
 
     return all_qa_pairs
 
@@ -684,14 +693,9 @@ async def _generate_qa_from_pdf_chunks(
     base_pairs = max(1, min(MAX_QA_PER_CHUNK, num_pairs // len(chunks)))
     remainder = num_pairs % len(chunks)
 
-    all_qa_pairs = []
-
-    for i, chunk in enumerate(chunks):
-        # First 'remainder' chunks get one extra pair
+    async def _one_chunk(i: int, chunk) -> List[Dict[str, Any]]:
         pairs_for_this_chunk = base_pairs + (1 if i < remainder else 0)
         pairs_for_this_chunk = min(pairs_for_this_chunk, MAX_QA_PER_CHUNK)
-
-        # Encode this chunk's extracted PDF
         chunk_b64 = base64.standard_b64encode(chunk.pdf_bytes).decode("utf-8")
         doc_content = {
             "type": "document",
@@ -701,26 +705,50 @@ async def _generate_qa_from_pdf_chunks(
                 "data": chunk_b64,
             },
         }
-
-        # Format chunk context (informational, not instructional)
         page_instructions = format_chunk_prompt_pdf(chunk, i, len(chunks))
-
         chunk_qa = await _generate_qa_from_content(
             bedrock, user_id, doc_path,
             doc_content, "application/pdf",
             pairs_for_this_chunk, prompt, instructions,
             chunk_info=page_instructions
         )
-
-        all_qa_pairs.extend(chunk_qa)
-
         log_event(logger, "info", "pdf_chunk_processed",
                   user_id=user_id, document=doc_path,
                   chunk=i + 1, total_chunks=len(chunks),
                   pages=f"{chunk.chunk_start_page}-{chunk.chunk_end_page}",
                   qa_count=len(chunk_qa))
+        return chunk_qa
+
+    # Fan chunks out concurrently. boto3 adaptive retry handles per-account
+    # Bedrock throttling automatically; no artificial caps needed at this layer.
+    results = await asyncio.gather(
+        *(_one_chunk(i, c) for i, c in enumerate(chunks)),
+        return_exceptions=True,
+    )
+
+    all_qa_pairs: List[Dict[str, Any]] = []
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            log_event(logger, "error", "pdf_chunk_error",
+                      user_id=user_id, document=doc_path,
+                      chunk=i + 1, error=str(result),
+                      error_type=type(result).__name__)
+        else:
+            all_qa_pairs.extend(result)
 
     return all_qa_pairs
+
+
+def _allocate_pairs(total: int, n_bins: int) -> List[int]:
+    """Distribute `total` across `n_bins` with remainder distribution so the
+    integer-truncation tail doesn't get silently dropped. Bins[0..remainder-1]
+    get one extra, the rest get the base value.
+    """
+    if n_bins <= 0:
+        return []
+    base = total // n_bins
+    remainder = total % n_bins
+    return [base + (1 if i < remainder else 0) for i in range(n_bins)]
 
 
 async def generate_qa_pairs_from_documents(
@@ -733,6 +761,12 @@ async def generate_qa_pairs_from_documents(
 ) -> List[Dict[str, Any]]:
     """Generate QA pairs from multiple documents in parallel.
 
+    Targets exactly ``num_samples`` total: distributes the request with
+    remainder math (no integer-truncation loss), then if any docs underproduce
+    (e.g. an image with no extractable text), runs one backfill pass on the
+    producing docs to make up the gap. Returns ``num_samples`` pairs when
+    content allows; fewer only when content is genuinely insufficient.
+
     Args:
         bedrock: Bedrock client
         user_id: User ID for document lookup
@@ -742,37 +776,77 @@ async def generate_qa_pairs_from_documents(
         instructions: Optional additional instructions
 
     Returns:
-        List of all QA pairs from all documents
+        List of QA pairs from all documents (≤ num_samples).
     """
     # Enforce limits
     if len(doc_paths) > MAX_DOCUMENTS:
         raise ValueError(f"Maximum {MAX_DOCUMENTS} documents allowed, got {len(doc_paths)}")
 
-    # Distribute requested samples across documents
-    # Large documents will be chunked and can generate more (20 per chunk)
-    pairs_per_doc = max(1, num_samples // len(doc_paths))
+    n_docs = len(doc_paths)
 
-    # Process documents in parallel
-    tasks = [
-        generate_qa_pairs_from_document(
-            bedrock, user_id, doc_path, pairs_per_doc, prompt, instructions
-        )
-        for doc_path in doc_paths
-    ]
+    async def _run(allocs: List[int], paths: List[str]) -> List[List[Dict[str, Any]]]:
+        """Run one parallel pass over (path, allocation) pairs.
 
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+        Returns one list per path (empty for exceptions). Allocations of 0
+        are skipped — no point asking a doc for zero pairs.
+        """
+        tasks = [
+            generate_qa_pairs_from_document(
+                bedrock, user_id, p, n, prompt, instructions
+            )
+            for p, n in zip(paths, allocs) if n > 0
+        ]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Re-align results to the input ordering (empty for n==0 entries)
+        out: List[List[Dict[str, Any]]] = []
+        result_iter = iter(results)
+        for n, path in zip(allocs, paths):
+            if n <= 0:
+                out.append([])
+                continue
+            result = next(result_iter)
+            if isinstance(result, Exception):
+                log_event(logger, "error", "document_processing_error",
+                          user_id=user_id, document=path,
+                          error=str(result), error_type=type(result).__name__)
+                out.append([])
+            else:
+                out.append(result)
+        return out
 
-    # Collect results, handling any errors
-    all_qa_pairs = []
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            log_event(logger, "error", "document_processing_error",
-                      user_id=user_id, document=doc_paths[i],
-                      error=str(result), error_type=type(result).__name__)
-        else:
-            all_qa_pairs.extend(result)
+    # Pass 1: distribute the full request with remainder math.
+    pairs_by_doc = await _run(_allocate_pairs(num_samples, n_docs), doc_paths)
+    total = sum(len(p) for p in pairs_by_doc)
 
-    # Return all generated pairs - chunked documents produce more QA pairs
+    # Pass 2: if short (e.g. one doc was an image with no text and returned 0),
+    # ask the docs that DID produce content to make up the gap. Bounded to one
+    # extra pass so cost stays bounded.
+    if total < num_samples:
+        gap = num_samples - total
+        producing_idx = [i for i, p in enumerate(pairs_by_doc) if len(p) > 0]
+        if producing_idx:
+            log_event(logger, "info", "qa_backfill",
+                      user_id=user_id, gap=gap,
+                      producing_docs=len(producing_idx),
+                      first_pass_total=total)
+            backfill_allocs = _allocate_pairs(gap, len(producing_idx))
+            backfill_paths = [doc_paths[i] for i in producing_idx]
+            backfill_results = await _run(backfill_allocs, backfill_paths)
+            for orig_idx, extra in zip(producing_idx, backfill_results):
+                pairs_by_doc[orig_idx].extend(extra)
+
+    all_qa_pairs = [pair for doc_pairs in pairs_by_doc for pair in doc_pairs]
+
+    # Trim to exact target — the backfill pass can slightly overshoot when
+    # Claude returns more than asked, and that's fine; just clip.
+    if len(all_qa_pairs) > num_samples:
+        all_qa_pairs = all_qa_pairs[:num_samples]
+
+    if len(all_qa_pairs) < num_samples:
+        log_event(logger, "warning", "qa_under_target",
+                  user_id=user_id, requested=num_samples,
+                  delivered=len(all_qa_pairs))
+
     return all_qa_pairs
 
 

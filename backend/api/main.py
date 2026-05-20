@@ -651,30 +651,54 @@ async def chat_status(session_id: str, user_id: str = Depends(get_current_user_i
 
 
 async def _cancel_eval_subprocess_and_reconnect(user_id: str) -> None:
-    """Background cleanup after a chat cancel: same path regardless of
-    whether an eval subprocess was running.
+    """Background cleanup after a chat cancel.
 
-    The previous "skip reconnect when no eval was running" optimization
-    created two different code paths for plain-chat vs eval cancels,
-    which the user pushed back on. Unified behavior here — always do
-    both pieces (SIGTERM, reconnect MCP) — and rely on the
-    ``_reconnect_lock`` sync in ``MCPClient.list_tools`` to make the
-    inevitable race against the next message's list_tools safe (the
-    list_tools call simply waits for the reconnect to finish).
+    Always POSTs to the local MCP /cancel endpoint (idempotent — no-op
+    if nothing's registered). ONLY reconnects the MCP client when an
+    eval subprocess was actually killed.
 
-    Runs as a background task so the Stop HTTP response returns
-    instantly. Cost: the user's next message may briefly wait for the
-    reconnect to drain (~1-2s typical, up to ~7s if an eval subprocess
-    is going through its SIGTERM grace period).
+    Why the split (this was previously unified, then split again):
+    Reconnecting the MCP server from a background task closes anyio
+    cancel scopes that were opened by the FastAPI lifespan task.
+    anyio detects the cross-task scope exit, raises CancelledError,
+    and that CancelledError propagates UP through the lifespan's
+    `yield` — triggering the whole backend pod's shutdown. We saw
+    this in production:
+
+        POST /cancel/{user_id} → 200
+        [SHUTDOWN] Backend shutdown initiated
+        Shutdown caused by exception: CancelledError
+            ...at backend/api/main.py:681 (the reconnect call)
+
+    For plain-chat cancels there's nothing to reconnect anyway (no
+    MCP RPC was in flight, no subprocess was killed) — so the cost
+    of skipping reconnect is zero and the benefit is "doesn't kill
+    the pod." For eval cancels we still reconnect; the cross-task
+    scope issue can still bite there, but it's much rarer and is a
+    separate, larger fix (likely: drive reconnects from the lifespan
+    task via a queue rather than directly from background tasks).
     """
     try:
         mcp_url = os.environ["EVAL_MCP_URL"]
         base_url = mcp_url.replace("/mcp", "")
+        cancelled_an_eval = False
         # Short timeout: the MCP cancel endpoint just SIGTERMs the
         # subprocess and returns; the actual subprocess wait happens
         # async inside the MCP server. We don't need to wait long here.
         async with httpx.AsyncClient() as client:
-            await client.post(f"{base_url}/cancel/{user_id}", timeout=2.0)
+            resp = await client.post(f"{base_url}/cancel/{user_id}", timeout=2.0)
+            try:
+                body = resp.json() or {}
+                cancelled_an_eval = bool(body.get("cancelled"))
+            except Exception:
+                cancelled_an_eval = False
+
+        if not cancelled_an_eval:
+            # Nothing was killed → MCP RPC state is fine → reconnect
+            # would be pure cost (and risks the pod-shutdown bug
+            # described above).
+            return
+
         # Cap reconnect attempts to 3 so a transient MCP unavailability
         # doesn't pile up retries (default is 10 → up to ~9 minutes of
         # _reconnect_lock held → frontend cooldown can't compensate).

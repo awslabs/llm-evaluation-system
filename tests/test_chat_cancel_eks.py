@@ -219,3 +219,106 @@ async def test_cross_pod_cancel_chat_writes_db_row_with_no_local_task(monkeypatc
         f"cancel_chat must return success when it signaled the cancel via DB, "
         f"even if no local task existed. Got: {response!r}"
     )
+
+
+@pytest.mark.asyncio
+async def test_cancel_eval_skips_reconnect_when_nothing_was_killed(monkeypatch):
+    """Reconnecting MCP from a background task closes anyio cancel
+    scopes that were opened by the lifespan task. anyio raises
+    CancelledError, which propagates UP through the lifespan's
+    `yield` and shuts the whole pod down. We saw this in prod:
+
+        POST /cancel/{user_id} → 200
+        [SHUTDOWN] Backend shutdown initiated
+        Shutdown caused by exception: CancelledError ...at line 681
+        (the reconnect call)
+
+    For plain-chat cancels there's nothing to reconnect — no MCP RPC
+    was in flight. Skipping the reconnect both saves work AND avoids
+    the pod-shutdown bug. This test pins that: when /cancel returns
+    {"cancelled": False, ...}, reconnect_server MUST NOT be called.
+    """
+    from backend.api import main
+
+    user_id = "test-user-skip-reconnect"
+
+    class _NoEvalResp:
+        def json(self):
+            return {"cancelled": False, "reason": "no running eval"}
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def post(self, *a, **k):
+            return _NoEvalResp()
+
+    monkeypatch.setattr(main, "httpx", MagicMock(AsyncClient=lambda: _FakeClient()))
+
+    reconnect_called = asyncio.Event()
+    fake_mcp = MagicMock()
+
+    async def fake_reconnect(*a, **k):
+        reconnect_called.set()
+
+    fake_mcp.reconnect_server = fake_reconnect
+    monkeypatch.setattr(main, "mcp_client", fake_mcp)
+
+    monkeypatch.setenv("EVAL_MCP_URL", "http://localhost:8002/mcp")
+
+    await main._cancel_eval_subprocess_and_reconnect(user_id)
+
+    assert not reconnect_called.is_set(), (
+        "_cancel_eval_subprocess_and_reconnect called reconnect_server "
+        "even though /cancel returned {cancelled: False}. That's the "
+        "production bug: reconnect from a background task closes "
+        "anyio scopes owned by the lifespan task and shuts the pod down. "
+        "For plain-chat cancels there's nothing to reconnect — skip it."
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_eval_does_reconnect_when_eval_was_killed(monkeypatch):
+    """Symmetric to the skip test: when an eval WAS killed, reconnect
+    is still called. We accept the cross-task anyio risk in that case
+    because (a) eval cancels are rarer than plain-chat cancels and
+    (b) reconnect is the documented way to flush MCP RPC state after
+    a SIGTERM. The deeper fix (drive reconnects from the lifespan
+    task) is a separate, larger change.
+    """
+    from backend.api import main
+
+    user_id = "test-user-killed-eval"
+
+    class _KilledEvalResp:
+        def json(self):
+            return {"cancelled": True, "evalId": "e1", "configName": "c1"}
+
+    class _FakeClient:
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def post(self, *a, **k):
+            return _KilledEvalResp()
+
+    monkeypatch.setattr(main, "httpx", MagicMock(AsyncClient=lambda: _FakeClient()))
+
+    reconnect_called = asyncio.Event()
+    fake_mcp = MagicMock()
+
+    async def fake_reconnect(*a, **k):
+        reconnect_called.set()
+
+    fake_mcp.reconnect_server = fake_reconnect
+    monkeypatch.setattr(main, "mcp_client", fake_mcp)
+
+    monkeypatch.setenv("EVAL_MCP_URL", "http://localhost:8002/mcp")
+
+    await main._cancel_eval_subprocess_and_reconnect(user_id)
+
+    assert reconnect_called.is_set(), (
+        "When an eval was actually killed, reconnect_server should "
+        "still be called to flush any in-flight MCP RPC state."
+    )

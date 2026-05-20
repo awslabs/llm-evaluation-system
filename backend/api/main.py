@@ -646,18 +646,38 @@ async def chat_status(session_id: str, user_id: str = Depends(get_current_user_i
 
 async def _cancel_eval_subprocess_and_reconnect(user_id: str) -> None:
     """Background cleanup after a chat cancel: SIGTERM the user's eval
-    subprocess (with up to 5s SIGTERM-grace + SIGKILL internally), then
-    reconnect the eval MCP server so any in-flight RPC state from the
-    cancelled call is dropped. Runs detached from the HTTP request so
-    Stop returns to the user in <200ms instead of waiting ~10s for the
-    subprocess to exit gracefully.
+    subprocess if one is running (with up to 5s SIGTERM-grace + SIGKILL
+    internally), then reconnect the eval MCP server ONLY if a subprocess
+    was actually killed — otherwise the reconnect just creates a race
+    with the next message's list_tools (the agent's next turn calls
+    list_tools immediately; if we reconnect for no reason in the
+    background, list_tools spins on the lock for ~5s and the user sees
+    "Sorry, I encountered an error processing your request").
+
+    For plain chat cancellations (no MCP tool call in flight — just a
+    cancelled Bedrock stream), there's no stale RPC state to clear,
+    so we skip the reconnect entirely.
     """
     try:
         mcp_url = os.environ["EVAL_MCP_URL"]
         base_url = mcp_url.replace("/mcp", "")
+        eval_id = None
         async with httpx.AsyncClient() as client:
-            await client.post(f"{base_url}/cancel/{user_id}", timeout=10.0)
-        await mcp_client.reconnect_server("eval")
+            resp = await client.post(f"{base_url}/cancel/{user_id}", timeout=10.0)
+            try:
+                eval_id = (resp.json() or {}).get("evalId")
+            except Exception:
+                eval_id = None
+
+        if eval_id:
+            # An eval subprocess was actually mid-flight; its MCP RPC
+            # connection may be in a half-state. Reconnect to be safe.
+            await mcp_client.reconnect_server("eval")
+        else:
+            logger.info(
+                f"[CANCEL bg] No eval subprocess was running for {user_id}; "
+                f"skipping MCP reconnect"
+            )
     except Exception as e:
         logger.warning(f"[CANCEL bg] Failed to clean up eval state for {user_id}: {e}")
 

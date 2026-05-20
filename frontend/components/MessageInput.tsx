@@ -54,6 +54,10 @@ interface MessageInputProps {
   onCancel: () => void;
   disabled: boolean;
   isStreaming: boolean;
+  // True after the user clicks Stop and before the SSE stream
+  // actually terminates. Drives the button's "Stopping…" state so
+  // there's instant visual feedback on click.
+  isCancelling?: boolean;
   onDocumentsUploaded: (result: UploadResult) => void;
 }
 
@@ -64,6 +68,7 @@ export default function MessageInput({
   onCancel,
   disabled,
   isStreaming,
+  isCancelling = false,
   onDocumentsUploaded,
 }: MessageInputProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -327,10 +332,13 @@ export default function MessageInput({
           {isStreaming ? (
             <button
               onClick={onCancel}
-              className="m-2 inline-flex items-center gap-2 border border-ember bg-ember-soft px-4 py-2 font-mono text-[11px] uppercase tracking-eyebrow text-ember transition-colors hover:bg-ember hover:text-ink"
+              disabled={isCancelling}
+              className="m-2 inline-flex items-center gap-2 border border-ember bg-ember-soft px-4 py-2 font-mono text-[11px] uppercase tracking-eyebrow text-ember transition-colors hover:bg-ember hover:text-ink disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-ember-soft disabled:hover:text-ember"
             >
-              <span className="block h-2 w-2 bg-ember" />
-              Stop
+              <span
+                className={`block h-2 w-2 bg-ember ${isCancelling ? "animate-pulse" : ""}`}
+              />
+              {isCancelling ? "Stopping…" : "Stop"}
             </button>
           ) : (
             <button

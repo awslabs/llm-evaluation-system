@@ -158,32 +158,34 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
                 console.print(f"[yellow]Warning: Could not load tool descriptions: {e}[/yellow]")
             # Continue without descriptions - use fallback later
 
-    def _fix_orphaned_tool_uses(self) -> None:
-        """Fix conversation history if last assistant message has tool_uses without tool_results.
+    def _orphan_tool_result_blocks(self) -> List[Dict[str, Any]]:
+        """If the last assistant turn ended with unanswered ``tool_use``
+        blocks (because the request was cancelled mid-tool-execution),
+        return ``tool_result`` blocks for each one. Caller is expected
+        to bundle these into the NEXT user message — appending them as
+        their own user message would create two consecutive user
+        messages, which Bedrock's Converse API rejects ("messages must
+        alternate roles"). Empty list when there's nothing to fix.
 
-        This can happen if a request was cancelled mid-tool-execution.
-        Bedrock requires every tool_use to have a corresponding tool_result.
+        Bedrock requires every tool_use to have a corresponding
+        tool_result, so we always close out orphans before the model
+        sees the conversation again.
         """
         if len(self.conversation_history) < 1:
-            return
+            return []
 
         last_msg = self.conversation_history[-1]
-
-        # Check if last message is from assistant with tool_use blocks
         if last_msg.get("role") != "assistant":
-            return
+            return []
 
         content = last_msg.get("content", [])
         if not isinstance(content, list):
-            return
+            return []
 
-        # Find tool_use blocks
         tool_uses = [block for block in content if isinstance(block, dict) and block.get("type") == "tool_use"]
-
         if not tool_uses:
-            return
+            return []
 
-        # Build cancel message with eval info if available
         cancel_message = "[Request was cancelled]"
         eval_id = self.cancel_info.get("evalId")
         if eval_id:
@@ -195,17 +197,71 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
             )
             self.cancel_info = {}  # Clear after use
 
-        # Need to add tool_results for each tool_use
-        agent_logger.debug(f"Fixing {len(tool_uses)} orphaned tool_use(s) from cancelled request")
-        tool_results = []
-        for tool_use in tool_uses:
-            tool_results.append({
+        agent_logger.debug(f"Bundling {len(tool_uses)} orphan tool_result(s) into next user message")
+        return [
+            {
                 "type": "tool_result",
                 "tool_use_id": tool_use.get("id"),
                 "content": cancel_message,
+            }
+            for tool_use in tool_uses
+        ]
+
+    def _build_user_message(self, user_text: str) -> Dict[str, Any]:
+        """Build the next user message, healing whatever role-alternation
+        breakage the prior cancel may have left behind. Returns a single
+        ``{role: "user", content: ...}`` dict — caller appends it once.
+
+        Three breakage shapes we have to cover:
+
+        1. Prior assistant turn ended with unanswered ``tool_use`` blocks
+           (cancelled mid-tool-execution). Bundle synthetic ``tool_result``
+           blocks for each one into THIS user message — Bedrock requires
+           every tool_use to have a matching tool_result, AND requires
+           the closing-out message and the user's new text to be one
+           message (consecutive same-role messages also error out).
+
+        2. No assistant turn was appended at all because the cancel
+           landed mid-Bedrock-stream, before the streaming loop reached
+           its "append assistant" step. ``conversation_history`` ends
+           with a user message, and naively appending another user
+           message would hit the same alternation error. Insert a
+           synthetic assistant ack first so the new turn follows an
+           assistant turn.
+
+        3. Normal — last message is from assistant, no orphan tool_use.
+           Just return the new user message as a plain string.
+        """
+        orphan_blocks = self._orphan_tool_result_blocks()
+        if orphan_blocks:
+            # Case 1 — last msg is assistant with tool_use; bundle
+            # tool_results + new text into one user message.
+            return {
+                "role": "user",
+                "content": [
+                    *orphan_blocks,
+                    {"type": "text", "text": user_text},
+                ],
+            }
+
+        # Case 2 — last msg is user (cancelled before any assistant
+        # turn was appended). Insert a synthetic assistant message so
+        # the alternation invariant holds.
+        if (
+            self.conversation_history
+            and self.conversation_history[-1].get("role") == "user"
+        ):
+            agent_logger.debug(
+                "Inserting synthetic assistant turn between two user messages "
+                "(cancel landed mid-Bedrock-stream before assistant turn was appended)"
+            )
+            self.conversation_history.append({
+                "role": "assistant",
+                "content": "[Previous request was cancelled.]",
             })
 
-        self.conversation_history.append({"role": "user", "content": tool_results})
+        # Case 3 — straightforward.
+        return {"role": "user", "content": user_text}
 
     async def run_conversation_turn(self, user_message: str) -> str:
         """
@@ -217,11 +273,10 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
         Returns:
             Claude's response text
         """
-        # Fix any orphaned tool_uses from cancelled requests
-        self._fix_orphaned_tool_uses()
-
-        # Add user message to history
-        self.conversation_history.append({"role": "user", "content": user_message})
+        # Append the new user message — bundles orphan tool_result blocks
+        # from a cancelled prior turn into the same message, so Bedrock
+        # never sees two consecutive user messages.
+        self.conversation_history.append(self._build_user_message(user_message))
 
         # Load tool descriptions if not already loaded
         if not self.tool_descriptions:
@@ -265,11 +320,10 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
         Yields:
             dict: Events with 'type' and 'data' keys
         """
-        # Fix any orphaned tool_uses from cancelled requests
-        self._fix_orphaned_tool_uses()
-
-        # Add user message to history
-        self.conversation_history.append({"role": "user", "content": user_message})
+        # Append the new user message — bundles orphan tool_result blocks
+        # from a cancelled prior turn into the same message, so Bedrock
+        # never sees two consecutive user messages.
+        self.conversation_history.append(self._build_user_message(user_message))
 
         # Load tool descriptions if not already loaded
         if not self.tool_descriptions:
@@ -631,29 +685,50 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
 
         Yields progress events every 30 seconds to prevent body timeout.
         Final event has type='result' with the actual result data.
+
+        Cancellation semantics: ``asyncio.wait()`` does NOT propagate
+        cancellation to its child tasks (well-documented gotcha). Without
+        explicit handling, clicking Stop while a long tool is in flight
+        leaves an orphan task running — burns Bedrock budget AND keeps
+        the MCP HTTP request open.
+
+        Fix: in finally, cancel the inner task but do NOT await it.
+        Awaiting would block this generator's cleanup until the inner
+        task fully unwinds, which can take many seconds for an MCP RPC
+        with stream buffers. The outer cancellation chain (SSE stream
+        termination → UI "Stopping…" clear) needs to unwind FAST. The
+        inner task will get its CancelledError on the next event-loop
+        tick and clean up on its own; the event loop persists so no
+        "Task was destroyed while pending" warning.
         """
         import asyncio
 
         tool_task = asyncio.create_task(self._execute_tool(tool_name, arguments))
         elapsed = 0
 
-        while True:
-            done, _ = await asyncio.wait({tool_task}, timeout=30)
+        try:
+            while True:
+                done, _ = await asyncio.wait({tool_task}, timeout=30)
 
-            if tool_task in done:
-                result = tool_task.result()
-                yield {"type": "result", "data": result}
-                return
+                if tool_task in done:
+                    result = tool_task.result()
+                    yield {"type": "result", "data": result}
+                    return
 
-            # Send keepalive every 30 seconds
-            elapsed += 30
-            yield {
-                "type": "progress",
-                "data": {
-                    "message": f"Still working on {tool_name}... ({elapsed}s elapsed)",
-                    "elapsed": elapsed
+                # Send keepalive every 30 seconds
+                elapsed += 30
+                yield {
+                    "type": "progress",
+                    "data": {
+                        "message": f"Still working on {tool_name}... ({elapsed}s elapsed)",
+                        "elapsed": elapsed
+                    }
                 }
-            }
+        finally:
+            # Signal cancellation to the orphan, but do NOT await — see
+            # docstring. Fire-and-forget keeps the outer SSE close fast.
+            if not tool_task.done():
+                tool_task.cancel()
 
     def clear_history(self) -> None:
         """Clear conversation history."""

@@ -137,11 +137,18 @@ class MultiMCPClient:
 
         return False
 
-    async def reconnect_server(self, server_name: str) -> bool:
+    async def reconnect_server(
+        self, server_name: str, max_retries: int = 10
+    ) -> bool:
         """Reconnect to a specific MCP server.
 
         Args:
             server_name: Name of the server to reconnect
+            max_retries: How many connect attempts before giving up.
+                Default 10 covers cold-start with backoff. Callers in
+                latency-sensitive paths (e.g. chat cancel cleanup)
+                pass a smaller value so a flaky MCP can't pile up
+                ~9 minutes of retry behind the reconnect_lock.
 
         Returns:
             True if reconnection succeeded
@@ -160,7 +167,7 @@ class MultiMCPClient:
 
             # Try to reconnect
             self.logger.info(f"Reconnecting to {server_name}...")
-            return await self._connect_server(server_name)
+            return await self._connect_server(server_name, max_retries=max_retries)
 
     async def connect(self) -> None:
         """Connect to all MCP servers."""
@@ -218,6 +225,18 @@ class MultiMCPClient:
 
     async def list_tools(self, retry_on_empty: bool = True) -> List[Dict[str, Any]]:
         """List all available tools from all servers."""
+        # Wait for any in-flight reconnect to finish before reading
+        # self.sessions. Without this, the chat backend's cancel
+        # handler — which schedules `reconnect_server('eval')` as a
+        # background task for <200ms Stop response — races against
+        # the next agent turn's list_tools: reconnect deletes
+        # sessions['eval'] mid-loop, agent sees a half-state, and the
+        # whole next message fails with "Sorry, I encountered an error".
+        # The lock is held for nanoseconds outside actual reconnects;
+        # this is just a sync point.
+        async with self._reconnect_lock:
+            pass
+
         if not self.sessions:
             raise RuntimeError("Not connected to MCP servers")
 

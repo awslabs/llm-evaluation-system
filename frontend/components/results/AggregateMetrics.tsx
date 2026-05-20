@@ -160,7 +160,13 @@ export default function AggregateMetrics({
                 style={{ backgroundColor: swatch }}
               />
               <div className="flex items-baseline gap-2">
-                <span className="truncate font-mono text-[10px] uppercase tracking-eyebrow text-bone">
+                <span
+                  className="font-mono text-[10px] uppercase tracking-eyebrow text-bone break-words"
+                  // Allow the name to wrap on word boundaries AND break
+                  // within long hyphen-separated identifiers (e.g.
+                  // "claude-sonnet-4-6") so it never gets cut.
+                  style={{ overflowWrap: "anywhere", wordBreak: "break-word" }}
+                >
                   {pipeline
                     ? "Agent evaluation"
                     : formatModelName(getModelFromKey(model))}
@@ -211,7 +217,10 @@ export default function AggregateMetrics({
                         key={modelName}
                         className="flex items-baseline justify-between gap-3 py-0.5 text-[11px]"
                       >
-                        <span className="truncate text-bone">
+                        <span
+                          className="text-bone break-words"
+                          style={{ overflowWrap: "anywhere", wordBreak: "break-word" }}
+                        >
                           {formatModelName(modelName)}
                         </span>
                         <span className="ml-2 whitespace-nowrap font-mono text-bone-mute tabular-nums">
@@ -387,7 +396,10 @@ export default function AggregateMetrics({
                             MODEL_SWATCHES[i % MODEL_SWATCHES.length],
                         }}
                       />
-                      <span className="truncate font-mono text-[10px] uppercase tracking-eyebrow text-bone">
+                      <span
+                        className="font-mono text-[10px] uppercase tracking-eyebrow text-bone break-words"
+                        style={{ overflowWrap: "anywhere", wordBreak: "break-word" }}
+                      >
                         {formatModelName(getModelFromKey(model))}
                       </span>
                       {getPromptIndex(model) !== null && (

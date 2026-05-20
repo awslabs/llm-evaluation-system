@@ -44,12 +44,18 @@ def _user_safe_error(context: str) -> tuple[str, str]:
 
     Use inside `except` blocks anywhere we'd otherwise put `str(e)` into a
     response. The full traceback goes to logs; the client sees only the
-    correlation id, so internal paths, SQL fragments, and class names don't
-    leak. Users can quote the id when contacting support.
+    correlation id plus the exception class name. The class name is safe
+    to leak (Python's standard exception taxonomy) and is enormously
+    useful for triage — distinguishing "BotoCoreError" from "ValueError"
+    tells us whether to look at AWS state or our own data shape. Users
+    can quote the id when contacting support.
     """
+    import sys as _sys
     error_id = uuid.uuid4().hex[:8]
+    exc = _sys.exc_info()[1]
+    exc_type = type(exc).__name__ if exc else "Unknown"
     logger.exception("[error_id=%s] %s", error_id, context)
-    return error_id, f"An internal error occurred (ref: {error_id})"
+    return error_id, f"{exc_type} (ref: {error_id})"
 
 
 # Global clients (initialized on startup)
@@ -644,48 +650,131 @@ async def chat_status(session_id: str, user_id: str = Depends(get_current_user_i
     return {"running": False}
 
 
+async def _cancel_eval_subprocess_and_reconnect(user_id: str) -> None:
+    """Background cleanup after a chat cancel.
+
+    Always POSTs to the local MCP /cancel endpoint (idempotent — no-op
+    if nothing's registered). ONLY reconnects the MCP client when an
+    eval subprocess was actually killed.
+
+    Why the split (this was previously unified, then split again):
+    Reconnecting the MCP server from a background task closes anyio
+    cancel scopes that were opened by the FastAPI lifespan task.
+    anyio detects the cross-task scope exit, raises CancelledError,
+    and that CancelledError propagates UP through the lifespan's
+    `yield` — triggering the whole backend pod's shutdown. We saw
+    this in production:
+
+        POST /cancel/{user_id} → 200
+        [SHUTDOWN] Backend shutdown initiated
+        Shutdown caused by exception: CancelledError
+            ...at backend/api/main.py:681 (the reconnect call)
+
+    For plain-chat cancels there's nothing to reconnect anyway (no
+    MCP RPC was in flight, no subprocess was killed) — so the cost
+    of skipping reconnect is zero and the benefit is "doesn't kill
+    the pod." For eval cancels we still reconnect; the cross-task
+    scope issue can still bite there, but it's much rarer and is a
+    separate, larger fix (likely: drive reconnects from the lifespan
+    task via a queue rather than directly from background tasks).
+    """
+    try:
+        mcp_url = os.environ["EVAL_MCP_URL"]
+        base_url = mcp_url.replace("/mcp", "")
+        cancelled_an_eval = False
+        # Short timeout: the MCP cancel endpoint just SIGTERMs the
+        # subprocess and returns; the actual subprocess wait happens
+        # async inside the MCP server. We don't need to wait long here.
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(f"{base_url}/cancel/{user_id}", timeout=2.0)
+            try:
+                body = resp.json() or {}
+                cancelled_an_eval = bool(body.get("cancelled"))
+            except Exception:
+                cancelled_an_eval = False
+
+        if not cancelled_an_eval:
+            # Nothing was killed → MCP RPC state is fine → reconnect
+            # would be pure cost (and risks the pod-shutdown bug
+            # described above).
+            return
+
+        # Cap reconnect attempts to 3 so a transient MCP unavailability
+        # doesn't pile up retries (default is 10 → up to ~9 minutes of
+        # _reconnect_lock held → frontend cooldown can't compensate).
+        await mcp_client.reconnect_server("eval", max_retries=3)
+    except Exception as e:
+        logger.warning(f"[CANCEL bg] Failed to clean up eval state for {user_id}: {e}")
+
+
 @app.post("/api/chat/cancel/{session_id}")
 async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_id)):
-    """Cancel an ongoing chat request and any running evaluation."""
+    """Cancel an ongoing chat request and any running evaluation.
+
+    The task may live on a different pod (ALB stickiness isn't reliable
+    end-to-end through CloudFront). We DON'T early-return when the
+    task isn't local — the DB write below is the cross-pod signal that
+    reaches whichever pod is actually running the agent; without it,
+    that pod's SSE stream never closes and the user sees "Stopping…"
+    forever. The previous code had an early-return above the DB write,
+    which made the cross-pod path silently no-op — the exact bug
+    c222fee was meant to fix but didn't fully wire up.
+    """
     global cancelled_sessions, active_tasks
 
-    # Check if there's an active task for this session
-    if session_id not in active_tasks:
-        return {"success": False, "message": "No active request to cancel"}
+    local_task: Optional[asyncio.Task] = active_tasks.get(session_id)
+    local_task_runnable = local_task is not None and not local_task.done()
 
-    task = active_tasks[session_id]
-    if task.done():
-        return {"success": False, "message": "Request already completed"}
-
-    # Read eval info BEFORE cancelling (read-only, doesn't kill subprocess)
-    eval_info = {}
+    # Read eval info from THIS pod's MCP sidecar. Returns
+    # {"running": False, ...} if the eval is on another pod — that's
+    # fine; the other pod will surface the resume hint via its own
+    # CancelledError handler when it processes the cross-pod cancel.
+    eval_info: Dict[str, Any] = {}
     try:
         mcp_url = os.environ["EVAL_MCP_URL"]
         base_url = mcp_url.replace("/mcp", "")
         async with httpx.AsyncClient() as client:
-            resp = await client.get(f"{base_url}/eval-info/{user_id}", timeout=2.0)
+            resp = await client.get(f"{base_url}/eval-info/{user_id}", timeout=1.0)
             eval_info = resp.json()
             logger.info(f"[CANCEL] Eval info: {eval_info}")
     except Exception as e:
         logger.warning(f"[CANCEL] Failed to get eval info: {e}")
 
-    # Store eval info so the CancelledError handler can include it in the cancel message
     cancelled_sessions[session_id] = eval_info
 
-    # Cancel the asyncio task immediately - triggers CancelledError handler
-    task.cancel()
-
-    # Kill the evaluation subprocess and reconnect MCP
+    # ALWAYS write the cross-pod signal — the task may live on a
+    # different pod, and that pod needs to see the cancel via its
+    # 500ms DB poll in run_agent_background.
     try:
-        mcp_url = os.environ["EVAL_MCP_URL"]
-        base_url = mcp_url.replace("/mcp", "")
-        async with httpx.AsyncClient() as client:
-            await client.post(f"{base_url}/cancel/{user_id}", timeout=5.0)
-        await mcp_client.reconnect_server("eval")
-    except Exception as e:
-        logger.warning(f"[CANCEL] Failed to cancel evaluation: {e}")
+        await asyncio.wait_for(
+            db.mark_session_cancelled(session_id, json.dumps(eval_info)),
+            timeout=2.0,
+        )
+    except (asyncio.TimeoutError, Exception) as e:
+        logger.warning(f"[CANCEL] Failed to mark session cancelled in DB: {e}")
 
-    logger.info(f"[CANCEL] User {user_id} cancelled session {session_id}")
+    # task.cancel() is what stops the streaming response when the
+    # task is local. Cross-pod, the DB-poll path in
+    # run_agent_background does the equivalent within ~500ms.
+    if local_task_runnable:
+        local_task.cancel()
+        # Fire local MCP cancel + reconnect only when the task is
+        # local. The eval subprocess and the chat agent are always
+        # co-located (the agent calls its own pod's sidecar via
+        # localhost MCP), so the wrong-pod cancel has nothing to do
+        # here — and worse, the reconnect holds _reconnect_lock long
+        # enough that the user's next message's list_tools blocks on
+        # it (and eventually surfaces as "network error" in the
+        # browser when the streaming connection errors out). When the
+        # task is on a different pod, that pod's run_agent_background
+        # DB-poll branch fires its own _cancel_eval_subprocess_and_reconnect
+        # when it picks up the row.
+        asyncio.create_task(_cancel_eval_subprocess_and_reconnect(user_id))
+
+    logger.info(
+        f"[CANCEL] User {user_id} cancelled session {session_id} "
+        f"(local_task={local_task_runnable})"
+    )
 
     return {"success": True, "message": "Cancellation requested", **eval_info}
 
@@ -721,14 +810,72 @@ async def run_agent_background(
         user_msg_id = str(uuid.uuid4())
         await db.save_message(user_msg_id, session_id, "user", user_message_for_db)
 
+        # Clear any stale cross-pod cancellation flag — a new turn is
+        # starting, the user wants this one to run. Without this, a
+        # previous Stop's row in session_cancellations would make the
+        # very first iteration of THIS new turn immediately cancel.
+        try:
+            await asyncio.wait_for(
+                db.clear_session_cancellation(session_id), timeout=2.0
+            )
+        except (asyncio.TimeoutError, Exception):
+            pass
+
         logger.info(f"[AGENT START] Starting agent loop for session {session_id}")
 
+        # Throttle the cross-pod cancellation poll so we don't hammer
+        # the DB on every streamed text token (the async for below
+        # yields hundreds of events per second during Bedrock
+        # streaming). 500ms is fast enough to make Stop feel
+        # responsive but lets us read the flag at most twice/sec/pod.
+        import time as _time
+        last_xpod_poll = 0.0
+        XPOD_POLL_INTERVAL = 0.5
+
         async for event in agent.run_conversation_turn_streaming(final_message):
-            # Check for cancellation
+            # Check for cancellation — first the cheap in-memory check
+            # (handles the case where cancel landed on THIS pod), then
+            # the DB-backed cross-pod check (handles the case where
+            # cancel landed on a different pod).
+            cancel_info: Optional[Dict[str, Any]] = None
             if session_id in cancelled_sessions:
                 cancel_info = cancelled_sessions[session_id]
+            else:
+                now = _time.monotonic()
+                if now - last_xpod_poll >= XPOD_POLL_INTERVAL:
+                    last_xpod_poll = now
+                    try:
+                        row = await asyncio.wait_for(
+                            db.get_session_cancellation(session_id), timeout=1.0
+                        )
+                        if row is not None:
+                            try:
+                                cancel_info = json.loads(row.get("eval_info") or "{}") or {}
+                            except json.JSONDecodeError:
+                                cancel_info = {}
+                            # Mirror into local dict so subsequent
+                            # checks short-circuit on the cheap path.
+                            cancelled_sessions[session_id] = cancel_info
+                    except (asyncio.TimeoutError, Exception):
+                        pass
+
+            if cancel_info is not None:
                 logger.info(f"[AGENT CANCELLED] Session {session_id} cancelled by user, eval info: {cancel_info}")
                 was_cancelled = True
+
+                # On EKS the cancel HTTP request can land on a different
+                # pod than the one running this task (CloudFront → ALB
+                # stickiness isn't reliable end-to-end). In that case the
+                # OTHER pod's cancel_chat already POSTed to ITS local
+                # /cancel/{user_id} — a no-op, because the Inspect
+                # subprocess and its _running_evaluations entry live in
+                # THIS pod's MCP sidecar. Fire the local cancel here so
+                # the subprocess actually dies. Safe to call even when
+                # cancel landed on this pod (same-pod cancel_chat already
+                # fired it; second call is harmless — the MCP endpoint
+                # is a no-op when nothing is registered).
+                asyncio.create_task(_cancel_eval_subprocess_and_reconnect(user_id))
+
                 await queue.put({"type": "cancelled", "data": {"message": "Request cancelled", **cancel_info}})
                 break
 
@@ -746,11 +893,12 @@ async def run_agent_background(
                 full_response = event['data'].get('response', '')
                 logger.info(f"[AGENT COMPLETE] Session {session_id}, events: {event_count}")
 
-        # Save assistant message to DB (even partial if cancelled)
+        # Save assistant message to DB (even partial if cancelled).
+        # Bounded by timeout — see the matching block in the
+        # CancelledError handler below for why.
         if full_response:
             if was_cancelled:
                 full_response += "\n\n*[Response cancelled by user]*"
-                # Store cancel info on agent for _fix_orphaned_tool_uses
                 cancel_info = cancelled_sessions.get(session_id, {})
                 eval_id = cancel_info.get("evalId")
                 if eval_id:
@@ -758,14 +906,31 @@ async def run_agent_background(
                     if agent:
                         agent.cancel_info = cancel_info
             assistant_msg_id = str(uuid.uuid4())
-            await db.save_message(assistant_msg_id, session_id, "assistant", full_response)
-            logger.info(f"[DB SAVE] Saved assistant response for session {session_id}")
+            try:
+                await asyncio.wait_for(
+                    db.save_message(assistant_msg_id, session_id, "assistant", full_response),
+                    timeout=5.0,
+                )
+                logger.info(f"[DB SAVE] Saved assistant response for session {session_id}")
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"[DB SAVE] Failed/timed out saving response: {e}")
 
             # Update session title if this is the first message
-            messages = await db.get_session_messages(session_id)
-            if len(messages) == 2:
-                title = user_message_for_db[:50] + "..." if len(user_message_for_db) > 50 else user_message_for_db
-                await db.update_session_title(session_id, title)
+            try:
+                messages = await asyncio.wait_for(
+                    db.get_session_messages(session_id), timeout=2.0
+                )
+                if len(messages) == 2:
+                    title = (
+                        user_message_for_db[:50] + "..."
+                        if len(user_message_for_db) > 50
+                        else user_message_for_db
+                    )
+                    await asyncio.wait_for(
+                        db.update_session_title(session_id, title), timeout=2.0
+                    )
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"[DB] Failed/timed out updating title: {e}")
 
     except asyncio.CancelledError:
         # Task was cancelled via Stop button - this is expected
@@ -780,20 +945,41 @@ async def run_agent_background(
         if agent and eval_id:
             agent.cancel_info = cancel_info
 
-        # Save partial response to DB
+        # Save partial response to DB — but bounded by a timeout. The
+        # SSE stream can't close until this except handler returns
+        # (finally puts None on queue), so a slow DB save would leave
+        # the user's frontend hung indefinitely on the streaming reader,
+        # with isLoading/isCancelling stuck true. Symptom: "if i restart
+        # the page after stopping it works" — only a fresh React state
+        # unblocks the user. 5s is generous; the DB save normally takes
+        # <50ms.
         if full_response:
             full_response += "\n\n*[Response cancelled by user]*"
             assistant_msg_id = str(uuid.uuid4())
-            await db.save_message(assistant_msg_id, session_id, "assistant", full_response)
-            logger.info(f"[DB SAVE] Saved partial response for cancelled session {session_id}")
+            try:
+                await asyncio.wait_for(
+                    db.save_message(assistant_msg_id, session_id, "assistant", full_response),
+                    timeout=5.0,
+                )
+                logger.info(f"[DB SAVE] Saved partial response for cancelled session {session_id}")
+            except (asyncio.TimeoutError, Exception) as e:
+                logger.warning(f"[DB SAVE] Failed/timed out saving cancelled partial: {e}")
 
     except Exception:
         error_id, safe_msg = _user_safe_error(f"Agent background task session={session_id}")
         await queue.put({"type": "error", "data": {"error": safe_msg, "error_id": error_id}})
 
     finally:
-        # Signal completion to queue readers
-        await queue.put(None)
+        # Signal completion to queue readers FIRST — the SSE stream
+        # needs to close so the frontend can re-enable input. Anything
+        # else in finally that could block (cancelled_sessions cleanup
+        # is in-memory and instant, so safe to run after) must not
+        # delay this. queue.put on an asyncio.Queue is in-memory, but
+        # we wrap defensively anyway.
+        try:
+            await asyncio.wait_for(queue.put(None), timeout=2.0)
+        except asyncio.TimeoutError:
+            logger.warning(f"[BACKGROUND END] queue.put(None) timed out for {session_id}")
 
         # Cleanup
         if session_id in active_tasks:

@@ -5,6 +5,7 @@ Supports two authentication modes controlled by POSTGRES_USE_IAM_AUTH:
 - Password authentication: Uses POSTGRES_PASSWORD environment variable
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -50,6 +51,19 @@ class Database:
         # For IAM auth, track token generation time
         self._token_generated_at: float = 0
         self._pool: Optional[asyncpg.Pool] = None
+        # Serializes pool refresh so concurrent requests don't observe
+        # a half-closed pool. Without this lock, two coroutines arriving
+        # at _ensure_pool_fresh() simultaneously both call _create_pool()
+        # → A closes the old pool and starts opening a new one (~100ms-2s)
+        # → during that window, self._pool references a closed pool
+        # → any other request hitting self._pool.acquire() crashes with
+        #   InterfaceError: pool is closed. This was visible in EKS logs
+        #   as a chat_stream → db.create_user traceback every ~10 minutes
+        #   (IAM token TTL) plus more often under stress.
+        self._pool_lock: asyncio.Lock = asyncio.Lock()
+        # Set during graceful shutdown so we stop trying to use the
+        # pool (close() can't be safely re-opened — process is exiting).
+        self._closed: bool = False
 
     async def initialize(self):
         """Create connection pool and initialize schema. Must be called after __init__."""
@@ -88,18 +102,23 @@ class Database:
         return os.getenv("POSTGRES_PASSWORD", "")
 
     async def _create_pool(self):
-        """Create or recreate the connection pool."""
-        if self._pool:
-            try:
-                await self._pool.close()
-            except Exception as e:
-                logger.warning(f"Failed to close existing connection pool: {e}")
+        """Create or recreate the connection pool.
 
+        IMPORTANT: callers MUST hold ``self._pool_lock`` to serialize
+        recreation, otherwise concurrent callers double-close and race
+        on assigning self._pool. The two callers in this class do:
+          - ``initialize()`` at startup — single-threaded, no race
+          - ``_ensure_pool_fresh()`` — acquires the lock itself
+        Build the new pool FIRST, then swap self._pool atomically, then
+        close the old one. That way self._pool never references a closed
+        pool, even if some weird code path doesn't go through the
+        _ensure_pool_fresh guard.
+        """
         connect_kwargs = {}
         if self.use_iam_auth:
             connect_kwargs["ssl"] = "require"
 
-        self._pool = await asyncpg.create_pool(
+        new_pool = await asyncpg.create_pool(
             host=self.host,
             port=self.port,
             database=self.database,
@@ -109,16 +128,77 @@ class Database:
             max_size=20,
             **connect_kwargs,
         )
+
+        old_pool = self._pool
+        self._pool = new_pool
         self._token_generated_at = time.time()
 
-    async def _ensure_pool_fresh(self):
-        """Ensure the connection pool has a fresh IAM token."""
-        if not self.use_iam_auth:
-            return  # No token refresh needed for password auth
+        if old_pool is not None:
+            try:
+                await old_pool.close()
+            except Exception as e:
+                logger.warning(f"Failed to close previous connection pool: {e}")
 
+    def _pool_is_closed(self) -> bool:
+        """Detect a closed/missing pool without triggering an exception.
+        asyncpg's pool exposes `_closed` and `_initialized` internals;
+        fall back conservatively if either's not present.
+        """
+        p = self._pool
+        if p is None:
+            return True
+        # asyncpg.Pool._closed is True once close() finished; _closing
+        # is set during graceful close. Either means we can't acquire.
+        if getattr(p, "_closed", False) or getattr(p, "_closing", False):
+            return True
+        return False
+
+    async def _ensure_pool_fresh(self):
+        """Ensure the connection pool has a fresh IAM token AND that
+        the pool object isn't a stale closed reference.
+
+        Two conditions trigger recreation:
+        - IAM token is older than TOKEN_REFRESH_SECONDS (normal case)
+        - The current self._pool is closed (rolling deploy case: a
+          terminating pod's lifespan shutdown ran `db.close()` while
+          an in-flight request was still being processed; without
+          this, the request hits self._pool.acquire() → InterfaceError)
+
+        Serialized via lock so concurrent callers don't race.
+        """
+        if self._closed:
+            # Process is exiting — don't try to reopen the pool; the
+            # caller's request will get a clean DatabaseError.
+            raise DatabaseError("Database is shutting down")
+
+        if not self.use_iam_auth and not self._pool_is_closed():
+            return
+
+        # Cheap pre-check: avoid lock contention in the common case
+        # where the token is fresh AND the pool isn't closed.
         elapsed = time.time() - self._token_generated_at
-        if elapsed >= self.TOKEN_REFRESH_SECONDS:
-            logger.info("Refreshing database connection pool (IAM token expiring)")
+        if elapsed < self.TOKEN_REFRESH_SECONDS and not self._pool_is_closed():
+            return
+
+        async with self._pool_lock:
+            if self._closed:
+                raise DatabaseError("Database is shutting down")
+            # Re-check under the lock — another coroutine may have
+            # already refreshed during the wait.
+            elapsed = time.time() - self._token_generated_at
+            needs_token_refresh = (
+                self.use_iam_auth and elapsed >= self.TOKEN_REFRESH_SECONDS
+            )
+            needs_pool_rebuild = self._pool_is_closed()
+            if not needs_token_refresh and not needs_pool_rebuild:
+                return
+            if needs_pool_rebuild:
+                logger.warning(
+                    "Rebuilding database connection pool — previous pool was closed "
+                    "(likely a rolling-deploy SIGTERM race)"
+                )
+            else:
+                logger.info("Refreshing database connection pool (IAM token expiring)")
             await self._create_pool()
 
     async def init_db(self):
@@ -164,6 +244,23 @@ class Database:
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_messages_session_id
                 ON messages(session_id)
+            """)
+
+            # Session cancellations table — used to propagate Stop
+            # across pods. Backend runs as a multi-pod Deployment;
+            # the chat request may land on pod A while the cancel
+            # HTTP arrives at pod B (ALB lb_cookie stickiness is
+            # configured but not reliably preserved through
+            # CloudFront → ALB → browser → ALB hops in practice).
+            # A simple row in this table is the cross-pod signal:
+            # cancel_chat writes it, the agent's per-iteration poll
+            # in run_agent_background reads it.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS session_cancellations (
+                    session_id TEXT PRIMARY KEY,
+                    cancelled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    eval_info TEXT
+                )
             """)
 
     async def create_user(self, user_id: str, username: str) -> None:
@@ -271,7 +368,72 @@ class Database:
         except asyncpg.PostgresError as e:
             raise DatabaseError(f"Failed to update session title {session_id}: {e}") from e
 
+    async def mark_session_cancelled(self, session_id: str, eval_info_json: str = "") -> None:
+        """Mark a chat session as cancelled. Picked up cross-pod by the
+        agent loop's poll in run_agent_background. UPSERT so a repeat
+        cancel within the same chat turn just refreshes the timestamp.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO session_cancellations (session_id, cancelled_at, eval_info)
+                    VALUES ($1, NOW(), $2)
+                    ON CONFLICT (session_id) DO UPDATE
+                      SET cancelled_at = NOW(), eval_info = EXCLUDED.eval_info
+                    """,
+                    session_id, eval_info_json,
+                )
+        except asyncpg.PostgresError as e:
+            raise DatabaseError(f"Failed to mark session {session_id} cancelled: {e}") from e
+
+    async def clear_session_cancellation(self, session_id: str) -> None:
+        """Clear the cancellation flag for a session. Called when a new
+        chat turn STARTS so a fresh user message doesn't immediately
+        see itself as already-cancelled from a previous Stop.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM session_cancellations WHERE session_id = $1",
+                    session_id,
+                )
+        except asyncpg.PostgresError as e:
+            # Non-fatal — worst case the next iteration immediately
+            # sees the stale flag and cancels itself. Just log.
+            logger.warning(f"Failed to clear cancellation for {session_id}: {e}")
+
+    async def get_session_cancellation(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return {cancelled_at, eval_info} if this session is marked
+        cancelled, else None. Used by the agent loop's per-iteration
+        cross-pod cancel check.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT cancelled_at, eval_info FROM session_cancellations WHERE session_id = $1",
+                    session_id,
+                )
+                if row is None:
+                    return None
+                return {
+                    "cancelled_at": row["cancelled_at"],
+                    "eval_info": row["eval_info"],
+                }
+        except asyncpg.PostgresError as e:
+            # Don't crash the agent loop on a transient DB hiccup —
+            # the worst case is the user clicks Stop again and the
+            # next poll catches it.
+            logger.warning(f"Failed to check cancellation for {session_id}: {e}")
+            return None
+
     async def close(self):
-        """Close all connections in the pool."""
+        """Close all connections in the pool. Sets _closed so any
+        further operation raises a clean error instead of trying to
+        recreate the pool (process is exiting)."""
+        self._closed = True
         if self._pool:
             await self._pool.close()

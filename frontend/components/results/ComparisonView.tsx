@@ -120,7 +120,9 @@ export default function ComparisonView({ groupId }: { groupId: string }) {
 
   return (
     <div className="flex h-full">
-      <div className={`flex-1 overflow-auto p-6 ${selectedCell ? "pr-0" : ""}`}>
+      <div
+        className={`flex-1 overflow-y-auto overflow-x-hidden p-6 ${selectedCell ? "pr-0" : ""}`}
+      >
         <AggregateMetrics
           models={data.models}
           aggregate={data.aggregate}

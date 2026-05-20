@@ -685,29 +685,50 @@ Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., 
 
         Yields progress events every 30 seconds to prevent body timeout.
         Final event has type='result' with the actual result data.
+
+        Cancellation semantics: ``asyncio.wait()`` does NOT propagate
+        cancellation to its child tasks (well-documented gotcha). Without
+        explicit handling, clicking Stop while a long tool is in flight
+        leaves an orphan task running — burns Bedrock budget AND keeps
+        the MCP HTTP request open.
+
+        Fix: in finally, cancel the inner task but do NOT await it.
+        Awaiting would block this generator's cleanup until the inner
+        task fully unwinds, which can take many seconds for an MCP RPC
+        with stream buffers. The outer cancellation chain (SSE stream
+        termination → UI "Stopping…" clear) needs to unwind FAST. The
+        inner task will get its CancelledError on the next event-loop
+        tick and clean up on its own; the event loop persists so no
+        "Task was destroyed while pending" warning.
         """
         import asyncio
 
         tool_task = asyncio.create_task(self._execute_tool(tool_name, arguments))
         elapsed = 0
 
-        while True:
-            done, _ = await asyncio.wait({tool_task}, timeout=30)
+        try:
+            while True:
+                done, _ = await asyncio.wait({tool_task}, timeout=30)
 
-            if tool_task in done:
-                result = tool_task.result()
-                yield {"type": "result", "data": result}
-                return
+                if tool_task in done:
+                    result = tool_task.result()
+                    yield {"type": "result", "data": result}
+                    return
 
-            # Send keepalive every 30 seconds
-            elapsed += 30
-            yield {
-                "type": "progress",
-                "data": {
-                    "message": f"Still working on {tool_name}... ({elapsed}s elapsed)",
-                    "elapsed": elapsed
+                # Send keepalive every 30 seconds
+                elapsed += 30
+                yield {
+                    "type": "progress",
+                    "data": {
+                        "message": f"Still working on {tool_name}... ({elapsed}s elapsed)",
+                        "elapsed": elapsed
+                    }
                 }
-            }
+        finally:
+            # Signal cancellation to the orphan, but do NOT await — see
+            # docstring. Fire-and-forget keeps the outer SSE close fast.
+            if not tool_task.done():
+                tool_task.cancel()
 
     def clear_history(self) -> None:
         """Clear conversation history."""

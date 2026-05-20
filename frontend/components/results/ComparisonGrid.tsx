@@ -98,8 +98,8 @@ export default function ComparisonGrid({
   };
 
   return (
-    <div className="overflow-x-auto border border-rule bg-ink-elev">
-      <table className="w-full border-collapse">
+    <div className="w-full overflow-x-auto border border-rule bg-ink-elev">
+      <table className="border-collapse">
         <thead>
           <tr>
             <th
@@ -120,9 +120,12 @@ export default function ComparisonGrid({
                 <th
                   key={model}
                   scope="col"
-                  className="min-w-[120px] border-b border-l border-rule-soft bg-ink-elev px-3 py-3 text-center align-bottom"
+                  className="min-w-[140px] max-w-[200px] border-b border-l border-rule-soft bg-ink-elev px-3 py-3 text-center align-bottom"
                 >
-                  <div className="font-mono text-[10px] uppercase tracking-eyebrow text-bone">
+                  <div
+                    className="font-mono text-[10px] uppercase tracking-eyebrow text-bone break-words"
+                    style={{ overflowWrap: "anywhere", wordBreak: "break-word" }}
+                  >
                     {formatModelName(modelName)}
                   </div>
                   {promptIdx !== null && (

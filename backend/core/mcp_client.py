@@ -137,11 +137,18 @@ class MultiMCPClient:
 
         return False
 
-    async def reconnect_server(self, server_name: str) -> bool:
+    async def reconnect_server(
+        self, server_name: str, max_retries: int = 10
+    ) -> bool:
         """Reconnect to a specific MCP server.
 
         Args:
             server_name: Name of the server to reconnect
+            max_retries: How many connect attempts before giving up.
+                Default 10 covers cold-start with backoff. Callers in
+                latency-sensitive paths (e.g. chat cancel cleanup)
+                pass a smaller value so a flaky MCP can't pile up
+                ~9 minutes of retry behind the reconnect_lock.
 
         Returns:
             True if reconnection succeeded
@@ -160,7 +167,7 @@ class MultiMCPClient:
 
             # Try to reconnect
             self.logger.info(f"Reconnecting to {server_name}...")
-            return await self._connect_server(server_name)
+            return await self._connect_server(server_name, max_retries=max_retries)
 
     async def connect(self) -> None:
         """Connect to all MCP servers."""

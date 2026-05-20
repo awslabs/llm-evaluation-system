@@ -35,7 +35,7 @@ export default function ChatInterface() {
   };
 
   const handleSend = async () => {
-    if (!input.trim() || isLoading) return;
+    if (!input.trim() || isLoading || isCancelling) return;
 
     await sendMessage(input);
     setInput("");
@@ -63,7 +63,10 @@ export default function ChatInterface() {
         onChange={setInput}
         onSend={handleSend}
         onCancel={cancelRequest}
-        disabled={isLoading}
+        // Disable input AND send during the post-cancel cooldown so
+        // the user can't fire a new request into the backend's
+        // still-draining cleanup → "network error" race.
+        disabled={isLoading || isCancelling}
         isStreaming={isLoading}
         isCancelling={isCancelling}
         onDocumentsUploaded={handleDocumentsUploaded}

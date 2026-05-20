@@ -670,9 +670,15 @@ async def _cancel_eval_subprocess_and_reconnect(user_id: str) -> None:
     try:
         mcp_url = os.environ["EVAL_MCP_URL"]
         base_url = mcp_url.replace("/mcp", "")
+        # Short timeout: the MCP cancel endpoint just SIGTERMs the
+        # subprocess and returns; the actual subprocess wait happens
+        # async inside the MCP server. We don't need to wait long here.
         async with httpx.AsyncClient() as client:
-            await client.post(f"{base_url}/cancel/{user_id}", timeout=10.0)
-        await mcp_client.reconnect_server("eval")
+            await client.post(f"{base_url}/cancel/{user_id}", timeout=2.0)
+        # Cap reconnect attempts to 3 so a transient MCP unavailability
+        # doesn't pile up retries (default is 10 → up to ~9 minutes of
+        # _reconnect_lock held → frontend cooldown can't compensate).
+        await mcp_client.reconnect_server("eval", max_retries=3)
     except Exception as e:
         logger.warning(f"[CANCEL bg] Failed to clean up eval state for {user_id}: {e}")
 

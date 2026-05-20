@@ -1,6 +1,6 @@
 "use client";
 
-import { createContext, useContext, useState, useCallback, useEffect } from "react";
+import { createContext, useContext, useState, useCallback, useEffect, useRef } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import type { UploadResult } from "@/components/MessageInput";
 
@@ -49,6 +49,13 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // button has no visual state change on click — users mash it
   // because they think it didn't register.
   const [isCancelling, setIsCancelling] = useState(false);
+  // Timestamp when Stop was clicked. Used to enforce a brief cooldown
+  // (~2s) between Stop and the next message so the backend's async
+  // cleanup (MCP cancel + reconnect) has time to drain. Without this,
+  // sending too fast triggers race conditions that surface as
+  // "network error" in the UI.
+  const cancelledAtRef = useRef<number | null>(null);
+  const POST_CANCEL_COOLDOWN_MS = 2000;
 
   const loadUserSessions = async () => {
     if (!user?.name) return;
@@ -101,6 +108,11 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     // Flip immediately so the Stop button shows "Stopping…" and goes
     // disabled — no waiting for the HTTP fetch or SSE termination.
     setIsCancelling(true);
+    // Stamp the cancel time so sendMessage's finally can enforce a
+    // minimum stopping period before re-enabling the input. Without
+    // this, sending right after Stop races the backend's async
+    // cleanup and surfaces as a fetch-level network error.
+    cancelledAtRef.current = Date.now();
     try {
       const response = await fetch(`/api/chat/cancel/${currentSessionId}`, {
         method: "POST",
@@ -392,6 +404,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setMessages((prev) => [...prev, errorMessage]);
       } finally {
         setIsLoading(false);
+        // Enforce a post-cancel cooldown: keep isCancelling true until
+        // ~2s after Stop was clicked so the backend's async cleanup
+        // (MCP cancel + reconnect) has time to drain. Without this,
+        // sending immediately after the SSE closes races the in-flight
+        // cleanup and surfaces as a network error.
+        if (cancelledAtRef.current !== null) {
+          const elapsed = Date.now() - cancelledAtRef.current;
+          const remaining = POST_CANCEL_COOLDOWN_MS - elapsed;
+          if (remaining > 0) {
+            await new Promise((r) => setTimeout(r, remaining));
+          }
+          cancelledAtRef.current = null;
+        }
         setIsCancelling(false);
       }
     },

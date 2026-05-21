@@ -31,25 +31,14 @@ const config: Config = {
           soft: "#1f1a14",
         },
         ember: {
-          DEFAULT: "#d97757",
+          DEFAULT: "#d87858",
           soft: "#3a1f15",
           deep: "#a35336",
         },
         sage: "#9bb556",
         wheat: "#d4a72c",
-        oxide: "#c4524d",
-        paper: "#f5efe6",
-        // Legacy aliases pointed at the new palette so any not-yet-rebuilt
-        // component still renders coherently.
-        claude: {
-          bg: "#0c0a08",
-          surface: "#15120e",
-          border: "#2a241d",
-          text: "#ece6d8",
-          muted: "#a39a87",
-          accent: "#d97757",
-          hover: "#c25a36",
-        },
+        oxide: "#c5524e",
+        paper: "#f5efe7",
       },
       letterSpacing: {
         eyebrow: "0.14em",

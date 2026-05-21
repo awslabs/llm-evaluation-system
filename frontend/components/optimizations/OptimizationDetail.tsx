@@ -141,7 +141,7 @@ function ScoreChart({ record }: { record: OptimizationRecord }) {
             y1={winnerTestY}
             x2={W - PAD.right}
             y2={winnerTestY}
-            stroke="#d97757"
+            stroke="#d87858"
             strokeOpacity="0.6"
             strokeWidth="1"
             strokeDasharray="6 4"
@@ -151,7 +151,7 @@ function ScoreChart({ record }: { record: OptimizationRecord }) {
             y={winnerTestY - 6}
             textAnchor="end"
             fontSize="10"
-            fill="#d97757"
+            fill="#d87858"
           >
             winner test {fmtPct(record.winner_test_score)}
           </text>
@@ -172,7 +172,7 @@ function ScoreChart({ record }: { record: OptimizationRecord }) {
           cx={sx(h.iter)}
           cy={sy(h.train_pass_rate)}
           r="4"
-          fill={h.iter === record.winner_iter ? "#d97757" : "currentColor"}
+          fill={h.iter === record.winner_iter ? "#d87858" : "currentColor"}
           fillOpacity={h.iter === record.winner_iter ? 1 : 0.85}
         />
       ))}

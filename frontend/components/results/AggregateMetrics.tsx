@@ -110,7 +110,7 @@ interface AggregateMetricsProps {
 }
 
 // Distinctive but harmonious swatches — used as accents on model panels.
-const MODEL_SWATCHES = ["#d97757", "#9bb556", "#d4a72c", "#9b87b5", "#a39a87"];
+const MODEL_SWATCHES = ["#d87858", "#9bb556", "#d4a72c", "#9b87b5", "#a39a87"];
 
 export default function AggregateMetrics({
   models,

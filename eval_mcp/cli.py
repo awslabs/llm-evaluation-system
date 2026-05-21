@@ -209,6 +209,38 @@ def _detect_bucket_region(bucket: str):
         return None
 
 
+def _get_account_id():
+    """Caller's AWS account ID, or None if STS is unreachable."""
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    try:
+        return boto3.client("sts").get_caller_identity()["Account"]
+    except (BotoCoreError, ClientError, KeyError):
+        return None
+
+
+def _resolve_bucket(name: str):
+    """Resolve a logical bucket name to (actual_name, region).
+
+    Tries the literal name first (existing buckets, custom names), then falls
+    back to `<name>-<account-id>` — the convention produced by this repo's
+    Terraform module. Returns (None, None) if neither exists.
+    """
+    region = _detect_bucket_region(name)
+    if region:
+        return name, region
+
+    account_id = _get_account_id()
+    if account_id and not name.endswith(f"-{account_id}"):
+        suffixed = f"{name}-{account_id}"
+        region = _detect_bucket_region(suffixed)
+        if region:
+            return suffixed, region
+
+    return None, None
+
+
 @main.command()
 @click.argument("bucket")
 def init(bucket):
@@ -220,24 +252,27 @@ def init(bucket):
     """
     from eval_mcp.config import set_config_value, get_user
 
-    region = _detect_bucket_region(bucket)
-    if not region:
+    resolved, region = _resolve_bucket(bucket)
+    if not resolved:
         click.echo(
-            f"Could not reach s3://{bucket} — check the bucket name and your "
-            "AWS credentials (aws sts get-caller-identity).",
+            f"Could not reach s3://{bucket} (or s3://{bucket}-<account-id>) — "
+            "check the bucket name and your AWS credentials "
+            "(aws sts get-caller-identity).",
             err=True,
         )
         sys.exit(1)
 
-    set_config_value("bucket", bucket)
+    set_config_value("bucket", resolved)
     set_config_value("region", region)
     user = get_user()
     click.echo(f"Configured S3 sharing:")
-    click.echo(f"  bucket: {bucket}")
+    click.echo(f"  bucket: {resolved}")
+    if resolved != bucket:
+        click.echo(f"          (resolved from '{bucket}' via account-ID suffix)")
     click.echo(f"  region: {region}")
     click.echo(f"  user:   {user} (auto-detected from AWS identity)")
-    click.echo(f"\nLogs will sync to s3://{bucket}/users/{user}/")
-    click.echo(f"Shared projects auto-discovered from s3://{bucket}/projects/*/")
+    click.echo(f"\nLogs will sync to s3://{resolved}/users/{user}/")
+    click.echo(f"Shared projects auto-discovered from s3://{resolved}/projects/*/")
 
 
 @main.command()

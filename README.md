@@ -101,12 +101,14 @@ User identity is auto-detected from your AWS credentials. Projects are auto-disc
 ### How it works
 
 ```
-s3://my-team-evals/
+s3://my-team-evals-<your-aws-account-id>/
   users/alice/            ← Alice's evals, datasets, judges, configs (auto-replicated on every write)
   users/bob/              ← Bob's
   projects/project-alpha/ ← shared team evals
   projects/project-beta/  ← shared team evals
 ```
+
+The Terraform module appends your AWS account ID so the bucket is globally unique without you having to invent a unique name. You only ever type `my-team-evals` — `eval-mcp init` resolves the full name via your account.
 
 - Every write (eval result, dataset, judge, config, PDF report) auto-replicates to `users/{you}/` in the background
 - Every list/read auto-pulls from S3 first (debounced) so your local state mirrors S3
@@ -124,6 +126,8 @@ cd llm-evaluation-system/infra/modules/eval-logs-bucket
 terraform init
 terraform apply -var="bucket_name=my-team-evals"
 ```
+
+The actual bucket created is `my-team-evals-<your-aws-account-id>` — Terraform prints it under the `bucket_name` output. Teammates run `eval-mcp init my-team-evals` from the same account and the tool finds it automatically.
 
 ## Deploy Full Platform on EKS
 

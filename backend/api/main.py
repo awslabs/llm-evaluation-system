@@ -110,11 +110,60 @@ event_queues: Dict[str, asyncio.Queue] = {}
 # Sessions marked for cancellation
 cancelled_sessions: Dict[str, dict] = {}  # session_id -> cancel info (evalId, configName)
 
+# MCP connection ownership.
+#
+# A dedicated background task owns the MCP client's lifecycle (connect,
+# any reconnects, disconnect on shutdown). All operations that change
+# the underlying anyio cancel scopes — open + close of the streamable
+# HTTP exit stack — must happen in this task. If a reconnect runs in
+# any *other* task, anyio detects the cross-task scope close and
+# raises CancelledError on the task that originally opened the scope.
+# Under the previous design that task was the FastAPI lifespan task,
+# so eval cancels (which fired reconnect from a fire-and-forget cleanup
+# task) killed the whole pod. Routing reconnect requests through a
+# queue that this owner task drains keeps the scope cleanup in-task.
+_mcp_reconnect_queue: Optional[asyncio.Queue] = None
+_mcp_owner_task: Optional[asyncio.Task] = None
+
+
+async def _mcp_owner_loop(connect_done: asyncio.Event, queue: asyncio.Queue) -> None:
+    """Single long-lived task that owns the MCP client.
+
+    Opens the connection. Drains the reconnect queue, executing each
+    reconnect in this task's scope. Disconnects on shutdown signal
+    (a `None` sentinel on the queue).
+    """
+    try:
+        await mcp_client.connect()
+        # Tell the client which task owns the lifecycle. Internal
+        # auto-reconnect paths inside MultiMCPClient (e.g. list_tools
+        # retry-on-empty) check this and refuse to close the scope
+        # from any other task — that cross-task close is what used to
+        # kill the pod on every eval cancel.
+        mcp_client.claim_ownership()
+        connect_done.set()
+
+        while True:
+            signal = await queue.get()
+            if signal is None:
+                break
+            try:
+                await mcp_client.reconnect_server(signal, max_retries=3)
+            except Exception as e:
+                logger.warning(
+                    f"[MCP owner] Reconnect of {signal} failed: {e}"
+                )
+    finally:
+        try:
+            await mcp_client.disconnect()
+        except Exception as e:
+            logger.warning(f"[MCP owner] Disconnect failed: {e}")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifecycle: startup and shutdown."""
-    global mcp_client, bedrock_client, db
+    global mcp_client, bedrock_client, db, _mcp_reconnect_queue, _mcp_owner_task
 
     # Startup
     print("🚀 Initializing backend...")
@@ -128,9 +177,28 @@ async def lifespan(app: FastAPI):
         await db.initialize()
         print("  ✓ Database initialized")
 
-        # Initialize MCP client (connects to existing MCP servers)
+        # Spawn the MCP owner task and wait for its initial connect.
+        # The owner task — not the lifespan task — opens the anyio
+        # scopes, so reconnects later can close + reopen them in the
+        # same task without triggering cross-task scope errors.
         mcp_client = MultiMCPClient(region=region)
-        await mcp_client.connect()
+        _mcp_reconnect_queue = asyncio.Queue()
+        _connect_done = asyncio.Event()
+        _mcp_owner_task = asyncio.create_task(
+            _mcp_owner_loop(_connect_done, _mcp_reconnect_queue)
+        )
+        # Bound the wait so a misconfigured / unreachable MCP server
+        # fails the pod startup loudly instead of hanging forever.
+        try:
+            await asyncio.wait_for(_connect_done.wait(), timeout=60.0)
+        except asyncio.TimeoutError:
+            if _mcp_owner_task.done():
+                exc = _mcp_owner_task.exception()
+                raise (exc or ConnectionError("MCP owner died during connect"))
+            raise ConnectionError("MCP connect timed out after 60s")
+        if _mcp_owner_task.done():
+            exc = _mcp_owner_task.exception()
+            raise (exc or ConnectionError("MCP owner exited before serving"))
         print("  ✓ Connected to MCP servers")
 
         # Initialize Bedrock client
@@ -143,11 +211,8 @@ async def lifespan(app: FastAPI):
 
     except Exception as e:
         print(f"❌ ERROR during startup: {e}")
-        if mcp_client:
-            try:
-                await mcp_client.disconnect()
-            except Exception:
-                pass
+        if _mcp_owner_task and not _mcp_owner_task.done():
+            _mcp_owner_task.cancel()
         raise
 
     finally:
@@ -217,13 +282,22 @@ async def lifespan(app: FastAPI):
             print(f"  ⚠ Error handling running evaluations: {e}")
             logger.error(f"[SHUTDOWN] Eval shutdown error: {e}")
 
-        if mcp_client:
+        # Signal the MCP owner task to exit and wait for it to
+        # disconnect in its own scope. We never call mcp_client.disconnect()
+        # directly from this lifespan task: doing so would close the
+        # anyio scopes the owner opened, raising CancelledError on the
+        # owner task — the same cross-task close that bombs reconnect.
+        if _mcp_owner_task and not _mcp_owner_task.done():
             try:
-                await mcp_client.disconnect()
+                _mcp_reconnect_queue.put_nowait(None)
+                await asyncio.wait_for(_mcp_owner_task, timeout=10.0)
                 print("  ✓ Disconnected from MCP servers")
+            except asyncio.TimeoutError:
+                print("  ⚠ MCP owner did not exit within 10s, cancelling")
+                _mcp_owner_task.cancel()
             except Exception as e:
-                print(f"  ⚠ Error disconnecting MCP client: {e}")
-                logger.error(f"[SHUTDOWN] MCP disconnect error: {e}")
+                print(f"  ⚠ Error stopping MCP owner: {e}")
+                logger.error(f"[SHUTDOWN] MCP owner stop error: {e}")
 
         if db:
             try:
@@ -659,30 +733,27 @@ async def chat_status(session_id: str, user_id: str = Depends(get_current_user_i
 async def _cancel_eval_subprocess_and_reconnect(user_id: str) -> None:
     """Background cleanup after a chat cancel.
 
-    Always POSTs to the local MCP /cancel endpoint (idempotent — no-op
-    if nothing's registered). ONLY reconnects the MCP client when an
-    eval subprocess was actually killed.
+    POSTs to the local MCP /cancel endpoint (idempotent — no-op if
+    nothing's registered). If an eval subprocess was actually killed,
+    enqueues a reconnect signal for the MCP owner task to process.
 
-    Why the split (this was previously unified, then split again):
-    Reconnecting the MCP server from a background task closes anyio
-    cancel scopes that were opened by the FastAPI lifespan task.
-    anyio detects the cross-task scope exit, raises CancelledError,
-    and that CancelledError propagates UP through the lifespan's
-    `yield` — triggering the whole backend pod's shutdown. We saw
-    this in production:
+    Why the queue handoff: reconnecting the MCP server tears down and
+    re-opens anyio cancel scopes. anyio's structured concurrency
+    requires the close to happen in the same task that opened it.
+    Under the old design this function called `reconnect_server`
+    directly from the chat cancel's background task, so the close
+    crossed task boundaries — anyio raised CancelledError on the
+    lifespan task (the original opener), and it propagated through
+    `yield`, bringing the whole pod down on every eval cancel:
 
         POST /cancel/{user_id} → 200
         [SHUTDOWN] Backend shutdown initiated
         Shutdown caused by exception: CancelledError
-            ...at backend/api/main.py:681 (the reconnect call)
 
-    For plain-chat cancels there's nothing to reconnect anyway (no
-    MCP RPC was in flight, no subprocess was killed) — so the cost
-    of skipping reconnect is zero and the benefit is "doesn't kill
-    the pod." For eval cancels we still reconnect; the cross-task
-    scope issue can still bite there, but it's much rarer and is a
-    separate, larger fix (likely: drive reconnects from the lifespan
-    task via a queue rather than directly from background tasks).
+    Routing through `_mcp_reconnect_queue` makes the actual
+    open/close happen inside `_mcp_owner_loop`, which is the same
+    task that originally opened the scopes. The close is in-task and
+    safe.
     """
     try:
         mcp_url = os.environ["EVAL_MCP_URL"]
@@ -705,10 +776,22 @@ async def _cancel_eval_subprocess_and_reconnect(user_id: str) -> None:
             # described above).
             return
 
-        # Cap reconnect attempts to 3 so a transient MCP unavailability
-        # doesn't pile up retries (default is 10 → up to ~9 minutes of
-        # _reconnect_lock held → frontend cooldown can't compensate).
-        await mcp_client.reconnect_server("eval", max_retries=3)
+        # Hand the reconnect off to the MCP owner task via its queue.
+        # Doing the reconnect here would call exit_stack.aclose() from
+        # THIS background task, but the scope was opened by the owner
+        # task — anyio sees the cross-task close, raises CancelledError
+        # on the owner, and (under the previous architecture) the error
+        # propagated through the lifespan's `yield`, killing the pod
+        # on every eval cancel. The owner drains the queue in its own
+        # task scope, so the close is in-task and harmless.
+        if _mcp_reconnect_queue is not None:
+            try:
+                _mcp_reconnect_queue.put_nowait("eval")
+            except asyncio.QueueFull:
+                logger.warning(
+                    "[CANCEL bg] Reconnect queue full; dropping signal "
+                    "(owner will catch up on next signal)"
+                )
     except Exception as e:
         logger.warning(f"[CANCEL bg] Failed to clean up eval state for {user_id}: {e}")
 

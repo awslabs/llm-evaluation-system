@@ -1,5 +1,5 @@
 variable "bucket_name" {
-  description = "Name for the S3 bucket that stores eval logs"
+  description = "Logical name for the S3 bucket. The module appends the caller's AWS account ID to guarantee global uniqueness — final bucket is <bucket_name>-<account_id>."
   type        = string
 }
 

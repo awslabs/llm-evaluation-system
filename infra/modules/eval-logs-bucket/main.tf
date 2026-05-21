@@ -8,11 +8,16 @@ terraform {
   }
 }
 
+data "aws_caller_identity" "current" {}
+
+# S3 bucket names are globally unique. Suffix with the caller's AWS account ID
+# so the same logical `bucket_name` (e.g. "my-team-evals") produces a unique
+# bucket per account — no random suffixes, no README copy-paste collisions.
 module "eval_logs_bucket" {
   source  = "terraform-aws-modules/s3-bucket/aws"
   version = "~> 4.0"
 
-  bucket = var.bucket_name
+  bucket = "${var.bucket_name}-${data.aws_caller_identity.current.account_id}"
 
   block_public_acls       = true
   block_public_policy     = true

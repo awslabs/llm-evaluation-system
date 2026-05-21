@@ -92,14 +92,15 @@ Share datasets, judges, configs, and eval results across your team via a shared 
 
 ### Setup
 
-**First on the team — creating the bucket?** One person runs this once:
+**First on the team — creating the bucket?** One person runs this once.
+
+Prereq: AWS credentials configured (`aws configure`, `AWS_PROFILE`, or env vars — verify with `aws sts get-caller-identity`).
 
 ```bash
-export AWS_REGION=us-west-2  # pick the region the bucket should live in
 git clone https://github.com/awslabs/llm-evaluation-system.git
-cd llm-evaluation-system/infra/modules/eval-logs-bucket
+cd llm-evaluation-system/infra/eval-logs-bucket
 terraform init
-terraform apply -var="bucket_name=my-team-evals"
+terraform apply -var="bucket_name=my-team-evals" -var="region=us-west-2"
 ```
 
 The Terraform module appends your AWS account ID so the actual bucket is `my-team-evals-<your-account-id>` — globally unique without you having to invent a unique name. Terraform prints the full name under the `bucket_name` output.

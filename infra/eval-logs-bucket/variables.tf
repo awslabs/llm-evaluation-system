@@ -3,6 +3,11 @@ variable "bucket_name" {
   type        = string
 }
 
+variable "region" {
+  description = "AWS region to create the bucket in (e.g. us-west-2)."
+  type        = string
+}
+
 variable "tags" {
   description = "Additional tags for the bucket"
   type        = map(string)

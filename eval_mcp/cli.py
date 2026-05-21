@@ -317,6 +317,58 @@ def _init_error_message(bucket: str, error: str) -> str:
     )
 
 
+def _list_aws_profiles():
+    """Available AWS profiles, or [] if `aws` CLI isn't installed."""
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["aws", "configure", "list-profiles"],
+            capture_output=True, text=True, check=True,
+        )
+        return [p for p in result.stdout.splitlines() if p.strip()]
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return []
+
+
+def _ensure_aws_profile():
+    """Pick an AWS profile if none is set. Mirrors deploy.sh / create-bucket.sh.
+
+    boto3's credential chain only reads SSO config from the profile named
+    by AWS_PROFILE (or the `default` profile) — it won't scan ~/.aws/config
+    for SSO-configured profiles. So if the user has SSO set up but no
+    AWS_PROFILE exported, boto3 finds nothing even though their SSO token
+    is cached and valid.
+
+    Detect that case, list profiles, auto-pick if there's one, prompt if
+    many. Sets os.environ["AWS_PROFILE"] so subsequent boto3 clients
+    inherit it.
+    """
+    import os
+    if os.environ.get("AWS_PROFILE") or os.environ.get("AWS_ACCESS_KEY_ID"):
+        return
+
+    profiles = _list_aws_profiles()
+    if not profiles:
+        click.echo(
+            "No AWS credentials in this shell and no profiles configured.\n"
+            "  • SSO: aws configure sso\n"
+            "  • Access keys: aws configure",
+            err=True,
+        )
+        sys.exit(1)
+
+    if len(profiles) == 1:
+        os.environ["AWS_PROFILE"] = profiles[0]
+        click.echo(f"Using AWS profile: {profiles[0]}")
+        return
+
+    click.echo("AWS profiles available:")
+    for p in profiles:
+        click.echo(f"  {p}")
+    picked = click.prompt("Pick a profile", type=click.Choice(profiles), show_choices=False)
+    os.environ["AWS_PROFILE"] = picked
+
+
 @main.command()
 @click.argument("bucket")
 def init(bucket):
@@ -327,6 +379,8 @@ def init(bucket):
         eval-mcp init my-team-evals
     """
     from eval_mcp.config import set_config_value, get_user
+
+    _ensure_aws_profile()
 
     resolved, region, error = _resolve_bucket(bucket)
     if not resolved:

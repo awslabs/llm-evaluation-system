@@ -92,11 +92,25 @@ Share datasets, judges, configs, and eval results across your team via a shared 
 
 ### Setup
 
+**First on the team — creating the bucket?** One person runs this once:
+
+```bash
+export AWS_REGION=us-west-2  # pick the region the bucket should live in
+git clone https://github.com/awslabs/llm-evaluation-system.git
+cd llm-evaluation-system/infra/modules/eval-logs-bucket
+terraform init
+terraform apply -var="bucket_name=my-team-evals"
+```
+
+The Terraform module appends your AWS account ID so the actual bucket is `my-team-evals-<your-account-id>` — globally unique without you having to invent a unique name. Terraform prints the full name under the `bucket_name` output.
+
+**Everyone (including the bucket creator), on every machine:**
+
 ```bash
 uvx --from llm-evaluation-system eval-mcp init my-team-evals
 ```
 
-User identity is auto-detected from your AWS credentials. Projects are auto-discovered from the bucket.
+`eval-mcp init` resolves the account-ID suffix automatically, so all teammates type the same short name. User identity is auto-detected from AWS credentials; projects are auto-discovered from the bucket.
 
 ### How it works
 
@@ -108,26 +122,10 @@ s3://my-team-evals-<your-aws-account-id>/
   projects/project-beta/  ← shared team evals
 ```
 
-The Terraform module appends your AWS account ID so the bucket is globally unique without you having to invent a unique name. You only ever type `my-team-evals` — `eval-mcp init` resolves the full name via your account.
-
 - Every write (eval result, dataset, judge, config, PDF report) auto-replicates to `users/{you}/` in the background
 - Every list/read auto-pulls from S3 first (debounced) so your local state mirrors S3
 - `eval-mcp share my-project` → promote your stuff to a shared project prefix
 - `eval-mcp sync` → manual reconcile (used after long offline periods or on a fresh laptop)
-
-### Create the bucket
-
-One person on the team runs this once:
-
-```bash
-export AWS_REGION=us-west-2  # pick the region the bucket should live in
-git clone https://github.com/awslabs/llm-evaluation-system.git
-cd llm-evaluation-system/infra/modules/eval-logs-bucket
-terraform init
-terraform apply -var="bucket_name=my-team-evals"
-```
-
-The actual bucket created is `my-team-evals-<your-aws-account-id>` — Terraform prints it under the `bucket_name` output. Teammates run `eval-mcp init my-team-evals` from the same account and the tool finds it automatically.
 
 ## Deploy Full Platform on EKS
 

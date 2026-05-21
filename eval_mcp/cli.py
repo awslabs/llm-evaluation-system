@@ -188,25 +188,56 @@ def _print_install_guide():
     click.echo(guide.read_text())
 
 
+# Distinguish bucket-probe failure modes so init can give actionable
+# next steps instead of a generic "could not reach" line.
+_ERR_NO_CREDS = "no_creds"     # NoCredentialsError — no AWS_PROFILE / no profile
+_ERR_EXPIRED = "expired"        # ExpiredToken / TokenRefreshRequired — SSO session lapsed
+_ERR_FORBIDDEN = "forbidden"    # 403 — bucket exists in another account
+_ERR_NOT_FOUND = "not_found"    # 404 — bucket doesn't exist
+_ERR_NETWORK = "network"        # EndpointConnectionError — proxy/VPN/DNS
+_ERR_UNKNOWN = "unknown"        # anything else
+
+
 def _detect_bucket_region(bucket: str):
     """Probe S3 for the bucket's home region.
 
     head_bucket returns `x-amz-bucket-region` even on a 301 redirect, so a
     fixed probe region works regardless of where the bucket actually lives.
-    Returns None on NoSuchBucket / unreachable / missing credentials.
+    Returns (region, error_code) where exactly one is non-None.
     """
     import boto3
-    from botocore.exceptions import BotoCoreError, ClientError
+    from botocore.exceptions import (
+        BotoCoreError,
+        ClientError,
+        EndpointConnectionError,
+        NoCredentialsError,
+    )
 
     client = boto3.client("s3", region_name="us-east-1")
     try:
         response = client.head_bucket(Bucket=bucket)
-        return response["ResponseMetadata"]["HTTPHeaders"].get("x-amz-bucket-region")
+        region = response["ResponseMetadata"]["HTTPHeaders"].get("x-amz-bucket-region")
+        return (region, None) if region else (None, _ERR_UNKNOWN)
+    except NoCredentialsError:
+        return None, _ERR_NO_CREDS
     except ClientError as e:
+        # Cross-region 301 still tells us the region in the headers.
         headers = e.response.get("ResponseMetadata", {}).get("HTTPHeaders", {})
-        return headers.get("x-amz-bucket-region")
+        if region := headers.get("x-amz-bucket-region"):
+            return region, None
+        code = e.response.get("Error", {}).get("Code", "")
+        status = e.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        if code in ("ExpiredToken", "ExpiredTokenException", "TokenRefreshRequired"):
+            return None, _ERR_EXPIRED
+        if status == 403 or code in ("AccessDenied", "403"):
+            return None, _ERR_FORBIDDEN
+        if status == 404 or code in ("NoSuchBucket", "404"):
+            return None, _ERR_NOT_FOUND
+        return None, _ERR_UNKNOWN
+    except EndpointConnectionError:
+        return None, _ERR_NETWORK
     except BotoCoreError:
-        return None
+        return None, _ERR_UNKNOWN
 
 
 def _get_account_id():
@@ -221,24 +252,69 @@ def _get_account_id():
 
 
 def _resolve_bucket(name: str):
-    """Resolve a logical bucket name to (actual_name, region).
+    """Resolve a logical bucket name to (actual_name, region, error_code).
 
     Tries the literal name first (existing buckets, custom names), then falls
     back to `<name>-<account-id>` — the convention produced by this repo's
-    Terraform module. Returns (None, None) if neither exists.
+    Terraform module. On success returns (name, region, None). On failure
+    returns (None, None, error_code) where error_code is one of the _ERR_*
+    constants so the caller can surface a specific message.
     """
-    region = _detect_bucket_region(name)
+    region, error = _detect_bucket_region(name)
     if region:
-        return name, region
+        return name, region, None
+
+    # Credentials issues won't be fixed by trying a different bucket name.
+    if error in (_ERR_NO_CREDS, _ERR_EXPIRED, _ERR_NETWORK):
+        return None, None, error
 
     account_id = _get_account_id()
     if account_id and not name.endswith(f"-{account_id}"):
         suffixed = f"{name}-{account_id}"
-        region = _detect_bucket_region(suffixed)
-        if region:
-            return suffixed, region
+        region2, error2 = _detect_bucket_region(suffixed)
+        if region2:
+            return suffixed, region2, None
+        # Prefer the suffixed lookup's error — it's the more specific
+        # "neither variant exists" signal.
+        return None, None, error2 or error
 
-    return None, None
+    return None, None, error
+
+
+def _init_error_message(bucket: str, error: str) -> str:
+    if error == _ERR_NO_CREDS:
+        return (
+            "AWS credentials not found in this shell.\n"
+            "  • If you use SSO: export AWS_PROFILE=<your-profile> && aws sso login --profile $AWS_PROFILE\n"
+            "  • Otherwise: aws configure\n"
+            "  • Verify: aws sts get-caller-identity"
+        )
+    if error == _ERR_EXPIRED:
+        return (
+            "AWS credentials are expired. Refresh:\n"
+            "  • SSO: aws sso login --profile $AWS_PROFILE\n"
+            "  • Then re-run: eval-mcp init " + bucket
+        )
+    if error == _ERR_FORBIDDEN:
+        return (
+            f"Bucket s3://{bucket} (or s3://{bucket}-<account-id>) exists but you don't have access.\n"
+            "  • Are you in the right AWS account? Check: aws sts get-caller-identity\n"
+            "  • The bucket name may belong to another team — try a different logical name."
+        )
+    if error == _ERR_NOT_FOUND:
+        return (
+            f"No bucket named s3://{bucket} or s3://{bucket}-<account-id> exists in this account.\n"
+            "  • Did anyone on the team run create-bucket.sh yet? See README → Team Sharing."
+        )
+    if error == _ERR_NETWORK:
+        return (
+            "Can't reach S3 (network/VPN/proxy issue).\n"
+            "  • Sanity check: aws s3 ls"
+        )
+    return (
+        f"Could not reach s3://{bucket} (or s3://{bucket}-<account-id>).\n"
+        f"  • Try: aws sts get-caller-identity && aws s3api head-bucket --bucket {bucket}-<account-id>"
+    )
 
 
 @main.command()
@@ -252,14 +328,9 @@ def init(bucket):
     """
     from eval_mcp.config import set_config_value, get_user
 
-    resolved, region = _resolve_bucket(bucket)
+    resolved, region, error = _resolve_bucket(bucket)
     if not resolved:
-        click.echo(
-            f"Could not reach s3://{bucket} (or s3://{bucket}-<account-id>) — "
-            "check the bucket name and your AWS credentials "
-            "(aws sts get-caller-identity).",
-            err=True,
-        )
+        click.echo(_init_error_message(bucket, error), err=True)
         sys.exit(1)
 
     set_config_value("bucket", resolved)

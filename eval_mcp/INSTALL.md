@@ -41,12 +41,13 @@ uvx --from llm-evaluation-system eval-mcp init <bucket-name>
 
 If **yes, creating a new bucket** (first on the team):
 ```bash
+export AWS_REGION=us-west-2  # pick the region the bucket should live in
 git clone https://github.com/awslabs/llm-evaluation-system.git /tmp/eval-mcp-infra
 cd /tmp/eval-mcp-infra/infra/modules/eval-logs-bucket
 terraform init
 terraform apply -var="bucket_name=<bucket-name>"
 ```
-Then `uvx --from llm-evaluation-system eval-mcp init <bucket-name>`. Tell the user: teammates just run `eval-mcp init <bucket-name>` — no Terraform needed.
+Then `uvx --from llm-evaluation-system eval-mcp init <bucket-name>` — `init` probes the bucket and persists its region, so cross-region uploads work without any extra setup. Tell the user: teammates just run `eval-mcp init <bucket-name>` — no Terraform needed.
 
 Suggested bucket name if they don't have a preference: `eval-mcp-$(aws sts get-caller-identity --query Account --output text)` — globally unique, easy to remember.
 

@@ -188,6 +188,27 @@ def _print_install_guide():
     click.echo(guide.read_text())
 
 
+def _detect_bucket_region(bucket: str):
+    """Probe S3 for the bucket's home region.
+
+    head_bucket returns `x-amz-bucket-region` even on a 301 redirect, so a
+    fixed probe region works regardless of where the bucket actually lives.
+    Returns None on NoSuchBucket / unreachable / missing credentials.
+    """
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    client = boto3.client("s3", region_name="us-east-1")
+    try:
+        response = client.head_bucket(Bucket=bucket)
+        return response["ResponseMetadata"]["HTTPHeaders"].get("x-amz-bucket-region")
+    except ClientError as e:
+        headers = e.response.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+        return headers.get("x-amz-bucket-region")
+    except BotoCoreError:
+        return None
+
+
 @main.command()
 @click.argument("bucket")
 def init(bucket):
@@ -198,10 +219,22 @@ def init(bucket):
         eval-mcp init my-team-evals
     """
     from eval_mcp.config import set_config_value, get_user
+
+    region = _detect_bucket_region(bucket)
+    if not region:
+        click.echo(
+            f"Could not reach s3://{bucket} — check the bucket name and your "
+            "AWS credentials (aws sts get-caller-identity).",
+            err=True,
+        )
+        sys.exit(1)
+
     set_config_value("bucket", bucket)
+    set_config_value("region", region)
     user = get_user()
     click.echo(f"Configured S3 sharing:")
     click.echo(f"  bucket: {bucket}")
+    click.echo(f"  region: {region}")
     click.echo(f"  user:   {user} (auto-detected from AWS identity)")
     click.echo(f"\nLogs will sync to s3://{bucket}/users/{user}/")
     click.echo(f"Shared projects auto-discovered from s3://{bucket}/projects/*/")

@@ -585,7 +585,7 @@ def _build_detail_from_logs(
         result["pipeline"] = pipeline_stages
     if agent_image:
         result["agentImage"] = agent_image
-    if is_prompt_comparison and config_data and config_data.get("prompts"):
+    if config_data and config_data.get("prompts"):
         result["prompts"] = config_data["prompts"]
     return result
 

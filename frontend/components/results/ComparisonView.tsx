@@ -133,13 +133,15 @@ export default function ComparisonView({ groupId }: { groupId: string }) {
           pipeline={data.pipeline}
           prompts={data.prompts}
         />
-        {data.prompts && data.prompts.length > 1 && (
+        {data.prompts && data.prompts.length > 0 && (
           <details className="group mb-4 border border-rule bg-ink-elev">
             <summary className="flex cursor-pointer list-none select-none items-center gap-2 px-3 py-2 eyebrow">
               <span className="font-mono text-[10px] transition-transform group-open:rotate-90">
                 ▶
               </span>
-              Prompt templates ({data.prompts.length}) — click to expand
+              {data.prompts.length === 1
+                ? "Prompt template — click to expand"
+                : `Prompt templates (${data.prompts.length}) — click to expand`}
             </summary>
             <div className="space-y-2 border-t border-rule-soft px-3 pb-3 pt-2">
               {data.prompts.map((prompt, i) => (

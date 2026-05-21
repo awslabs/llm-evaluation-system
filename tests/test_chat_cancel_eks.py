@@ -277,13 +277,12 @@ async def test_cancel_eval_skips_reconnect_when_nothing_was_killed(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cancel_eval_does_reconnect_when_eval_was_killed(monkeypatch):
-    """Symmetric to the skip test: when an eval WAS killed, reconnect
-    is still called. We accept the cross-task anyio risk in that case
-    because (a) eval cancels are rarer than plain-chat cancels and
-    (b) reconnect is the documented way to flush MCP RPC state after
-    a SIGTERM. The deeper fix (drive reconnects from the lifespan
-    task) is a separate, larger change.
+async def test_cancel_eval_enqueues_reconnect_for_owner_task(monkeypatch):
+    """When an eval was actually killed, we need to refresh MCP state.
+    The cancel-cleanup task MUST hand that work off to the MCP owner
+    task via `_mcp_reconnect_queue` — NOT call `reconnect_server`
+    directly. Direct call closes the anyio scope from the wrong task
+    and crashes the pod (see test_mcp_reconnect_lifespan_owner.py).
     """
     from backend.api import main
 
@@ -303,20 +302,30 @@ async def test_cancel_eval_does_reconnect_when_eval_was_killed(monkeypatch):
 
     monkeypatch.setattr(main, "httpx", MagicMock(AsyncClient=lambda: _FakeClient()))
 
-    reconnect_called = asyncio.Event()
+    # Spy on mcp_client.reconnect_server. Direct call here = the bug.
+    direct_call = asyncio.Event()
     fake_mcp = MagicMock()
 
     async def fake_reconnect(*a, **k):
-        reconnect_called.set()
+        direct_call.set()
 
     fake_mcp.reconnect_server = fake_reconnect
     monkeypatch.setattr(main, "mcp_client", fake_mcp)
+
+    queue: asyncio.Queue = asyncio.Queue()
+    monkeypatch.setattr(main, "_mcp_reconnect_queue", queue)
 
     monkeypatch.setenv("EVAL_MCP_URL", "http://localhost:8002/mcp")
 
     await main._cancel_eval_subprocess_and_reconnect(user_id)
 
-    assert reconnect_called.is_set(), (
-        "When an eval was actually killed, reconnect_server should "
-        "still be called to flush any in-flight MCP RPC state."
+    assert not direct_call.is_set(), (
+        "Cancel-cleanup called reconnect_server directly. That closes "
+        "the anyio scope from a foreign task and kills the pod. The "
+        "reconnect must be enqueued for the MCP owner task instead."
     )
+    assert not queue.empty(), (
+        "Cancel-cleanup didn't enqueue a reconnect signal for the "
+        "owner task. MCP state never gets refreshed after the SIGTERM."
+    )
+    assert queue.get_nowait() == "eval"

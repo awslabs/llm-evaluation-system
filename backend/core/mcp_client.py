@@ -137,6 +137,17 @@ class MultiMCPClient:
 
         return False
 
+    def claim_ownership(self) -> None:
+        """Mark the current task as the sole owner of this client's
+        connection lifecycle. Future calls to `reconnect_server` from
+        any other task will refuse to close the anyio scope — closing
+        a scope from a foreign task raises CancelledError on the owner
+        and (under the previous architecture) brought the whole pod
+        down. Other tasks should signal the owner via a queue rather
+        than call reconnect_server directly.
+        """
+        self._owner_task = asyncio.current_task()
+
     async def reconnect_server(
         self, server_name: str, max_retries: int = 10
     ) -> bool:
@@ -151,8 +162,30 @@ class MultiMCPClient:
                 ~9 minutes of retry behind the reconnect_lock.
 
         Returns:
-            True if reconnection succeeded
+            True if reconnection succeeded.
+
+        Must run in the task that originally connected the client.
+        See `claim_ownership`. Calling from a foreign task is treated
+        as a bug and refused (returns False) — closing the exit stack
+        cross-task triggers anyio CancelledError on the owner and
+        previously killed the pod on every eval cancel.
         """
+        owner = getattr(self, "_owner_task", None)
+        if owner is not None:
+            current = asyncio.current_task()
+            if current is not None and current is not owner:
+                self.logger.warning(
+                    "reconnect_server(%s) refused: called from task %r, "
+                    "owner is %r. Internal auto-reconnect paths (list_tools, "
+                    "call_tool) hit this when run from the agent task; the "
+                    "tool call error will propagate instead of silently "
+                    "trying to recover (which would crash the pod).",
+                    server_name,
+                    current.get_name(),
+                    owner.get_name(),
+                )
+                return False
+
         async with self._reconnect_lock:
             # Clean up old connection if exists
             if server_name in self._exit_stacks:

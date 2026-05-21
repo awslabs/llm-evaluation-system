@@ -92,16 +92,15 @@ Share datasets, judges, configs, and eval results across your team via a shared 
 
 ### Setup
 
-**First on the team — creating the bucket?** One person runs this once.
-
-Prereq: AWS credentials configured (`aws configure`, `AWS_PROFILE`, or env vars — verify with `aws sts get-caller-identity`).
+**First on the team — creating the bucket?** One person runs this once:
 
 ```bash
 git clone https://github.com/awslabs/llm-evaluation-system.git
 cd llm-evaluation-system/infra/eval-logs-bucket
-terraform init
-terraform apply -var="bucket_name=my-team-evals" -var="region=us-west-2"
+./create-bucket.sh my-team-evals
 ```
+
+The script prompts for an AWS profile if one isn't already set (mirrors `deploy.sh` / `destroy.sh`), validates credentials with `sts get-caller-identity`, then runs `terraform init` + `apply`. Works with SSO profiles — it'll tell you to run `aws sso login --profile <name>` if your session expired.
 
 The Terraform module appends your AWS account ID so the actual bucket is `my-team-evals-<your-account-id>` — globally unique without you having to invent a unique name. Terraform prints the full name under the `bucket_name` output.
 

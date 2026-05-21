@@ -118,6 +118,7 @@ s3://my-team-evals/
 One person on the team runs this once:
 
 ```bash
+export AWS_REGION=us-west-2  # pick the region the bucket should live in
 git clone https://github.com/awslabs/llm-evaluation-system.git
 cd llm-evaluation-system/infra/modules/eval-logs-bucket
 terraform init

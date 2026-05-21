@@ -8,6 +8,10 @@ terraform {
   }
 }
 
+provider "aws" {
+  region = var.region
+}
+
 data "aws_caller_identity" "current" {}
 
 # S3 bucket names are globally unique. Suffix with the caller's AWS account ID

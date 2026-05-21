@@ -39,13 +39,12 @@ If **yes, team already has a bucket**:
 uvx --from llm-evaluation-system eval-mcp init <bucket-name>
 ```
 
-If **yes, creating a new bucket** (first on the team):
+If **yes, creating a new bucket** (first on the team). Prereq: AWS credentials configured — verify with `aws sts get-caller-identity` before running terraform.
 ```bash
-export AWS_REGION=us-west-2  # pick the region the bucket should live in
 git clone https://github.com/awslabs/llm-evaluation-system.git /tmp/eval-mcp-infra
-cd /tmp/eval-mcp-infra/infra/modules/eval-logs-bucket
+cd /tmp/eval-mcp-infra/infra/eval-logs-bucket
 terraform init
-terraform apply -var="bucket_name=<logical-name>"
+terraform apply -var="bucket_name=<logical-name>" -var="region=us-west-2"
 ```
 The Terraform module appends the caller's AWS account ID, so the actual bucket created is `<logical-name>-<account-id>` — globally unique, no name collisions with other teams using the same example. The full name is printed under the `bucket_name` Terraform output.
 

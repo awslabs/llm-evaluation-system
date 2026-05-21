@@ -230,7 +230,7 @@ llm-evaluation-system/
 ├── infra/
 │   ├── data/                     # Terraform: persistent layer (VPC, RDS, S3) for the web app
 │   ├── platform/                 # Terraform: compute layer (EKS, CloudFront, ALB) for the web app
-│   └── modules/eval-logs-bucket/ # Terraform: optional S3 bucket for MCP team sharing
+│   └── eval-logs-bucket/         # Terraform: optional S3 bucket for MCP team sharing
 ├── deploy.sh / destroy.sh        # Web-app deployment
 ├── manage-users.sh               # Web-app Cognito user admin
 └── docs/DEVELOPMENT.md           # This file

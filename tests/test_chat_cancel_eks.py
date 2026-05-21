@@ -53,11 +53,9 @@ async def test_cross_pod_cancel_fires_local_mcp_cancel(monkeypatch):
     fake_agent = MagicMock()
     fake_agent.run_conversation_turn_streaming = fake_stream
 
-    main.session_agents[session_id] = fake_agent
-
-    # Empty in-memory dict → forces the DB-poll branch (the cross-pod
-    # detection path). This is what would happen on Pod-A when cancel
-    # landed on Pod-B and only the DB row exists.
+    # Empty cancelled_sessions → forces the DB-poll branch (the
+    # cross-pod detection path). This is what would happen on Pod-A
+    # when cancel landed on Pod-B and only the DB row exists.
     main.cancelled_sessions.pop(session_id, None)
 
     fake_db = MagicMock()
@@ -87,6 +85,7 @@ async def test_cross_pod_cancel_fires_local_mcp_cancel(monkeypatch):
         main.run_agent_background(
             session_id=session_id,
             user_id=user_id,
+            agent=fake_agent,
             final_message="run a long eval",
             user_message_for_db="run a long eval",
             queue=queue,
@@ -116,7 +115,6 @@ async def test_cross_pod_cancel_fires_local_mcp_cancel(monkeypatch):
             await task
         except (asyncio.CancelledError, Exception):
             pass
-        main.session_agents.pop(session_id, None)
         main.cancelled_sessions.pop(session_id, None)
         main.active_tasks.pop(session_id, None)
         main.event_queues.pop(session_id, None)

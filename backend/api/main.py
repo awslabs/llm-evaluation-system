@@ -8,7 +8,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
@@ -91,11 +91,17 @@ async def get_current_user_id(request: Request) -> str:
     return user_id
 
 
-# Session-based agents (one agent per chat session)
-session_agents: Dict[str, Agent] = {}
-
 # Active background tasks for agent processing (keyed by session_id)
-# These run to completion even if client disconnects
+# These run to completion even if client disconnects.
+#
+# Note: there is intentionally no process-local cache of Agent instances
+# here. Backend runs as multiple replicas with no sticky routing, so
+# turn N can hit pod A and turn N+1 can hit pod B. A per-pod agent
+# cache silently diverges from the DB (the only cross-pod store) the
+# first time a session's turns split across pods — its history loses
+# every turn that happened on a different pod, and the model starts
+# answering as if those turns never occurred. We build the Agent fresh
+# per turn from the DB-backed conversation history instead.
 active_tasks: Dict[str, asyncio.Task] = {}
 
 # Event queues for streaming to clients (keyed by session_id)
@@ -779,9 +785,37 @@ async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_i
     return {"success": True, "message": "Cancellation requested", **eval_info}
 
 
+def _cancel_suffix(cancel_info: Dict[str, Any]) -> str:
+    """Build the suffix appended to a partial assistant response when the
+    user clicks Stop. For plain-chat cancels it's a short marker. For
+    eval cancels we embed the eval ID and a hint about how to resume,
+    so that on the NEXT turn the model — which now reads conversation
+    history from the DB rather than from in-memory agent state — has
+    enough context to offer the user a clean way to retry.
+
+    Previously this hint was injected via `Agent.cancel_info` and
+    `_orphan_tool_result_blocks` on the next turn. That path only fired
+    when the next turn happened on the SAME pod as the cancel (because
+    `cancel_info` lived on a process-local Agent instance), so it
+    silently failed under multi-pod traffic. Embedding the hint in the
+    DB-persisted response text makes it work the same way every time.
+    """
+    eval_id = cancel_info.get("evalId")
+    if not eval_id:
+        return "\n\n*[Response cancelled by user]*"
+    config_name = cancel_info.get("configName", "unknown")
+    return (
+        f"\n\n*[Evaluation cancelled by user. Eval ID: {eval_id}, "
+        f"Config: {config_name}. Partial results are saved. "
+        f"To resume, call retry_evaluation — it picks up incomplete evals "
+        f"by status.]*"
+    )
+
+
 async def run_agent_background(
     session_id: str,
     user_id: str,
+    agent: Agent,
     final_message: str,
     user_message_for_db: str,
     queue: asyncio.Queue,
@@ -791,21 +825,18 @@ async def run_agent_background(
     Background worker that runs agent to completion, regardless of client connection.
 
     Puts events into queue for SSE streaming. Saves response to DB when complete.
+
+    The agent is passed in from the request handler, freshly built and
+    hydrated from DB-backed history. We deliberately don't share it
+    across requests — see the module-level comment near `active_tasks`.
     """
-    global session_agents, active_tasks, cancelled_sessions
+    global active_tasks, cancelled_sessions
 
     full_response = ""
     event_count = 0
     was_cancelled = False
 
     try:
-        # Get agent for this session
-        agent = session_agents.get(session_id)
-        if not agent:
-            await queue.put({"type": "error", "data": {"error": "Agent not found"}})
-            await queue.put(None)  # Signal completion
-            return
-
         # Save user message to DB
         user_msg_id = str(uuid.uuid4())
         await db.save_message(user_msg_id, session_id, "user", user_message_for_db)
@@ -898,13 +929,7 @@ async def run_agent_background(
         # CancelledError handler below for why.
         if full_response:
             if was_cancelled:
-                full_response += "\n\n*[Response cancelled by user]*"
-                cancel_info = cancelled_sessions.get(session_id, {})
-                eval_id = cancel_info.get("evalId")
-                if eval_id:
-                    agent = session_agents.get(session_id)
-                    if agent:
-                        agent.cancel_info = cancel_info
+                full_response += _cancel_suffix(cancelled_sessions.get(session_id, {}))
             assistant_msg_id = str(uuid.uuid4())
             try:
                 await asyncio.wait_for(
@@ -940,11 +965,6 @@ async def run_agent_background(
         was_cancelled = True
         await queue.put({"type": "cancelled", "data": {"message": "Request cancelled", **cancel_info}})
 
-        # Store cancel info on agent so _fix_orphaned_tool_uses includes it in the tool result
-        agent = session_agents.get(session_id)
-        if agent and eval_id:
-            agent.cancel_info = cancel_info
-
         # Save partial response to DB — but bounded by a timeout. The
         # SSE stream can't close until this except handler returns
         # (finally puts None on queue), so a slow DB save would leave
@@ -954,7 +974,7 @@ async def run_agent_background(
         # unblocks the user. 5s is generous; the DB save normally takes
         # <50ms.
         if full_response:
-            full_response += "\n\n*[Response cancelled by user]*"
+            full_response += _cancel_suffix(cancel_info)
             assistant_msg_id = str(uuid.uuid4())
             try:
                 await asyncio.wait_for(
@@ -993,7 +1013,7 @@ async def run_agent_background(
 
 async def chat_stream(request: ChatRequest, user_id: str):
     """Stream chat responses with progress updates via SSE."""
-    global session_agents, active_tasks, event_queues
+    global active_tasks, event_queues
 
     logger = logging.getLogger(__name__)
 
@@ -1035,19 +1055,16 @@ async def chat_stream(request: ChatRequest, user_id: str):
     # Create session if it doesn't exist
     await db.create_session(session_id, user_id)
 
-    # Get or create agent for this session
-    if session_id not in session_agents:
-        agent = Agent(bedrock_client, mcp_client, debug=False)
-
-        # Load existing conversation history from database
-        existing_messages = await db.get_session_messages(session_id)
-        if existing_messages:
-            agent.conversation_history = [
-                {"role": msg["role"], "content": msg["content"]}
-                for msg in existing_messages
-            ]
-
-        session_agents[session_id] = agent
+    # Build a fresh Agent for this turn, hydrated from DB-backed history.
+    # The DB is the only cross-pod-coherent store in a multi-replica
+    # backend, so each turn re-reads it rather than relying on a
+    # process-local cache that would silently diverge.
+    existing_messages = await db.get_session_messages(session_id)
+    agent = Agent(bedrock_client, mcp_client, debug=False)
+    agent.conversation_history = [
+        {"role": msg["role"], "content": msg["content"]}
+        for msg in existing_messages
+    ]
 
     # Process file upload directly via Dataset MCP if present
     file_result_message = ""
@@ -1094,6 +1111,7 @@ async def chat_stream(request: ChatRequest, user_id: str):
         run_agent_background(
             session_id=session_id,
             user_id=user_id,
+            agent=agent,
             final_message=final_message,
             user_message_for_db=request.message,
             queue=queue,
@@ -1125,8 +1143,6 @@ async def chat_stream(request: ChatRequest, user_id: str):
 
 async def chat_non_stream(request: ChatRequest, user_id: str) -> ChatResponse:
     """Handle non-streaming chat requests (legacy mode)."""
-    global session_agents
-
     if not bedrock_client or not mcp_client or not db:
         raise HTTPException(status_code=500, detail="Backend not initialized")
 
@@ -1143,22 +1159,14 @@ async def chat_non_stream(request: ChatRequest, user_id: str) -> ChatResponse:
         # Create session if it doesn't exist
         await db.create_session(session_id, user_id)
 
-        # Get or create agent for this session
-        if session_id not in session_agents:
-            agent = Agent(bedrock_client, mcp_client, debug=False)
-
-            # Load existing conversation history from database
-            existing_messages = await db.get_session_messages(session_id)
-            if existing_messages:
-                # Convert DB format to agent format (only role and content needed)
-                agent.conversation_history = [
-                    {"role": msg["role"], "content": msg["content"]}
-                    for msg in existing_messages
-                ]
-
-            session_agents[session_id] = agent
-
-        agent = session_agents[session_id]
+        # Build a fresh Agent for this turn from DB-backed history —
+        # see the streaming-path comment above for why we don't cache.
+        existing_messages = await db.get_session_messages(session_id)
+        agent = Agent(bedrock_client, mcp_client, debug=False)
+        agent.conversation_history = [
+            {"role": msg["role"], "content": msg["content"]}
+            for msg in existing_messages
+        ]
 
         # Save user message
         user_msg_id = str(uuid.uuid4())

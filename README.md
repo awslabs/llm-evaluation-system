@@ -95,8 +95,8 @@ Share datasets, judges, configs, and eval results across your team via a shared 
 **First on the team — creating the bucket?** One person runs this once:
 
 ```bash
-git clone https://github.com/awslabs/llm-evaluation-system.git
-cd llm-evaluation-system/infra/eval-logs-bucket
+git clone https://github.com/awslabs/llm-evaluation-system.git /tmp/eval-mcp-infra
+cd /tmp/eval-mcp-infra/infra/eval-logs-bucket
 ./create-bucket.sh my-team-evals
 ```
 

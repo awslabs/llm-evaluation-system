@@ -164,30 +164,26 @@ Opens http://localhost:4001. Each service hot-reloads independently; see [`local
               ┌──────────────────────────────┼──────────────────────────────┐
               │                              │                              │
               ▼                              ▼                              ▼
-     ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐
-     │    Frontend     │          │     Backend     │          │   MCP Servers   │
-     │    (Next.js)    │          │    (FastAPI)    │          │  - synthetic    │
-     │                 │          │  - Chat/Agent   │          │  - providers    │
-     └─────────────────┘          │  - Viewer Proxy │          │  - dataset      │
-                                  └────────┬────────┘          └─────────────────┘
-                                           │
-                    ┌──────────────────────┼──────────────────────┐
-                    │                      │                      │
-                    ▼                      ▼                      ▼
-           ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-           │   User A     │       │   User B     │       │   User C     │
-           │ /data/users/ │       │ /data/users/ │       │ /data/users/ │
-           │  - configs   │       │  - configs   │       │  - configs   │
-           │  - datasets  │       │  - datasets  │       │  - datasets  │
-           │  - viewer    │       │  - viewer    │       │  - viewer    │
-           └──────────────┘       └──────────────┘       └──────────────┘
-                    │                      │                      │
-                    └──────────────────────┼──────────────────────┘
-                                           │
-                              ┌────────────▼────────────┐
-                              │   JSON + EBS Storage   │
-                              │  Periodic S3 backup      │
-                              └─────────────────────────┘
+     ┌─────────────────┐     ┌──────────────────────────────────────┐
+     │    Frontend     │     │   Backend Pod (stateless)            │
+     │    (Next.js)    │     │  ┌──────────────┐  ┌──────────────┐  │
+     │                 │     │  │   backend    │↔│   eval-mcp   │  │
+     └─────────────────┘     │  │  (FastAPI)   │  │  (sidecar,   │  │
+                             │  │   :8080      │  │   HTTP :8002)│  │
+                             │  └──────┬───────┘  └───────┬──────┘  │
+                             │         └──────┬───────────┘         │
+                             │                ▼                     │
+                             │     emptyDir /data (ephemeral)       │
+                             └────────────────┬─────────────────────┘
+                                              │
+                       ┌──────────────────────┼──────────────────────┐
+                       ▼                      ▼                      ▼
+              ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
+              │ RDS Postgres │       │  S3 data     │       │ S3 documents │
+              │ chat history │       │  configs,    │       │ user uploads │
+              │  (IAM auth)  │       │  datasets,   │       │              │
+              │              │       │  judges,logs │       │              │
+              └──────────────┘       └──────────────┘       └──────────────┘
 ```
 
 ## Security Architecture
@@ -297,9 +293,9 @@ helm/eval/
 ├── values.yaml           # Shared defaults (multi-environment)
 ├── values-aws.yaml       # AWS EKS overrides
 └── templates/
-    ├── deployment.yaml   # Backend + Frontend + 3 MCP sidecars + s3-backup
+    ├── deployment.yaml   # Backend Pod (backend + eval-mcp sidecar) + Frontend
     ├── service.yaml      # Backend, Frontend services
-    ├── pvc.yaml          # Backend EBS gp3 storage (200Gi)
+    ├── pvc.yaml          # Intentionally empty — backend is stateless (data in S3)
     ├── hpa.yaml          # Horizontal Pod Autoscaling
     ├── pdb.yaml          # Pod Disruption Budgets
     └── rbac.yaml         # RBAC configuration
@@ -448,18 +444,23 @@ helm template eval ./helm/eval -f ./helm/eval/values-aws.yaml \
 
 ### Storage Management
 
-Backend uses single-pod architecture with EBS gp3 storage (200Gi). Sidecar backs up JSON databases to S3 every 15 minutes. Brief downtime (~30s) occurs during deploys.
+Backend is **stateless** — `/data` is an `emptyDir` volume (lost on pod restart). All durable state lives in S3:
+
+- **S3 data bucket** (`infra/data/storage.tf` → `data_bucket`) — configs, datasets, judges, eval logs, PDF reports. Written directly by `eval-mcp` via `USER_STORAGE_BASE=/data/users` plus the S3 sync layer.
+- **S3 documents bucket** — user-uploaded PDFs and knowledge bases.
+- **RDS Postgres** — chat history.
+
+Pod restarts and rolling deploys are therefore non-disruptive to durable state. HPA scaling works without volume coordination. There is no PVC and no `s3-backup` sidecar; `helm/eval/templates/pvc.yaml` is intentionally empty (see its comment).
 
 ```bash
-# Check disk usage
-kubectl exec -n eval-managed deployment/backend -- df -h /data
+# Inspect the ephemeral working dir (resets on pod restart)
+kubectl exec -n eval-managed deployment/backend -c backend -- df -h /data
 
-# Expand storage (no downtime, applies automatically)
-kubectl patch pvc backend-data -n eval-managed \
-  -p '{"spec":{"resources":{"requests":{"storage":"400Gi"}}}}'
+# Verify durable state is in S3
+aws s3 ls s3://$(cd infra/data && terraform output -raw data_bucket)/users/
 
-# Check backup status
-kubectl logs -n eval-managed -l app=backend -c s3-backup
+# Tail MCP sidecar logs (where the S3 writes happen)
+kubectl logs -n eval-managed -l app=backend -c eval-mcp
 ```
 
 ### Terraform State

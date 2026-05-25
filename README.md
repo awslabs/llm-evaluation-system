@@ -151,7 +151,11 @@ The script auto-installs Terraform, kubectl, and Helm, then deploys the complete
 ./destroy.sh
 ```
 
-Architecture details, OIDC config, Helm values, and manual deployment steps: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+Architecture diagrams: [ARCHITECTURE.md](ARCHITECTURE.md). OIDC config, Helm values, terraform variables, and manual deployment steps: [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md).
+
+## Architecture
+
+Three diagrams covering the three distinct ways code in this repo runs — eval execution, the MCP server, and the EKS deployment: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## Roadmap
 

@@ -14,57 +14,17 @@ The MCP package (`eval_mcp/`) and the EKS web app (`backend/` + `frontend/` + `h
 
 ```mermaid
 flowchart TB
-    subgraph User["User session (IDE or web chat)"]
-        IDE["Coding agent<br/>(Claude Code, Cursor, Kiro, ...)"]
-    end
-
-    subgraph MCP["eval-mcp server (stdio or HTTP)"]
-        Tools["MCP tools<br/>list_bedrock_models<br/>generate_qa_pairs<br/>generate_judge<br/>create_eval_config<br/>run_evaluation"]
-    end
-
-    subgraph Storage["User dir ~/.eval-mcp/users/&lt;user&gt;/"]
-        Configs["configs/&lt;name&gt;.py<br/>configs/&lt;name&gt;.json"]
-        Datasets["datasets/"]
-        Judges["judges/"]
-        Logs["logs/&lt;eval_id&gt;.eval<br/>logs/raw_otel/*.jsonl"]
-    end
-
-    subgraph Inspect["Inspect AI subprocess<br/>(python -m inspect_ai eval)"]
-        Task["Task: samples × target models"]
-        Solver["Solver<br/>standard: call target model directly<br/>agent: spawn agent subprocess"]
-        Scorer["Jury scorer<br/>N judge models score each sample<br/>binary per-criterion, majority vote"]
-    end
-
-    subgraph Capture["Agent-eval capture path"]
-        AgentProc["Agent subprocess<br/>(user's agent_path)"]
-        OTLP["In-harness OTLP receiver<br/>(eval_mcp/otlp_receiver.py)"]
-    end
-
-    Bedrock[("AWS Bedrock<br/>(target + judge models)")]
-    Viewer["Local viewer :4001<br/>eval_mcp/viewer.py + viewer_static/"]
-    Report["PDF report<br/>generate_report"]
-
-    IDE -->|"tool call"| Tools
-    Tools -->|"writes"| Configs
-    Tools -->|"writes"| Datasets
-    Tools -->|"writes"| Judges
-
-    Tools -->|"spawn (asyncio.create_subprocess_exec)"| Inspect
-    Inspect --> Task
-    Task --> Solver
-    Solver -->|"standard eval"| Bedrock
-    Solver -->|"agent eval: spawn"| AgentProc
-    AgentProc -->|"OTEL_EXPORTER_OTLP_ENDPOINT"| OTLP
-    AgentProc -->|"instrumented Bedrock calls"| Bedrock
-    OTLP -->|"spans → ModelEvents"| Solver
-    Solver --> Scorer
-    Scorer -->|"each judge calls Bedrock<br/>per criterion"| Bedrock
-    Scorer -->|"writes .eval log"| Logs
-
-    Tools -->|"read .eval log"| Logs
-    Tools --> Report
-    Logs --> Viewer
-    IDE -->|"open browser"| Viewer
+    IDE["IDE coding agent"] --> Tools["eval-mcp tools"]
+    Tools -->|"spawn"| Inspect["Inspect AI subprocess"]
+    Inspect --> Solver{"Solver:<br/>standard or agent?"}
+    Solver -->|"standard"| Bedrock[("AWS Bedrock<br/>target + judges")]
+    Solver -->|"agent"| Agent["Agent subprocess<br/>(OTel-instrumented)"]
+    Agent --> Bedrock
+    Agent -.->|"spans via OTLP receiver"| Solver
+    Solver --> Scorer["Jury scorer<br/>N judges, binary per criterion,<br/>majority vote"]
+    Scorer --> Bedrock
+    Scorer --> Log[(".eval log<br/>+ raw OTel JSONL")]
+    Log --> Viewer["Local viewer<br/>+ PDF report"]
 ```
 
 **Tool order in a typical session:** `list_bedrock_models` → `generate_qa_pairs` (from docs or context) → `save_dataset` → `generate_judge` → `create_eval_config` → `run_evaluation` → `generate_report`. The agent in the IDE picks the order; the MCP just exposes the tools.
@@ -81,64 +41,19 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    subgraph Clients["Clients"]
-        CC["Claude Code / Cursor / Kiro / VS Code / Codex<br/>(stdio)"]
-        Remote["Remote agent / EKS backend<br/>(streamable HTTP)"]
-    end
+    IDE["IDE<br/>(Claude Code, Cursor, Kiro, ...)"] -->|"stdio"| Server
+    Remote["Remote agent /<br/>EKS backend"] -->|"HTTP"| Server
 
-    subgraph Process["eval-mcp process"]
-        CLI["eval_mcp/cli.py<br/>(click group)"]
-        Server["eval_mcp/server.py<br/>FastMCP('eval-server')"]
+    Server["eval-mcp server<br/>(FastMCP)"] --> Tools["Tool handlers<br/>(eval_mcp/tools/*)"]
 
-        subgraph ToolMods["eval_mcp/tools/"]
-            T1["dataset: generate_qa, save_dataset, list_datasets"]
-            T2["judge: generate_judge, list_judges"]
-            T3["config: create_eval_config, create_agent_eval_config"]
-            T4["run: run_evaluation, retry_evaluation, optimize_prompt"]
-            T5["read: list_evaluations, get_evaluation_details, analyze_*"]
-            T6["report: generate_report"]
-        end
+    Tools <--> UserDir[("~/.eval-mcp/users/&lt;user&gt;/<br/>configs, datasets, judges, logs")]
+    Tools -->|"spawn"| Inspect["Inspect AI subprocess"]
+    Tools --> Bedrock[("AWS Bedrock")]
 
-        subgraph Core["eval_mcp/core/"]
-            Bed["bedrock_client.py<br/>cross-region + API-key auth"]
-            UStore["user_storage.py<br/>get_user_dir / get_user_log_dir"]
-            Pricing["pricing.py + provider_pricing.json"]
-            Jury["judge_config.py"]
-        end
+    UserDir <-.->|"auto-sync<br/>(optional, eval-mcp init)"| S3[("Team S3 bucket")]
 
-        Sub["subprocess_runner.py<br/>+ _agent_launcher.py<br/>(spawns inspect-ai)"]
-        OTLP2["otlp_receiver.py +<br/>bedrock_capture.py"]
-        S3Sync["s3_sync.py<br/>(replicate_async, auto_pull,<br/>sync_up/down/to_project)"]
-        Viewer2["viewer.py<br/>FastAPI on :4001<br/>serves viewer_static/"]
-
-        Installers["installers/<br/>claude_code, codex, cursor, kiro, vscode"]
-    end
-
-    UserDir[("~/.eval-mcp/users/&lt;user&gt;/<br/>configs, datasets, judges, logs<br/>USER_STORAGE_BASE overrides")]
-    BedrockSvc[("AWS Bedrock")]
-    S3Bucket[("S3 team bucket<br/>(optional)<br/>users/&lt;you&gt;/, projects/&lt;name&gt;/")]
-    Browser["Browser"]
-
-    CC -->|"JSON-RPC over stdio"| Server
-    Remote -->|"streamable_http_app"| Server
-    CLI -->|"no subcommand → run server"| Server
-    CLI -->|"eval-mcp install"| Installers
-    CLI -->|"eval-mcp init &lt;bucket&gt;"| S3Sync
-    CLI -->|"eval-mcp view"| Viewer2
-    CLI -->|"eval-mcp sync / share"| S3Sync
-
-    Server --> ToolMods
-    ToolMods --> Core
-    ToolMods --> Sub
-    Sub -.->|"OTel spans"| OTLP2
-    Core --> BedrockSvc
-    ToolMods <--> UserDir
-    UserDir -.->|"auto-replicate on write"| S3Sync
-    S3Sync <--> S3Bucket
-    UserDir -.->|"auto-pull on list/read (debounced)"| S3Sync
-
-    Viewer2 --> UserDir
-    Browser --> Viewer2
+    UserDir --> Viewer["Local viewer :4001"]
+    Browser["Browser"] --> Viewer
 ```
 
 **Transport.** `eval_mcp/server.py:main()` reads `EVAL_MCP_TRANSPORT` — defaults to `stdio` (what IDEs use), set to `http` to serve `streamable_http_app` at `EVAL_MCP_PORT` (default 8002) for self-hosted / EKS-sidecar use. Same server, same tools, different mouth.
@@ -161,88 +76,24 @@ The optional multi-user web app — Cognito-auth'd chat UI for non-technical use
 
 ```mermaid
 flowchart TB
-    User["User browser"]
+    User["User browser"] -->|"HTTPS"| CF["CloudFront + WAF"]
+    CF -->|"VPC Origin<br/>(private AWS network)"| ALB["Internal ALB"]
+    ALB --> OAuth["oauth2-proxy"]
+    OAuth -.->|"OIDC"| Cognito["Cognito User Pool"]
 
-    subgraph Edge["AWS edge"]
-        CF["CloudFront (HTTPS)<br/>HTTP/2+3"]
-        WAF["WAF<br/>rate-limit 2000 req/5min<br/>AWS managed rules"]
-        VPCOrigin["VPC Origin<br/>(private AWS network)"]
+    OAuth --> Frontend["Frontend Pod<br/>(Next.js)"]
+    OAuth --> BackendPod
+
+    subgraph BackendPod["Backend Pod (stateless)"]
+        BE["backend<br/>(FastAPI :8080)"]
+        MCP["eval-mcp sidecar<br/>(HTTP :8002)"]
+        BE <-->|"localhost"| MCP
     end
 
-    Cognito["Cognito User Pool<br/>admin-signup + optional OIDC IdP"]
-
-    subgraph VPC["VPC (infra/data) — 10.0.0.0/16"]
-        ALB["Internal ALB<br/>(not internet-facing)"]
-        S3End["S3 VPC Endpoint"]
-
-        subgraph EKS["EKS cluster (infra/platform)"]
-            direction TB
-            OAuth["oauth2-proxy<br/>:4180"]
-
-            subgraph BackendPod["Pod: backend"]
-                BE["backend container<br/>FastAPI :8080"]
-                EvalSidecar["eval-mcp sidecar<br/>HTTP :8002<br/>(K8s 1.28+ native sidecar)"]
-                Eph["emptyDir /data<br/>USER_STORAGE_BASE=/data/users"]
-            end
-
-            subgraph FrontendPod["Pod: frontend"]
-                FE["Next.js :3000"]
-            end
-
-            Karp["Karpenter<br/>arm64 c/m/r/t medium-xl"]
-            ESO["External Secrets Operator<br/>+ Pod Identity"]
-        end
-    end
-
-    subgraph DataLayer["infra/data (persistent)"]
-        RDS[("RDS Postgres<br/>chat history<br/>IAM auth")]
-        S3Docs[("S3 documents bucket<br/>user uploads")]
-        S3Data[("S3 data bucket<br/>configs, datasets, judges,<br/>logs, periodic JSON backup")]
-    end
-
-    subgraph CICD["Image pipeline (infra/platform)"]
-        CB["CodeBuild<br/>(ARM64 build)"]
-        ECR[("ECR<br/>backend + frontend images")]
-        SrcS3[("S3 source bucket")]
-    end
-
-    SM[("Secrets Manager<br/>Cognito client + cookie + DB IAM")]
-    BedrockSvc2[("AWS Bedrock<br/>multi-region inference<br/>+ CloudWatch logging")]
-
-    User -->|"HTTPS"| CF
-    CF --> WAF
-    WAF --> VPCOrigin
-    VPCOrigin --> ALB
-
-    ALB -->|"/oauth2/*, protected routes"| OAuth
-    ALB -->|"/api/*"| BE
-    ALB -->|"/viewer/*"| BE
-    ALB -->|"/*"| FE
-    OAuth -.->|"login redirect"| Cognito
-    Cognito -.->|"OIDC"| OAuth
-
-    BE <-->|"http://localhost:8002/mcp"| EvalSidecar
-    BE --> Eph
-    EvalSidecar --> Eph
-    BE -->|"chat history"| RDS
-    BE -->|"user uploads"| S3Docs
-    EvalSidecar -->|"durable state +<br/>periodic backup"| S3Data
-    EvalSidecar -->|"target + judge calls"| BedrockSvc2
-
-    Eph -.->|"ephemeral; lost on pod restart"| Eph
-    S3Data -.->|"S3 VPC endpoint"| S3End
-
-    ESO --> SM
-    SM -.->|"injected as K8s secrets"| BE
-    SM -.->|"injected"| OAuth
-
-    SrcS3 --> CB
-    CB --> ECR
-    ECR -.->|"image pull"| BackendPod
-    ECR -.->|"image pull"| FrontendPod
-
-    Karp -.->|"provisions nodes"| BackendPod
-    Karp -.->|"provisions nodes"| FrontendPod
+    BE --> RDS[("RDS Postgres<br/>chat history")]
+    BE --> S3Docs[("S3 documents<br/>user uploads")]
+    MCP --> S3Data[("S3 data<br/>configs, datasets,<br/>judges, eval logs")]
+    MCP --> Bedrock[("AWS Bedrock")]
 ```
 
 **Two Terraform layers, independent state.**

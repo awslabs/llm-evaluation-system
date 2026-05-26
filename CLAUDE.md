@@ -1,8 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-Agent-facing conventions (worktree workflow, model-add checklist, key files) live in [AGENTS.md](./AGENTS.md) — read it first. This file adds the commands + architecture overview that aren't in AGENTS.md.
+This is the canonical agent-facing doc for the repo — Claude Code reads it directly, and [`AGENTS.md`](./AGENTS.md) is a thin pointer back here so other tools that follow the [agents.md](https://agents.md) convention (Codex, Cursor) land in the same place.
 
 ## What's in this repo
 
@@ -12,6 +10,20 @@ Two deployables that share some code:
 - **`backend/` + `frontend/`** — the optional EKS web app (FastAPI chat + Next.js UI + Cognito auth). `./deploy.sh` is its entry point; `make dev` runs it locally via Docker Compose.
 
 The same `frontend/` source builds two artifacts: the Next.js app for the web deployment (`next build`), and a static export bundled into `eval_mcp/viewer_static/` for the MCP's local results viewer (`npm run build:viewer`). Changing frontend code therefore affects the PyPI wheel — the viewer static is package data per `pyproject.toml`.
+
+## Key files
+
+| File | Purpose |
+|------|---------|
+| `eval_mcp/server.py` | Unified MCP server — every tool is registered here |
+| `eval_mcp/tools/` | Tool handlers (QA gen, judge, config, run, …) |
+| `eval_mcp/core/bedrock_client.py` | Bedrock client + cross-region inference + API-key auth |
+| `eval_mcp/core/judge_config.py` | Default judge models and criteria |
+| `eval_mcp/provider_pricing.json` | Source of truth for model pricing — required when adding a model |
+| `backend/core/agent.py` | EKS web app's agent system prompt + loop (the MCP itself doesn't host an agent) |
+| `Makefile` | Local dev commands (`make dev`, `make logs`, `make restart`, `make stop`, `make release`) |
+
+Full system architecture + diagrams: [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ## Commands
 
@@ -91,7 +103,7 @@ Data-layer outputs flow into platform-layer via `-var=` flags (NOT `terraform_re
 
 ### Adding a model
 
-Touch both: `eval_mcp/tools/bedrock_models.py` (or the relevant SUPPORTED_MODELS list — see [AGENTS.md](./AGENTS.md#adding-a-new-model)) AND `eval_mcp/provider_pricing.json`. Missing pricing entries silently break cost reporting downstream.
+Touch both: `eval_mcp/tools/bedrock_models.py` (add to `SUPPORTED_MODELS`) AND `eval_mcp/provider_pricing.json` (per-1M-token pricing). Missing pricing entries silently break cost reporting downstream.
 
 ### Adding a tool
 
@@ -102,7 +114,18 @@ Touch both: `eval_mcp/tools/bedrock_models.py` (or the relevant SUPPORTED_MODELS
 
 ## Conventions worth knowing up front
 
-- **Worktrees by default** for non-trivial changes: `git worktree add .claude/worktrees/<name> -b <type>/<name>`. Keeps `viewer_static/`, `node_modules/`, build artifacts from colliding across parallel branches. `.claude/` is gitignored except `.claude/skills/`.
+- **Worktrees by default** for non-trivial changes: `git worktree add .claude/worktrees/<name> -b <type>/<name>`. Keeps `viewer_static/`, `node_modules/`, build artifacts from colliding across parallel branches. `.claude/` is gitignored except `.claude/skills/`. Skip the worktree for trivial single-file edits that'll merge in the next minute.
 - **Conventional Commits** for every commit and every PR title (`feat(mcp): ...`, `fix(release): ...`). Enforced by convention, not lint.
 - **Never push to `main`, never force-push, never auto-release on merge.** Releases are an explicit `make release` after the user says ship. See [ship-it skill](./.claude/skills/ship-it/SKILL.md) for the full flow + the supply-chain reasoning behind avoiding release-please-style bots.
 - **`uvx` caches resolved versions per user.** A fresh PyPI release won't reach existing users until they run `uv cache clean llm-evaluation-system`. When verifying a release locally use `uvx --refresh --from 'llm-evaluation-system==X.Y.Z' eval-mcp --help`.
+
+## Notes for AI agents
+
+Claude Code and other agentic tools auto-summarize prior conversation turns when the context window fills up — the conversation isn't capped by the window. Don't stop work mid-task to "save context," compress your writing terser than the task requires, commit half-done changes prematurely, or suggest opening a fresh session just because the chat has gotten long. Those impulses fracture a coherent change set the user has to stitch back together. If the limit is genuinely reached, the platform handles it — focus on finishing what was asked.
+
+## Skills worth invoking (Claude Code only)
+
+These [marketplace skills](https://code.claude.com/docs/en/skills) from the official Anthropic marketplace pair well with this repo's workflows. They're user-installed (not bundled here), so the recommendation only fires for sessions where the user has them available — but if you do, lean on them rather than reinventing the wheel.
+
+- **`webapp-testing`** — after any UI or routing change to the Next.js frontend (web app on `:3000`) or the bundled viewer (`eval-mcp view` on `:4001`). Spins up Playwright and actually clicks through pages, rather than trusting that type-checks caught nav regressions.
+- **`frontend-design`** — when adding or restyling components in `frontend/`. Same source builds both the web app and the static viewer export, so component quality lands in both deliverables.

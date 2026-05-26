@@ -49,25 +49,6 @@ htmlcov/
 .dmypy.json
 dmypy.json
 
-# Promptfoo data
-.promptfoo/results/
-*.promptfoo.db
-promptfoo.db*
-evalLastWritten
-cache/
-
-# Promptfoo generated configs (dynamically created, don't track)
-promptfooconfig.yaml
-promptfoo.yaml
-promptfooconfig_*.yaml
-*-dataset.yaml
-*_dataset.yaml
-*-eval-config.yaml
-*_eval_config.yaml
-backend/datasets/*.yaml
-backend/*.yaml
-test_*.yaml
-
 # Logs
 *.log
 
@@ -98,7 +79,7 @@ yarn-error.log*
 *.db-wal
 chat.db
 
-# User data directory (per-user datasets, judges, configs, promptfoo.db)
+# User data directory (per-user datasets, judges, configs)
 backend/users/
 
 # Vision/strategy documents (keep local)

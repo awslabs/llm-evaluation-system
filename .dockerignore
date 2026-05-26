@@ -1,6 +1,5 @@
 # Node modules (will npm ci in container)
 **/node_modules
-promptfoo/node_modules
 
 # Git
 .git
@@ -10,10 +9,6 @@ promptfoo/node_modules
 **/__pycache__
 **/*.pyc
 *.egg-info
-
-# Build artifacts
-promptfoo/dist
-promptfoo/coverage
 
 # IDE
 .vscode

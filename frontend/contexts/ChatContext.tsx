@@ -162,7 +162,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
           const assistantMessageId = crypto.randomUUID();
           let assistantContent = "";
           let statusContent = "";
-          let statusHistory: string[] = [];
+          const statusHistory: string[] = [];
           let actualSessionId = currentSessionId; // Track the actual session ID (may be updated by backend)
 
           // Add initial streaming message

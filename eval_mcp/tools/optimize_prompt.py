@@ -427,15 +427,21 @@ async def _spawn_inspect_eval(
 def _extract_rows_from_log(log: Any) -> List[Dict[str, Any]]:
     """Pull per-sample rows out of an Inspect eval log. Each row carries
     the question, golden, model answer, jury score, and the
-    ``criteria_results`` metadata where improvement notes live."""
+    ``criteria_results`` metadata where improvement notes live.
+
+    The optimizer always writes its temp configs with the default
+    ``scorers=["jury"]``, but read defensively: prefer the ``jury_scorer``
+    entry by name in case other scorers were composed in. Built-in
+    scorers (``f1``/``exact``/...) carry no ``criteria_results`` metadata,
+    so they're useless to the optimizer; we fall back to the first
+    available scorer only so a malformed log doesn't crash."""
     rows: List[Dict[str, Any]] = []
     for sample in (log.samples or []):
-        # jury_scorer is the only scorer; its key in sample.scores is
-        # the function name. Iterate defensively in case a future change
-        # adds another scorer.
         score_obj = None
         if sample.scores:
-            score_obj = next(iter(sample.scores.values()), None)
+            score_obj = sample.scores.get("jury_scorer") or next(
+                iter(sample.scores.values()), None
+            )
 
         sample_score = 0.0
         criteria_results: List[Dict[str, Any]] = []

@@ -524,14 +524,16 @@ async def create_eval_config(
     judge_models: list = None,
     agent_path: str = None,
     agent_entry: str = None,
+    scorers: list = None,
 ) -> str:
     """
-    Create an Inspect AI evaluation configuration with multi-judge support.
+    Create an Inspect AI evaluation configuration.
 
-    Generates config with LLM judges that evaluate using binary scores.
-    Results are aggregated by Jury scoring. The config name is auto-generated
-    from a timestamp — you do NOT pick it. This prevents accidentally reusing
-    a stale config by name.
+    By default uses a multi-judge LLM jury (binary per criterion, majority
+    vote) — best for open-ended QA where rubric-style grading is required.
+    Pass ``scorers`` to opt into Inspect AI's built-in deterministic
+    scorers alone or composed with the jury. The config name is
+    auto-generated from a timestamp — you do NOT pick it.
 
     For agent evaluations: pass agent_path to evaluate a local Python agent
     with full Bedrock call tracing. The agent code is not modified.
@@ -546,6 +548,15 @@ async def create_eval_config(
         judge_models: Optional list of model IDs to use as judges
         agent_path: Path to a Python agent file to evaluate. The agent must have a callable entry function.
         agent_entry: Name of the entry function in the agent file (default: "run_agent")
+        scorers: Optional list of scorers. Default: ["jury"]. Accepted names:
+            - "jury": the default LLM-as-judge jury with criteria-based binary scoring
+            - "f1": Inspect's token-overlap F1 (deterministic, no LLM calls)
+            - "exact": Inspect's normalized exact-match
+            - "includes": Inspect's substring containment check
+            - "match": Inspect's location-aware string match (end/begin/any/exact)
+            Compose by passing several names, e.g. ["jury", "f1"] runs both
+            and stores both scores in the eval log. Pure deterministic runs
+            (no "jury") skip judge LLM calls entirely — fast and free.
 
     Returns:
         JSON with the auto-generated configName and summary. Pass that configName
@@ -561,6 +572,7 @@ async def create_eval_config(
         "judge_models": judge_models,
         "agent_path": agent_path,
         "agent_entry": agent_entry,
+        "scorers": scorers,
     }
     result = await handle_create_eval_config(args)
     return result[0].text
@@ -576,6 +588,7 @@ async def create_agent_eval_config(
     model: str = None,
     description: str = None,
     judge_models: list = None,
+    scorers: list = None,
 ) -> str:
     """
     Create an evaluation config for testing an agent running in a container.
@@ -600,6 +613,10 @@ async def create_agent_eval_config(
         model: Model to route agent LLM requests through (only needed if agent uses model="inspect")
         description: Optional description of the evaluation
         judge_models: Optional list of model IDs to use as judges
+        scorers: Optional list of scorers. Default: ["jury"]. Accepted names:
+            "jury", "f1", "exact", "includes", "match". Compose for both
+            deterministic and rubric signal on the same agent run.
+            See create_eval_config for full details.
 
     Returns:
         JSON with the auto-generated configName and summary.
@@ -613,6 +630,7 @@ async def create_agent_eval_config(
         "model": model,
         "description": description,
         "judge_models": judge_models,
+        "scorers": scorers,
     }
     result = await handle_create_agent_eval_config(args)
     return result[0].text

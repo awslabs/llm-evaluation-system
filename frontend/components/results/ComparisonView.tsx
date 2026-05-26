@@ -32,6 +32,11 @@ interface SampleResult {
   output: string;
   explanation?: string;
   criteriaResults?: CriteriaResult[];
+  // When the eval ran more than one scorer (e.g. ["jury", "f1"]), each
+  // scorer's per-sample value lands here keyed by scorer name. The
+  // primary `score` above keeps backward compat (jury_scorer preferred);
+  // this dict is the full picture.
+  scoresByScorer?: Record<string, number>;
   stages?: Record<string, StageResult>;
 }
 
@@ -56,7 +61,15 @@ interface ComparisonData {
   models: string[];
   criteria: string[];
   criteriaDescriptions: Record<string, string>;
-  aggregate: Record<string, { overall: number; byCriterion: Record<string, number>; byStage?: Record<string, number> }>;
+  aggregate: Record<
+    string,
+    {
+      overall: number;
+      byCriterion: Record<string, number>;
+      byStage?: Record<string, number>;
+      byScorer?: Record<string, number>;
+    }
+  >;
   samples: Sample[];
   stats: Record<string, Record<string, unknown>>;
   pipeline?: PipelineStage[];

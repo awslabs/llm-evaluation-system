@@ -122,3 +122,10 @@ Touch both: `eval_mcp/tools/bedrock_models.py` (add to `SUPPORTED_MODELS`) AND `
 ## Notes for AI agents
 
 Claude Code and other agentic tools auto-summarize prior conversation turns when the context window fills up — the conversation isn't capped by the window. Don't stop work mid-task to "save context," compress your writing terser than the task requires, commit half-done changes prematurely, or suggest opening a fresh session just because the chat has gotten long. Those impulses fracture a coherent change set the user has to stitch back together. If the limit is genuinely reached, the platform handles it — focus on finishing what was asked.
+
+## Skills worth invoking (Claude Code only)
+
+These [marketplace skills](https://code.claude.com/docs/en/skills) from the official Anthropic marketplace pair well with this repo's workflows. They're user-installed (not bundled here), so the recommendation only fires for sessions where the user has them available — but if you do, lean on them rather than reinventing the wheel.
+
+- **`webapp-testing`** — after any UI or routing change to the Next.js frontend (web app on `:3000`) or the bundled viewer (`eval-mcp view` on `:4001`). Spins up Playwright and actually clicks through pages, rather than trusting that type-checks caught nav regressions.
+- **`frontend-design`** — when adding or restyling components in `frontend/`. Same source builds both the web app and the static viewer export, so component quality lands in both deliverables.

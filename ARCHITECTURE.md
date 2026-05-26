@@ -60,37 +60,43 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    %% Clients
-    IDE["IDE<br/>(Claude Code, Cursor, Kiro, ...)"]
+    %% Callers (top)
+    IDE["IDE<br/>(Claude Code, Cursor,<br/>Kiro, ...)"]
     Remote["Remote agent /<br/>EKS backend"]
+    UserBrowser["User browser"]
 
-    %% Process
-    Server["eval-mcp server<br/>(FastMCP)"]
-    Tools["Tool handlers<br/>(eval_mcp/tools/*)"]
-    Inspect["Inspect AI subprocess"]
-    Viewer["Local viewer :4001"]
-    Browser["Browser"]
+    %% MCP server process — spawned by IDE or run as eval-mcp serve
+    subgraph MCPProc["eval-mcp server process<br/>(stdio or HTTP)"]
+        Server["FastMCP server<br/>(eval_mcp/server.py)"]
+        Tools["Tool handlers<br/>(eval_mcp/tools/*)"]
+        Server --> Tools
+    end
 
-    %% Storage
+    %% Viewer — separate process started by `eval-mcp view`
+    subgraph ViewerProc["eval-mcp view process<br/>(separate, started on demand)"]
+        Viewer["FastAPI viewer :4001<br/>+ static frontend"]
+    end
+
+    %% Local storage + spawned subprocess
     UserDir[("~/.eval-mcp/users/&lt;user&gt;/<br/>configs, datasets, judges, logs")]
+    Inspect["Inspect AI subprocess<br/>(spawned per eval)"]
 
-    %% External
+    %% External services
     Bedrock[("AWS Bedrock")]
     S3[("Team S3 bucket<br/>(optional)")]
 
     %% Flow
-    IDE -->|"stdio"| Server
-    Remote -->|"HTTP"| Server
-    Server --> Tools
+    IDE -->|"JSON-RPC over stdio"| Server
+    Remote -->|"streamable HTTP"| Server
+    UserBrowser -->|"HTTP :4001"| Viewer
 
-    Tools <-->|"read/write user state"| UserDir
-    Tools -->|"generate_qa, generate_judge,<br/>analyze_*"| Bedrock
+    Tools <-->|"read/write"| UserDir
+    Tools -->|"generate_qa,<br/>generate_judge, analyze_*"| Bedrock
     Tools -->|"run_evaluation only"| Inspect
 
-    UserDir <-.->|"auto-sync after eval-mcp init"| S3
+    Viewer -->|"read eval logs"| UserDir
 
-    Browser --> Viewer
-    Viewer --> UserDir
+    UserDir <-.->|"auto-sync after<br/>eval-mcp init"| S3
 ```
 
 **Transport.** `eval_mcp/server.py:main()` reads `EVAL_MCP_TRANSPORT` — defaults to `stdio` (what IDEs use), set to `http` to serve `streamable_http_app` at `EVAL_MCP_PORT` (default 8002) for self-hosted / EKS-sidecar use. Same server, same tools, different mouth.

@@ -56,6 +56,19 @@ export default function SampleDetailPanel({
   const criteriaResults = result.criteriaResults || [];
   const explanation = result.explanation || "";
   const sections = parseExplanation(explanation);
+  // Per-sample scorer breakdown — only set when the eval composed
+  // multiple scorers (e.g. ["jury", "f1"]). Used to show every score
+  // the sample produced, not just the primary one in `result.score`.
+  const scorersByName = result.scoresByScorer || {};
+  const scorerEntries = Object.entries(scorersByName);
+  const hasMultipleScorers = scorerEntries.length >= 2;
+  const scorerLabel: Record<string, string> = {
+    jury_scorer: "Jury",
+    f1: "F1",
+    exact: "Exact",
+    includes: "Includes",
+    match: "Match",
+  };
 
   return (
     <aside className="w-[420px] flex-shrink-0 overflow-y-auto border-l border-rule bg-ink-elev">
@@ -112,6 +125,32 @@ export default function SampleDetailPanel({
             />
           </div>
         </div>
+
+        {hasMultipleScorers && (
+          <div>
+            <p className="eyebrow mb-3">Per scorer</p>
+            <dl className="border-y border-rule-soft">
+              {scorerEntries.map(([name, value]) => (
+                <div
+                  key={name}
+                  className="flex items-baseline justify-between gap-3 border-t border-rule-soft py-2.5 first:border-t-0"
+                >
+                  <dt className="text-[13px] text-bone">
+                    {scorerLabel[name] || name}
+                  </dt>
+                  <dd>
+                    <span
+                      className="font-sans text-sm font-medium tabular-nums"
+                      style={{ color: scoreColor(value) }}
+                    >
+                      {(value * 100).toFixed(0)}%
+                    </span>
+                  </dd>
+                </div>
+              ))}
+            </dl>
+          </div>
+        )}
 
         {criteriaResults.length > 0 && (
           <div>

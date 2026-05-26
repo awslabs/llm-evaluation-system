@@ -99,6 +99,7 @@ interface AggregateMetricsProps {
       overall: number;
       byCriterion: Record<string, number>;
       byStage?: Record<string, number>;
+      byScorer?: Record<string, number>;
     }
   >;
   criteria: string[];
@@ -107,6 +108,20 @@ interface AggregateMetricsProps {
   sampleCount: number;
   pipeline?: PipelineStage[];
   prompts?: string[];
+}
+
+// Friendly labels for the built-in Inspect scorers + our jury. Anything
+// not listed falls back to the raw name.
+const SCORER_LABELS: Record<string, string> = {
+  jury_scorer: "Jury",
+  f1: "F1",
+  exact: "Exact",
+  includes: "Includes",
+  match: "Match",
+};
+
+function formatScorerName(name: string): string {
+  return SCORER_LABELS[name] || name;
 }
 
 // Distinctive but harmonious swatches — used as accents on model panels.
@@ -188,6 +203,38 @@ export default function AggregateMetrics({
                   / 100
                 </span>
               </div>
+              {(() => {
+                // Render a per-scorer chip row only when the eval ran
+                // more than one scorer. Single-scorer runs (jury alone
+                // or f1 alone) don't need the breakdown — the headline
+                // already represents the only signal there is.
+                const byScorer = aggregate[model]?.byScorer;
+                if (!byScorer) return null;
+                const entries = Object.entries(byScorer);
+                if (entries.length < 2) return null;
+                return (
+                  <div className="flex flex-wrap items-center gap-1.5 border-t border-rule-soft pt-3">
+                    <span className="eyebrow mr-1">Scorers</span>
+                    {entries.map(([name, value]) => (
+                      <span
+                        key={name}
+                        className="inline-flex items-baseline gap-1.5 border bg-ink px-2 py-1"
+                        style={{ borderColor: scoreColor(value) }}
+                      >
+                        <span className="font-mono text-[10px] uppercase tracking-eyebrow text-bone">
+                          {formatScorerName(name)}
+                        </span>
+                        <span
+                          className="font-sans text-xs font-medium tabular-nums"
+                          style={{ color: scoreColor(value) }}
+                        >
+                          {(value * 100).toFixed(0)}%
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+                );
+              })()}
               <dl className="mt-1 grid grid-cols-2 gap-x-4 gap-y-1.5 border-t border-rule-soft pt-3">
                 {stats[model]?.cost != null && (
                   <Row label="Cost" value={`$${Number(stats[model].cost).toFixed(4)}`} />

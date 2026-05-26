@@ -374,10 +374,24 @@ def _build_detail_from_logs(
                     for scorer_name, score in scorers.items():
                         metadata = score.get("metadata", {})
                         raw_value = score.get("value")
+                        # _read_full_logs stringifies every score via
+                        # ``str(score.value)`` so we get "0.473" instead
+                        # of 0.473 for built-in scorers like f1. Coerce
+                        # back to float when possible; only fall back to
+                        # the jury_score metadata / "C" sentinel for the
+                        # categorical-value path (which is what the LLM
+                        # judges return).
+                        sample_score: float
                         if isinstance(raw_value, (int, float)):
                             sample_score = float(raw_value)
                         else:
-                            sample_score = metadata.get("jury_score", 1.0 if raw_value == "C" else 0.0)
+                            try:
+                                sample_score = float(raw_value)
+                            except (TypeError, ValueError):
+                                sample_score = metadata.get(
+                                    "jury_score",
+                                    1.0 if raw_value == "C" else 0.0,
+                                )
                         scores_by_scorer[scorer_name] = sample_score
                         if scorer_name == primary_name:
                             score_data["score"] = sample_score
@@ -450,16 +464,42 @@ def _build_detail_from_logs(
                             stage_passed += 1
                     by_stage[stage_name] = stage_passed / max(total, 1)
 
+        # Per-scorer aggregate from each sample's scoresByScorer (only set
+        # when the eval ran more than one scorer, e.g. ["jury", "f1"]).
+        # Lets the UI surface "f1=0.51, exact=0.0" alongside the jury
+        # headline so customers can see every signal the run produced.
+        by_scorer: dict[str, float] = {}
+        scorer_buckets: dict[str, list[float]] = {}
+        for s in model_samples:
+            sbs = s.get("scoresByScorer") or {}
+            for name, v in sbs.items():
+                try:
+                    scorer_buckets.setdefault(name, []).append(float(v))
+                except (TypeError, ValueError):
+                    continue
+        for name, vals in scorer_buckets.items():
+            if vals:
+                by_scorer[name] = sum(vals) / len(vals)
+
         if by_stage:
             overall = sum(by_stage.values()) / len(by_stage) if by_stage else 0
         elif by_criterion:
             overall = sum(by_criterion.values()) / len(by_criterion)
+        elif total > 0:
+            # No jury (no criteria) — headline is the mean of per-sample
+            # scores. Previously this fell through to 0 when only
+            # deterministic scorers were used (f1/exact/...), which
+            # produced a misleading "0%" headline regardless of the real
+            # scorer output. Now it tells the truth.
+            overall = sum(float(s.get("score") or 0) for s in model_samples) / total
         else:
             overall = 0
 
         agg = {"overall": overall, "byCriterion": by_criterion}
         if by_stage:
             agg["byStage"] = by_stage
+        if by_scorer:
+            agg["byScorer"] = by_scorer
         aggregate[model] = agg
 
     task_name = group_logs[0].get("task", "")

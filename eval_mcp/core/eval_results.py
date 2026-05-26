@@ -401,7 +401,13 @@ def _build_detail_from_logs(
                             score_data["criteriaResults"] = criteria_results
                             for cr in criteria_results:
                                 criteria_set.add(cr["name"])
-                    if len(scores_by_scorer) > 1:
+                    # Always include scoresByScorer when we have any
+                    # entry — the frontend uses it not just for the
+                    # multi-scorer chip row but also to label
+                    # single non-jury scorer runs ("this 47/100 is an
+                    # F1 score"). For jury-only runs the frontend
+                    # ignores it.
+                    if scores_by_scorer:
                         score_data["scoresByScorer"] = scores_by_scorer
 
             samples_by_id[sid]["results"][column_key] = score_data

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { Sample } from "./ComparisonView";
+import { scorerInfo } from "./scorers";
 
 function scoreColor(score: number): string {
   const s = Math.max(0, Math.min(1, score));
@@ -56,19 +57,23 @@ export default function SampleDetailPanel({
   const criteriaResults = result.criteriaResults || [];
   const explanation = result.explanation || "";
   const sections = parseExplanation(explanation);
-  // Per-sample scorer breakdown — only set when the eval composed
-  // multiple scorers (e.g. ["jury", "f1"]). Used to show every score
-  // the sample produced, not just the primary one in `result.score`.
+  // Per-sample scorer breakdown. Surfaced whenever the sample carries
+  // non-jury scorers — either composed alongside the jury (e.g.
+  // ["jury", "f1"]) or run alone (["f1"]). For jury-only samples we
+  // hide it since the rubric breakdown already covers that case.
   const scorersByName = result.scoresByScorer || {};
   const scorerEntries = Object.entries(scorersByName);
-  const hasMultipleScorers = scorerEntries.length >= 2;
-  const scorerLabel: Record<string, string> = {
-    jury_scorer: "Jury",
-    f1: "F1",
-    exact: "Exact",
-    includes: "Includes",
-    match: "Match",
-  };
+  const isJuryOnly =
+    scorerEntries.length === 1 && scorerEntries[0][0] === "jury_scorer";
+  const showPerScorerSection = scorerEntries.length > 0 && !isJuryOnly;
+  // "Rubric score" implies criteria-based jury grading. Use a neutral
+  // label when the primary score comes from a non-jury scorer so
+  // readers don't think "F1 = 75%" is a rubric pass-rate.
+  const headlineLabel =
+    scorerEntries.length === 0 ||
+    scorerEntries.some(([name]) => name === "jury_scorer")
+      ? "Rubric score"
+      : "Sample score";
 
   return (
     <aside className="w-[420px] flex-shrink-0 overflow-y-auto border-l border-rule bg-ink-elev">
@@ -102,7 +107,7 @@ export default function SampleDetailPanel({
 
       <div className="space-y-6 px-5 py-5">
         <div>
-          <p className="eyebrow">Rubric score</p>
+          <p className="eyebrow">{headlineLabel}</p>
           <div className="mt-2 flex items-baseline gap-3">
             <span
               className="font-display text-6xl leading-none tabular-nums"
@@ -126,28 +131,34 @@ export default function SampleDetailPanel({
           </div>
         </div>
 
-        {hasMultipleScorers && (
+        {showPerScorerSection && (
           <div>
             <p className="eyebrow mb-3">Per scorer</p>
             <dl className="border-y border-rule-soft">
-              {scorerEntries.map(([name, value]) => (
-                <div
-                  key={name}
-                  className="flex items-baseline justify-between gap-3 border-t border-rule-soft py-2.5 first:border-t-0"
-                >
-                  <dt className="text-[13px] text-bone">
-                    {scorerLabel[name] || name}
-                  </dt>
-                  <dd>
-                    <span
-                      className="font-sans text-sm font-medium tabular-nums"
-                      style={{ color: scoreColor(value) }}
-                    >
-                      {(value * 100).toFixed(0)}%
-                    </span>
-                  </dd>
-                </div>
-              ))}
+              {scorerEntries.map(([name, value]) => {
+                const info = scorerInfo(name);
+                return (
+                  <div
+                    key={name}
+                    className="border-t border-rule-soft py-2.5 first:border-t-0"
+                  >
+                    <div className="flex items-baseline justify-between gap-3">
+                      <dt className="text-[13px] text-bone">{info.label}</dt>
+                      <dd>
+                        <span
+                          className="font-sans text-sm font-medium tabular-nums"
+                          style={{ color: scoreColor(value) }}
+                        >
+                          {(value * 100).toFixed(0)}%
+                        </span>
+                      </dd>
+                    </div>
+                    <p className="mt-1 text-xs text-bone-dim">
+                      {info.description}
+                    </p>
+                  </div>
+                );
+              })}
             </dl>
           </div>
         )}

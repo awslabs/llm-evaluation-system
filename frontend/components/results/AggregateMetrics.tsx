@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { scorerInfo } from "./scorers";
 
 function formatModelName(model: string): string {
   const providers: Record<string, string> = {
@@ -110,19 +111,6 @@ interface AggregateMetricsProps {
   prompts?: string[];
 }
 
-// Friendly labels for the built-in Inspect scorers + our jury. Anything
-// not listed falls back to the raw name.
-const SCORER_LABELS: Record<string, string> = {
-  jury_scorer: "Jury",
-  f1: "F1",
-  exact: "Exact",
-  includes: "Includes",
-  match: "Match",
-};
-
-function formatScorerName(name: string): string {
-  return SCORER_LABELS[name] || name;
-}
 
 // Distinctive but harmonious swatches — used as accents on model panels.
 const MODEL_SWATCHES = ["#d87858", "#9bb556", "#d4a72c", "#9b87b5", "#a39a87"];
@@ -204,34 +192,65 @@ export default function AggregateMetrics({
                 </span>
               </div>
               {(() => {
-                // Render a per-scorer chip row only when the eval ran
-                // more than one scorer. Single-scorer runs (jury alone
-                // or f1 alone) don't need the breakdown — the headline
-                // already represents the only signal there is.
+                // Make the scorer methodology explicit in three cases:
+                //   - jury only: skip (it's the project default, headline
+                //     reflects criteria-based jury scoring already).
+                //   - single non-jury (e.g. f1 alone): inline subtitle
+                //     under the headline — "F1 · token overlap" — so the
+                //     reader knows what the big number represents.
+                //   - multi-scorer composition: chip row breaking down
+                //     each scorer's mean.
                 const byScorer = aggregate[model]?.byScorer;
                 if (!byScorer) return null;
                 const entries = Object.entries(byScorer);
-                if (entries.length < 2) return null;
+                if (entries.length === 0) return null;
+                const isJuryOnly =
+                  entries.length === 1 && entries[0][0] === "jury_scorer";
+                if (isJuryOnly) return null;
+                if (entries.length === 1) {
+                  const [name] = entries[0];
+                  const info = scorerInfo(name);
+                  return (
+                    <p
+                      className="font-mono text-[11px] text-bone-mute"
+                      title={info.description}
+                    >
+                      <span className="uppercase tracking-eyebrow text-bone">
+                        {info.label}
+                      </span>{" "}
+                      · {info.short}
+                    </p>
+                  );
+                }
                 return (
-                  <div className="flex flex-wrap items-center gap-1.5 border-t border-rule-soft pt-3">
-                    <span className="eyebrow mr-1">Scorers</span>
-                    {entries.map(([name, value]) => (
-                      <span
-                        key={name}
-                        className="inline-flex items-baseline gap-1.5 border bg-ink px-2 py-1"
-                        style={{ borderColor: scoreColor(value) }}
-                      >
-                        <span className="font-mono text-[10px] uppercase tracking-eyebrow text-bone">
-                          {formatScorerName(name)}
-                        </span>
-                        <span
-                          className="font-sans text-xs font-medium tabular-nums"
-                          style={{ color: scoreColor(value) }}
-                        >
-                          {(value * 100).toFixed(0)}%
-                        </span>
-                      </span>
-                    ))}
+                  <div className="border-t border-rule-soft pt-3">
+                    <p className="eyebrow mb-2">Scorers</p>
+                    <div className="flex flex-col gap-1.5">
+                      {entries.map(([name, value]) => {
+                        const info = scorerInfo(name);
+                        return (
+                          <div
+                            key={name}
+                            className="flex items-baseline gap-2 border bg-ink px-2 py-1"
+                            style={{ borderColor: scoreColor(value) }}
+                            title={info.description}
+                          >
+                            <span className="font-mono text-[10px] uppercase tracking-eyebrow text-bone">
+                              {info.label}
+                            </span>
+                            <span className="font-mono text-[10px] text-bone-mute">
+                              {info.short}
+                            </span>
+                            <span
+                              className="ml-auto font-sans text-xs font-medium tabular-nums"
+                              style={{ color: scoreColor(value) }}
+                            >
+                              {(value * 100).toFixed(0)}%
+                            </span>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 );
               })()}

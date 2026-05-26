@@ -112,46 +112,32 @@ The optional multi-user web app — Cognito-auth'd chat UI for non-technical use
 
 ```mermaid
 flowchart TB
-    %% Ingress
     User["User browser"]
-    CF["CloudFront + WAF"]
-    ALB["Internal ALB<br/>(private to VPC)"]
-    OAuth["oauth2-proxy"]
-    Cognito["Cognito User Pool"]
+    Edge["AWS edge<br/>(CloudFront + WAF +<br/>oauth2-proxy + Cognito)"]
 
-    %% Pods (stateless tier)
     subgraph Pods["EKS pods (stateless)"]
         Frontend["Frontend Pod<br/>(Next.js)"]
         subgraph BackendPod["Backend Pod"]
-            BE["backend<br/>(FastAPI :8080)"]
-            MCP["eval-mcp sidecar<br/>(:8002)"]
+            BE["backend<br/>(FastAPI)"]
+            MCP["eval-mcp sidecar"]
             BE <-->|"localhost"| MCP
         end
     end
 
-    %% Durable tier
     subgraph Durable["Durable state"]
         RDS[("RDS Postgres<br/>chat history")]
-        S3Docs[("S3 documents<br/>user uploads")]
-        S3Data[("S3 data<br/>configs, datasets,<br/>judges, eval logs")]
+        S3[("S3 buckets<br/>configs, eval logs,<br/>user uploads")]
     end
 
-    Bedrock[("AWS Bedrock")]
-
-    %% Flow
-    User -->|"HTTPS"| CF
-    CF -->|"VPC Origin<br/>(private network)"| ALB
-    ALB -->|"public paths"| Frontend
-    ALB -->|"protected paths"| OAuth
-    OAuth -.->|"OIDC login"| Cognito
-    OAuth --> Frontend
-    OAuth --> BackendPod
-
+    User -->|"HTTPS"| Edge
+    Edge --> Frontend
+    Edge --> BackendPod
     BE --> RDS
-    BE --> S3Docs
-    MCP --> S3Data
-    MCP --> Bedrock
+    BE --> S3
+    MCP --> S3
 ```
+
+The `Edge` box collapses several AWS services (CloudFront, WAF, an internal ALB, oauth2-proxy on EKS, Cognito as the IdP) into one logical boundary — they exist, but they're not architecturally interesting beyond "authenticated HTTPS gateway." Same for the two physical S3 buckets and three Bedrock regions, which collapse into single tiles. The depth lives in the prose below.
 
 **Two Terraform layers, independent state.**
 

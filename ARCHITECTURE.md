@@ -14,17 +14,36 @@ The MCP package (`eval_mcp/`) and the EKS web app (`backend/` + `frontend/` + `h
 
 ```mermaid
 flowchart TB
-    IDE["IDE coding agent"] --> Tools["eval-mcp tools"]
-    Tools -->|"spawn"| Inspect["Inspect AI subprocess"]
-    Inspect --> Solver{"Solver:<br/>standard or agent?"}
-    Solver -->|"standard"| Bedrock[("AWS Bedrock<br/>target + judges")]
-    Solver -->|"agent"| Agent["Agent subprocess<br/>(OTel-instrumented)"]
-    Agent --> Bedrock
-    Agent -.->|"spans via OTLP receiver"| Solver
-    Solver --> Scorer["Jury scorer<br/>N judges, binary per criterion,<br/>majority vote"]
-    Scorer --> Bedrock
-    Scorer --> Log[(".eval log<br/>+ raw OTel JSONL")]
-    Log --> Viewer["Local viewer<br/>+ PDF report"]
+    %% Nodes
+    IDE["IDE coding agent"]
+    Tools["eval-mcp tools"]
+
+    subgraph Inspect["Inspect AI subprocess (per sample)"]
+        direction TB
+        Fork{"Eval type?"}
+        Standard["Standard:<br/>call target model"]
+        Agent["Agent:<br/>spawn subprocess,<br/>OTel-instrumented"]
+        Output["Model output"]
+        Jury["Jury scoring<br/>(N judges, binary per criterion,<br/>majority vote)"]
+    end
+
+    Bedrock[("AWS Bedrock<br/>target + judge models")]
+    Log[(".eval log<br/>+ raw OTel JSONL")]
+    Viewer["Local viewer<br/>+ PDF report"]
+
+    %% Flow
+    IDE --> Tools
+    Tools -->|"spawn"| Inspect
+
+    Fork -->|"standard"| Standard
+    Fork -->|"agent"| Agent
+    Standard --> Output
+    Agent --> Output
+    Output --> Jury
+
+    Inspect -->|"all model calls<br/>(target + judges)"| Bedrock
+    Inspect --> Log
+    Log --> Viewer
 ```
 
 **Tool order in a typical session:** `list_bedrock_models` → `generate_qa_pairs` (from docs or context) → `save_dataset` → `generate_judge` → `create_eval_config` → `run_evaluation` → `generate_report`. The agent in the IDE picks the order; the MCP just exposes the tools.
@@ -41,19 +60,37 @@ flowchart TB
 
 ```mermaid
 flowchart TB
-    IDE["IDE<br/>(Claude Code, Cursor, Kiro, ...)"] -->|"stdio"| Server
-    Remote["Remote agent /<br/>EKS backend"] -->|"HTTP"| Server
+    %% Clients
+    IDE["IDE<br/>(Claude Code, Cursor, Kiro, ...)"]
+    Remote["Remote agent /<br/>EKS backend"]
 
-    Server["eval-mcp server<br/>(FastMCP)"] --> Tools["Tool handlers<br/>(eval_mcp/tools/*)"]
+    %% Process
+    Server["eval-mcp server<br/>(FastMCP)"]
+    Tools["Tool handlers<br/>(eval_mcp/tools/*)"]
+    Inspect["Inspect AI subprocess"]
+    Viewer["Local viewer :4001"]
+    Browser["Browser"]
 
-    Tools <--> UserDir[("~/.eval-mcp/users/&lt;user&gt;/<br/>configs, datasets, judges, logs")]
-    Tools -->|"spawn"| Inspect["Inspect AI subprocess"]
-    Tools --> Bedrock[("AWS Bedrock")]
+    %% Storage
+    UserDir[("~/.eval-mcp/users/&lt;user&gt;/<br/>configs, datasets, judges, logs")]
 
-    UserDir <-.->|"auto-sync<br/>(optional, eval-mcp init)"| S3[("Team S3 bucket")]
+    %% External
+    Bedrock[("AWS Bedrock")]
+    S3[("Team S3 bucket<br/>(optional)")]
 
-    UserDir --> Viewer["Local viewer :4001"]
-    Browser["Browser"] --> Viewer
+    %% Flow
+    IDE -->|"stdio"| Server
+    Remote -->|"HTTP"| Server
+    Server --> Tools
+
+    Tools <-->|"read/write user state"| UserDir
+    Tools -->|"generate_qa, generate_judge,<br/>analyze_*"| Bedrock
+    Tools -->|"run_evaluation only"| Inspect
+
+    UserDir <-.->|"auto-sync after eval-mcp init"| S3
+
+    Browser --> Viewer
+    Viewer --> UserDir
 ```
 
 **Transport.** `eval_mcp/server.py:main()` reads `EVAL_MCP_TRANSPORT` — defaults to `stdio` (what IDEs use), set to `http` to serve `streamable_http_app` at `EVAL_MCP_PORT` (default 8002) for self-hosted / EKS-sidecar use. Same server, same tools, different mouth.
@@ -76,24 +113,45 @@ The optional multi-user web app — Cognito-auth'd chat UI for non-technical use
 
 ```mermaid
 flowchart TB
-    User["User browser"] -->|"HTTPS"| CF["CloudFront + WAF"]
-    CF -->|"VPC Origin<br/>(private AWS network)"| ALB["Internal ALB"]
-    ALB --> OAuth["oauth2-proxy"]
-    OAuth -.->|"OIDC"| Cognito["Cognito User Pool"]
+    %% Ingress
+    User["User browser"]
+    CF["CloudFront + WAF"]
+    ALB["Internal ALB<br/>(private to VPC)"]
+    OAuth["oauth2-proxy"]
+    Cognito["Cognito User Pool"]
 
-    OAuth --> Frontend["Frontend Pod<br/>(Next.js)"]
-    OAuth --> BackendPod
-
-    subgraph BackendPod["Backend Pod (stateless)"]
-        BE["backend<br/>(FastAPI :8080)"]
-        MCP["eval-mcp sidecar<br/>(HTTP :8002)"]
-        BE <-->|"localhost"| MCP
+    %% Pods (stateless tier)
+    subgraph Pods["EKS pods (stateless)"]
+        Frontend["Frontend Pod<br/>(Next.js)"]
+        subgraph BackendPod["Backend Pod"]
+            BE["backend<br/>(FastAPI :8080)"]
+            MCP["eval-mcp sidecar<br/>(:8002)"]
+            BE <-->|"localhost"| MCP
+        end
     end
 
-    BE --> RDS[("RDS Postgres<br/>chat history")]
-    BE --> S3Docs[("S3 documents<br/>user uploads")]
-    MCP --> S3Data[("S3 data<br/>configs, datasets,<br/>judges, eval logs")]
-    MCP --> Bedrock[("AWS Bedrock")]
+    %% Durable tier
+    subgraph Durable["Durable state"]
+        RDS[("RDS Postgres<br/>chat history")]
+        S3Docs[("S3 documents<br/>user uploads")]
+        S3Data[("S3 data<br/>configs, datasets,<br/>judges, eval logs")]
+    end
+
+    Bedrock[("AWS Bedrock")]
+
+    %% Flow
+    User -->|"HTTPS"| CF
+    CF -->|"VPC Origin<br/>(private network)"| ALB
+    ALB -->|"public paths"| Frontend
+    ALB -->|"protected paths"| OAuth
+    OAuth -.->|"OIDC login"| Cognito
+    OAuth --> Frontend
+    OAuth --> BackendPod
+
+    BE --> RDS
+    BE --> S3Docs
+    MCP --> S3Data
+    MCP --> Bedrock
 ```
 
 **Two Terraform layers, independent state.**

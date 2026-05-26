@@ -58,53 +58,39 @@ flowchart TB
 
 ## 2. MCP server
 
-Two distinct user workflows live in the `eval-mcp` package:
-
-- **Running evals** — the IDE (or a remote agent) talks to the MCP server, which exposes tools that read/write the user dir, call Bedrock, and spawn Inspect AI for actual evaluation runs.
-- **Viewing results** — the user runs `eval-mcp view` to start a *separate* local FastAPI process that serves a results UI on `localhost:4001`; the user then opens a regular web browser to look at past eval results.
-
-Both processes are part of the same `eval-mcp` package and share the same local user dir on disk — that's how the viewer sees what the server wrote.
-
 ```mermaid
 flowchart TB
-    %% Callers — labeled by intent, not just "browser"
+    %% Callers
     IDE["IDE coding agent<br/>(Claude Code, Cursor, Kiro, ...)"]
     Remote["Remote agent /<br/>EKS backend"]
-    HumanUser["User reviewing results<br/>(in a web browser)"]
 
-    %% MCP server process — spawned by the IDE, or run as eval-mcp serve
+    %% Server process
     subgraph MCPProc["eval-mcp server process"]
         Server["FastMCP server<br/>(eval_mcp/server.py)"]
         Tools["Tool handlers<br/>(eval_mcp/tools/*)"]
         Server --> Tools
     end
 
-    %% Viewer — separate process, only runs while the user wants the UI
-    subgraph ViewerProc["eval-mcp view process (separate)"]
-        Viewer["FastAPI on :4001<br/>+ static results frontend"]
-    end
-
-    %% Local storage + spawned subprocess
+    %% Local
     UserDir[("~/.eval-mcp/users/&lt;user&gt;/<br/>configs, datasets, judges, eval logs")]
     Inspect["Inspect AI subprocess<br/>(spawned per eval)"]
 
-    %% External services
+    %% External
     Bedrock[("AWS Bedrock")]
     S3[("Team S3 bucket<br/>(optional)")]
 
     %% Flow
     IDE -->|"JSON-RPC over stdio"| Server
     Remote -->|"streamable HTTP"| Server
-    HumanUser -->|"opens http://localhost:4001"| Viewer
 
     Tools <-->|"read/write"| UserDir
     Tools -->|"generate_qa, generate_judge,<br/>analyze_*"| Bedrock
     Tools -->|"run_evaluation only"| Inspect
 
-    Viewer -->|"reads eval logs<br/>(viewer is read-only)"| UserDir
-
     UserDir <-.->|"auto-sync after<br/>eval-mcp init"| S3
 ```
+
+**Viewing results.** The viewer is a *separate* local process, not part of the MCP server. After running evals, the user opens a terminal and runs `eval-mcp view`, which starts a FastAPI app on `localhost:4001` that reads the same `~/.eval-mcp/users/<user>/logs/` directory the MCP server wrote into. The user then opens any web browser at `http://localhost:4001` to inspect past evals. No connection to the MCP server itself — they communicate only through the shared user dir on disk.
 
 **Transport.** `eval_mcp/server.py:main()` reads `EVAL_MCP_TRANSPORT` — defaults to `stdio` (what IDEs use), set to `http` to serve `streamable_http_app` at `EVAL_MCP_PORT` (default 8002) for self-hosted / EKS-sidecar use. Same server, same tools, different mouth.
 

@@ -35,7 +35,7 @@ session. After that, the quick reference at the bottom is usually enough.
 ## Branch state
 
 You should already be on a feature branch with your changes —
-worktree-based by default, per [AGENTS.md](../../../AGENTS.md#starting-new-work).
+worktree-based by default, per [CLAUDE.md](../../../CLAUDE.md#conventions-worth-knowing-up-front).
 This skill picks up from there.
 
 If you're invoked from `main` with uncommitted changes, **stop and ask

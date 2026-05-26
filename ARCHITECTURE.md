@@ -146,7 +146,7 @@ The `Edge` box collapses several AWS services (CloudFront, WAF, an internal ALB,
 
 Layers connect via `-var=` flags (not `terraform_remote_state`) so platform state never sees data-state secrets. `deploy.sh` reads ~13 data outputs and passes them in explicitly.
 
-**Why the ALB is internal.** Only CloudFront can reach it, via [VPC Origins](https://aws.amazon.com/cloudfront/vpc-origins/) over the AWS private network. The internet never sees the ALB directly — defense in depth on top of WAF.
+**Why the ALB is internal.** Only CloudFront can reach it, via [VPC Origins](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html) over the AWS private network. The internet never sees the ALB directly — defense in depth on top of WAF.
 
 **Why backend is stateless.** `helm/eval/templates/pvc.yaml` is intentionally empty (see its comment). All durable state goes to S3; pod-local `/data` is `emptyDir`, lost on restart. Chat history is in RDS. This means a pod restart is harmless and HPA scaling Just Works — different from the old EBS-PVC design referenced in some older docs.
 

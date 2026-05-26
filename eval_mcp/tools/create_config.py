@@ -4,8 +4,10 @@ Generates:
 - A Python task file that uses Inspect AI's eval framework
 - A JSON config file with rubric, criteria, judge models, and dataset path
 
-Each judge is forced to call a scoring tool with per-criterion binary scores.
-Results aggregated via hierarchical majority voting.
+The default scorer is a multi-judge jury (binary per criterion, majority
+vote). Customers can also opt into Inspect AI's deterministic built-in
+scorers (``f1``, ``exact``, ``includes``, ``match``) via the ``scorers``
+argument — alone or composed with the jury.
 """
 
 import json
@@ -21,6 +23,72 @@ from eval_mcp.core.user_storage import (
     get_dataset_by_name,
     get_user_dir,
 )
+
+
+# ---------------------------------------------------------------------------
+# Scorer registry — names accepted on the ``scorers`` parameter
+# ---------------------------------------------------------------------------
+#
+# "jury" is implemented inline in the generated task file (see
+# JURY_SCORER_BLOCK below). All other entries map to Inspect AI's built-in
+# scorers, which work directly against the ``(question, golden_answer,
+# completion)`` dataset shape this MCP already produces.
+
+SCORER_REGISTRY: Dict[str, Dict[str, Any]] = {
+    "jury": {"expr": "jury_scorer()", "import": None},
+    "f1": {"expr": "f1()", "import": "f1"},
+    "exact": {"expr": "exact()", "import": "exact"},
+    "includes": {"expr": "includes()", "import": "includes"},
+    "match": {"expr": "match()", "import": "match"},
+}
+
+DEFAULT_SCORERS: List[str] = ["jury"]
+
+
+def _validate_scorers(scorers: Optional[List[str]]) -> List[str]:
+    """Normalize/validate the ``scorers`` argument.
+
+    Empty/None falls back to the default (jury). Unknown names raise
+    ``ValueError`` so the caller can surface a clean error to the user.
+    Order is preserved; duplicates are dropped.
+    """
+    if not scorers:
+        return list(DEFAULT_SCORERS)
+    unknown = [s for s in scorers if s not in SCORER_REGISTRY]
+    if unknown:
+        valid = ", ".join(sorted(SCORER_REGISTRY.keys()))
+        raise ValueError(
+            f"Unknown scorer(s): {unknown}. Choose from: {valid}"
+        )
+    seen: set = set()
+    ordered: List[str] = []
+    for s in scorers:
+        if s not in seen:
+            seen.add(s)
+            ordered.append(s)
+    return ordered
+
+
+def _render_scorer_expression(scorers: List[str]) -> str:
+    """Render the value passed to ``Task(scorer=...)``."""
+    exprs = [SCORER_REGISTRY[s]["expr"] for s in scorers]
+    if len(exprs) == 1:
+        return exprs[0]
+    return "[" + ", ".join(exprs) + "]"
+
+
+def _render_builtin_scorer_imports(scorers: List[str]) -> str:
+    """Render the extra ``from inspect_ai.scorer import …`` line for
+    built-in scorers. The jury defines its own scorer inline so it
+    doesn't contribute to this import."""
+    names = sorted({
+        SCORER_REGISTRY[s]["import"]
+        for s in scorers
+        if SCORER_REGISTRY[s]["import"]
+    })
+    if not names:
+        return ""
+    return f"from inspect_ai.scorer import {', '.join(names)}"
 
 
 def build_judge_system_prompt(criteria: List[Dict[str, str]]) -> str:
@@ -55,6 +123,7 @@ def build_config_json(
     judge_config: JudgeConfig,
     description: Optional[str] = None,
     prompts: Optional[List[str]] = None,
+    scorers: Optional[List[str]] = None,
 ) -> dict:
     """Build the JSON config that the task file will load."""
     config = {
@@ -64,15 +133,24 @@ def build_config_json(
         "criteria": judge_config.criteria,
         "system_prompt": build_judge_system_prompt(judge_config.criteria),
         "description": description or "",
+        "scorers": scorers or list(DEFAULT_SCORERS),
     }
     if prompts and len(prompts) > 1:
         config["prompts"] = prompts
     return config
 
 
-TASK_FILE_HEADER = '''"""Inspect AI evaluation task: {config_name}
+# ---------------------------------------------------------------------------
+# Task-file template parts
+# ---------------------------------------------------------------------------
+#
+# ``TASK_FILE_BASE`` is emitted for every config. ``JURY_SCORER_BLOCK`` is
+# appended only when ``"jury"`` is in the scorers list. The task definition
+# template (SINGLE / PROMPT) is parameterised by ``{scorer_expr}``.
 
-Auto-generated. Uses multi-judge jury scoring with tool-forced structured output.
+TASK_FILE_BASE = '''"""Inspect AI evaluation task: {config_name}
+
+Auto-generated. Scorers: {scorers_doc}
 """
 
 import json
@@ -80,18 +158,22 @@ from pathlib import Path
 
 from inspect_ai import Task, task
 from inspect_ai.dataset import json_dataset, FieldSpec
-from inspect_ai.model import ChatMessageUser, ChatMessageSystem, get_model
-from inspect_ai.scorer import Score, mean, scorer, stderr
 from inspect_ai.solver import generate, prompt_template
-
-from inspect_ai.tool._tool_info import ToolInfo
-from inspect_ai.tool._tool_params import ToolParams
-
+{extra_imports}
 _config_path = Path(__file__).with_suffix(".json")
 CONFIG = json.loads(_config_path.read_text())
 
 DATASET_PATH = CONFIG["dataset_path"]
 PROVIDERS = CONFIG["providers"]
+'''
+
+
+JURY_SCORER_BLOCK = '''
+from inspect_ai.model import ChatMessageUser, ChatMessageSystem, get_model
+from inspect_ai.scorer import Score, mean, scorer, stderr
+from inspect_ai.tool._tool_info import ToolInfo
+from inspect_ai.tool._tool_params import ToolParams
+
 JUDGE_MODELS = CONFIG["judge_models"]
 CRITERIA = CONFIG["criteria"]
 SYSTEM_PROMPT = CONFIG["system_prompt"]
@@ -103,27 +185,27 @@ def _build_scoring_tool():
     # be cleaner but Inspect's tool-forced output handles flat int/string
     # fields most reliably across models. Improvement slots are optional —
     # old judge runs without them still parse fine.
-    properties = {{}}
+    properties = {}
     required = []
     for c in CRITERIA:
-        properties[c["name"]] = {{
+        properties[c["name"]] = {
             "type": "integer",
-            "description": f"Score for {{c['name']}}: 1 if pass, 0 if fail",
+            "description": f"Score for {c['name']}: 1 if pass, 0 if fail",
             "enum": [0, 1],
-        }}
+        }
         required.append(c["name"])
-        properties[f"{{c['name']}}_improvement"] = {{
+        properties[f"{c['name']}_improvement"] = {
             "type": "string",
             "description": (
-                f"If {{c['name']}} scored 0, ONE short sentence on what the "
+                f"If {c['name']} scored 0, ONE short sentence on what the "
                 "answer should change to satisfy the criterion. Empty string "
                 "when scored 1."
             ),
-        }}
-    properties["reason"] = {{
+        }
+    properties["reason"] = {
         "type": "string",
         "description": "Brief overall explanation of the scoring decision",
-    }}
+    }
     required.append("reason")
 
     return ToolInfo(
@@ -142,9 +224,9 @@ def _extract_scores(output, criteria_names):
     """
     if not output or not output.message or not output.message.tool_calls:
         text = output.completion[:200] if output and output.completion else "(empty)"
-        return None, None, None, f"No tool call. Response: {{text}}"
+        return None, None, None, f"No tool call. Response: {text}"
 
-    args = {{}}
+    args = {}
     for tc in output.message.tool_calls:
         if tc.function == "submit_scores":
             args.update(tc.arguments)
@@ -154,13 +236,13 @@ def _extract_scores(output, criteria_names):
 
     missing = [n for n in criteria_names if n not in args]
     if missing:
-        return None, None, None, f"Missing criteria: {{missing}}. Got: {{list(args.keys())}}"
+        return None, None, None, f"Missing criteria: {missing}. Got: {list(args.keys())}"
 
-    scores = {{n: int(bool(args[n])) for n in criteria_names}}
-    improvements = {{
-        n: str(args.get(f"{{n}}_improvement", "") or "").strip()
+    scores = {n: int(bool(args[n])) for n in criteria_names}
+    improvements = {
+        n: str(args.get(f"{n}_improvement", "") or "").strip()
         for n in criteria_names
-    }}
+    }
     return scores, args.get("reason", ""), improvements, None
 
 
@@ -176,12 +258,12 @@ def jury_scorer():
         criteria_names = [c["name"] for c in CRITERIA]
         tool = _build_scoring_tool()
 
-        votes = {{n: [] for n in criteria_names}}
+        votes = {n: [] for n in criteria_names}
         # Per-criterion improvement hints collected from judges that
-        # scored 0. List of {{judge, note}} pairs so downstream
+        # scored 0. List of {judge, note} pairs so downstream
         # consumers (optimizer, report) can attribute hints to judges
         # and de-dupe across them.
-        improvements_per_criterion = {{n: [] for n in criteria_names}}
+        improvements_per_criterion = {n: [] for n in criteria_names}
         details = []
         errors = []
 
@@ -192,7 +274,7 @@ def jury_scorer():
                     [
                         ChatMessageSystem(content=SYSTEM_PROMPT),
                         ChatMessageUser(
-                            content=f"Question:\\n{{question}}\\n\\nAI Answer:\\n{{output}}\\n\\nReference Answer:\\n{{golden}}"
+                            content=f"Question:\\n{question}\\n\\nAI Answer:\\n{output}\\n\\nReference Answer:\\n{golden}"
                         ),
                     ],
                     tools=[tool],
@@ -205,24 +287,24 @@ def jury_scorer():
                         votes[n].append(scores[n])
                         if scores[n] == 0 and improvements and improvements.get(n):
                             improvements_per_criterion[n].append(
-                                {{"judge": label, "note": improvements[n]}}
+                                {"judge": label, "note": improvements[n]}
                             )
-                    details.append(f"  {{label}}: {{scores}} - {{reason}}")
+                    details.append(f"  {label}: {scores} - {reason}")
                 else:
-                    errors.append(f"  {{label}}: {{err}}")
-                    details.append(f"  {{label}}: EXCLUDED ({{err[:80]}})")
+                    errors.append(f"  {label}: {err}")
+                    details.append(f"  {label}: EXCLUDED ({err[:80]})")
             except Exception as e:
-                errors.append(f"  {{label}}: {{str(e)[:200]}}")
-                details.append(f"  {{label}}: ERROR ({{str(e)[:80]}})")
+                errors.append(f"  {label}: {str(e)[:200]}")
+                details.append(f"  {label}: ERROR ({str(e)[:80]})")
 
         results = []
         for n in criteria_names:
             v = votes[n]
             if not v:
-                results.append({{"name": n, "votes_for": 0, "total": 0, "score": 0.0, "note": "no valid responses"}})
+                results.append({"name": n, "votes_for": 0, "total": 0, "score": 0.0, "note": "no valid responses"})
             else:
                 vf = sum(v)
-                entry = {{"name": n, "votes_for": vf, "total": len(v), "score": vf / len(v)}}
+                entry = {"name": n, "votes_for": vf, "total": len(v), "score": vf / len(v)}
                 if improvements_per_criterion[n]:
                     entry["improvement_notes"] = improvements_per_criterion[n]
                 results.append(entry)
@@ -231,10 +313,10 @@ def jury_scorer():
         scored = [r for r in results if "note" not in r]
         jury_score = sum(r["score"] for r in scored) / len(scored) if scored else 0.0
 
-        lines = [f"Jury score: {{jury_score:.2f}} ({{len(scored)}}/{{len(criteria_names)}} criteria graded)", ""]
+        lines = [f"Jury score: {jury_score:.2f} ({len(scored)}/{len(criteria_names)} criteria graded)", ""]
         for r in results:
-            extra = f" - {{r['note']}}" if "note" in r else ""
-            lines.append(f"  {{r['name']}}: {{r['score']:.2f}} ({{r['votes_for']}}/{{r['total']}} judges){{extra}}")
+            extra = f" - {r['note']}" if "note" in r else ""
+            lines.append(f"  {r['name']}: {r['score']:.2f} ({r['votes_for']}/{r['total']} judges){extra}")
         lines += ["", "Judges:"] + details
         if errors:
             lines += ["", "Errors:"] + errors
@@ -243,12 +325,12 @@ def jury_scorer():
             value=jury_score,
             answer=output[:200],
             explanation="\\n".join(lines),
-            metadata={{"jury_score": jury_score, "criteria_results": results}},
+            metadata={"jury_score": jury_score, "criteria_results": results},
         )
 
     return score
-
 '''
+
 
 SINGLE_TASK_TEMPLATE = '''
 @task
@@ -256,7 +338,7 @@ def eval_task():
     return Task(
         dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
         solver=[generate()],
-        scorer=jury_scorer(),
+        scorer={scorer_expr},
     )
 '''
 
@@ -266,7 +348,7 @@ def eval_{index}():
     return Task(
         dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
         solver=[prompt_template({prompt_repr}), generate()],
-        scorer=jury_scorer(),
+        scorer={scorer_expr},
     )
 '''
 
@@ -279,16 +361,29 @@ def create_inspect_task_file(
     judge_config: JudgeConfig,
     description: Optional[str] = None,
     prompts: Optional[List[str]] = None,
+    scorers: Optional[List[str]] = None,
 ) -> tuple[str, dict]:
     """Create task file code and config JSON.
 
     Returns:
         (task_code, config_dict) — caller writes both to disk.
     """
+    scorers = _validate_scorers(scorers)
     config_data = build_config_json(
-        dataset_path, providers, judge_config, description, prompts
+        dataset_path, providers, judge_config, description, prompts, scorers
     )
-    header = TASK_FILE_HEADER.format(config_name=config_name)
+
+    extra_imports = _render_builtin_scorer_imports(scorers)
+    scorer_expr = _render_scorer_expression(scorers)
+
+    parts: List[str] = []
+    parts.append(TASK_FILE_BASE.format(
+        config_name=config_name,
+        scorers_doc=", ".join(scorers),
+        extra_imports=(extra_imports + "\n") if extra_imports else "",
+    ))
+    if "jury" in scorers:
+        parts.append(JURY_SCORER_BLOCK)
 
     # Apply prompt_template whenever a non-default prompt is given, even
     # for a single prompt. The old guard `len > 1` silently dropped
@@ -298,18 +393,16 @@ def create_inspect_task_file(
     # chat agent path hit the same latent bug.
     has_custom_prompt = bool(prompts) and any(p and p != "{question}" for p in prompts)
     if has_custom_prompt:
-        tasks = ""
         for i, prompt in enumerate(prompts):
             # prompt_template() uses {prompt} as the placeholder for input text
             normalized = prompt.replace("{question}", "{prompt}")
-            tasks += PROMPT_TASK_TEMPLATE.format(
-                index=i + 1, prompt_repr=repr(normalized)
-            )
-        task_code = header + tasks
+            parts.append(PROMPT_TASK_TEMPLATE.format(
+                index=i + 1, prompt_repr=repr(normalized), scorer_expr=scorer_expr
+            ))
     else:
-        task_code = header + SINGLE_TASK_TEMPLATE
+        parts.append(SINGLE_TASK_TEMPLATE.format(scorer_expr=scorer_expr))
 
-    return task_code, config_data
+    return "".join(parts), config_data
 
 
 async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
@@ -324,6 +417,7 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
         config_name = f"eval_{int(time.time() * 1000)}"
         description = args.get("description")
         user_id = args.get("user_id")
+        scorers_arg = args.get("scorers")
 
         if not user_id:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": "user_id is required"}))]
@@ -333,6 +427,11 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": "judge is required"}))]
         if not providers:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": "At least one provider is required"}))]
+
+        try:
+            scorers = _validate_scorers(scorers_arg)
+        except ValueError as e:
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": str(e)}))]
 
         judge_data = get_judge_by_name(user_id, judge_name)
         if not judge_data:
@@ -391,6 +490,7 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             description=description,
             judge_config=judge_config,
             prompts=prompts,
+            scorers=scorers,
         )
 
         # Write both files
@@ -407,6 +507,7 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
                 "testCases": len(tests),
                 "judges": list(judge_config.judges.keys()),
                 "criteria": [c["name"] for c in criteria],
+                "scorers": scorers,
                 "prompts": len(prompts) if prompts else 1,
                 "description": description or f"Evaluation: {config_name}",
             },

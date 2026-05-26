@@ -364,6 +364,13 @@ def _build_detail_from_logs(
                         all_criteria.extend(stage.get("criteriaResults", []))
                     score_data["criteriaResults"] = all_criteria
                 else:
+                    # Multi-scorer composition (e.g. jury + f1): prefer
+                    # jury_scorer for the primary score + criteria breakdown
+                    # the UI is designed around. Other scorers are captured
+                    # in scoresByScorer so the frontend can surface them
+                    # alongside without losing data.
+                    primary_name = "jury_scorer" if "jury_scorer" in scorers else next(iter(scorers))
+                    scores_by_scorer: dict[str, float] = {}
                     for scorer_name, score in scorers.items():
                         metadata = score.get("metadata", {})
                         raw_value = score.get("value")
@@ -371,13 +378,17 @@ def _build_detail_from_logs(
                             sample_score = float(raw_value)
                         else:
                             sample_score = metadata.get("jury_score", 1.0 if raw_value == "C" else 0.0)
-                        score_data["score"] = sample_score
-                        score_data["passed"] = sample_score > 0.5
-                        score_data["explanation"] = score.get("explanation", "")
-                        criteria_results = metadata.get("criteria_results", [])
-                        score_data["criteriaResults"] = criteria_results
-                        for cr in criteria_results:
-                            criteria_set.add(cr["name"])
+                        scores_by_scorer[scorer_name] = sample_score
+                        if scorer_name == primary_name:
+                            score_data["score"] = sample_score
+                            score_data["passed"] = sample_score > 0.5
+                            score_data["explanation"] = score.get("explanation", "")
+                            criteria_results = metadata.get("criteria_results", [])
+                            score_data["criteriaResults"] = criteria_results
+                            for cr in criteria_results:
+                                criteria_set.add(cr["name"])
+                    if len(scores_by_scorer) > 1:
+                        score_data["scoresByScorer"] = scores_by_scorer
 
             samples_by_id[sid]["results"][column_key] = score_data
 

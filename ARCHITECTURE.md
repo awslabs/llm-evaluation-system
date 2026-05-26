@@ -58,27 +58,34 @@ flowchart TB
 
 ## 2. MCP server
 
+Two distinct user workflows live in the `eval-mcp` package:
+
+- **Running evals** — the IDE (or a remote agent) talks to the MCP server, which exposes tools that read/write the user dir, call Bedrock, and spawn Inspect AI for actual evaluation runs.
+- **Viewing results** — the user runs `eval-mcp view` to start a *separate* local FastAPI process that serves a results UI on `localhost:4001`; the user then opens a regular web browser to look at past eval results.
+
+Both processes are part of the same `eval-mcp` package and share the same local user dir on disk — that's how the viewer sees what the server wrote.
+
 ```mermaid
 flowchart TB
-    %% Callers (top)
-    IDE["IDE<br/>(Claude Code, Cursor,<br/>Kiro, ...)"]
+    %% Callers — labeled by intent, not just "browser"
+    IDE["IDE coding agent<br/>(Claude Code, Cursor, Kiro, ...)"]
     Remote["Remote agent /<br/>EKS backend"]
-    UserBrowser["User browser"]
+    HumanUser["User reviewing results<br/>(in a web browser)"]
 
-    %% MCP server process — spawned by IDE or run as eval-mcp serve
-    subgraph MCPProc["eval-mcp server process<br/>(stdio or HTTP)"]
+    %% MCP server process — spawned by the IDE, or run as eval-mcp serve
+    subgraph MCPProc["eval-mcp server process"]
         Server["FastMCP server<br/>(eval_mcp/server.py)"]
         Tools["Tool handlers<br/>(eval_mcp/tools/*)"]
         Server --> Tools
     end
 
-    %% Viewer — separate process started by `eval-mcp view`
-    subgraph ViewerProc["eval-mcp view process<br/>(separate, started on demand)"]
-        Viewer["FastAPI viewer :4001<br/>+ static frontend"]
+    %% Viewer — separate process, only runs while the user wants the UI
+    subgraph ViewerProc["eval-mcp view process (separate)"]
+        Viewer["FastAPI on :4001<br/>+ static results frontend"]
     end
 
     %% Local storage + spawned subprocess
-    UserDir[("~/.eval-mcp/users/&lt;user&gt;/<br/>configs, datasets, judges, logs")]
+    UserDir[("~/.eval-mcp/users/&lt;user&gt;/<br/>configs, datasets, judges, eval logs")]
     Inspect["Inspect AI subprocess<br/>(spawned per eval)"]
 
     %% External services
@@ -88,13 +95,13 @@ flowchart TB
     %% Flow
     IDE -->|"JSON-RPC over stdio"| Server
     Remote -->|"streamable HTTP"| Server
-    UserBrowser -->|"HTTP :4001"| Viewer
+    HumanUser -->|"opens http://localhost:4001"| Viewer
 
     Tools <-->|"read/write"| UserDir
-    Tools -->|"generate_qa,<br/>generate_judge, analyze_*"| Bedrock
+    Tools -->|"generate_qa, generate_judge,<br/>analyze_*"| Bedrock
     Tools -->|"run_evaluation only"| Inspect
 
-    Viewer -->|"read eval logs"| UserDir
+    Viewer -->|"reads eval logs<br/>(viewer is read-only)"| UserDir
 
     UserDir <-.->|"auto-sync after<br/>eval-mcp init"| S3
 ```

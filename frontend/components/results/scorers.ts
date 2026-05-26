@@ -44,6 +44,45 @@ export const SCORER_INFO: Record<string, ScorerInfo> = {
     description:
       "Configurable string match between the model's answer and the reference. By default the reference must appear at the end of the model's output.",
   },
+  // RAG scorers — each one needs retrieval_context on every sample and
+  // runs ONE LLM-judge call per metric. Order in this object is
+  // insertion order, which is also the order the chip row will render.
+  faithfulness: {
+    label: "Faithfulness",
+    short: "answer ↔ context",
+    description:
+      "Fraction of claims in the model's answer that agree with the retrieved chunks. 1.0 means every claim is grounded; lower means the model invented or contradicted facts.",
+  },
+  answer_relevancy: {
+    label: "Relevancy",
+    short: "answer ↔ question",
+    description:
+      "Fraction of statements in the answer that directly address the question. Catches answers that ramble about adjacent topics. Does not look at retrieved context.",
+  },
+  contextual_precision: {
+    label: "Precision@k",
+    short: "ranking quality",
+    description:
+      "Rewards retrievers that put relevant chunks first. Computed as precision-at-k over chunks ranked by the retriever — lower when irrelevant chunks are ranked above relevant ones.",
+  },
+  contextual_recall: {
+    label: "Recall",
+    short: "coverage",
+    description:
+      "Fraction of sentences in the expected answer that are backed by at least one retrieved chunk. Measures whether the retriever fetched enough context to support the golden answer.",
+  },
+  contextual_relevancy: {
+    label: "Relevance",
+    short: "chunk noise",
+    description:
+      "Fraction of statements across the retrieved chunks that are relevant to the question. High when chunks are tightly scoped; low when they're padded with off-topic boilerplate.",
+  },
+  hallucination: {
+    label: "Groundedness",
+    short: "1 − contradiction",
+    description:
+      "1 minus the fraction of answer sentences contradicted by the retrieved context. Higher means more grounded; 1.0 means no sentence is contradicted. Inverted from DeepEval's raw 'hallucination rate' so higher is better.",
+  },
 };
 
 export function scorerInfo(name: string): ScorerInfo {

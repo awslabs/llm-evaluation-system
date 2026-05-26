@@ -122,7 +122,88 @@ def test_registry_keys_are_documented_set() -> None:
         "exact",
         "includes",
         "match",
+        # RAG suite
+        "faithfulness",
+        "answer_relevancy",
+        "contextual_precision",
+        "contextual_recall",
+        "contextual_relevancy",
+        "hallucination",
     }
+
+
+def test_rag_scorer_renders_solver_and_metadata(jc: JudgeConfig) -> None:
+    code, cfg = _render(jc, scorers=["faithfulness"])
+    # Imports the scorer from our module + the judge-configure helper
+    assert "from eval_mcp.scorers.rag import faithfulness" in code
+    assert (
+        "from eval_mcp.scorers.rag import configure_judge as _rag_configure_judge"
+        in code
+    )
+    # FieldSpec carries retrieval_context onto Sample.metadata
+    assert 'metadata=["retrieval_context"]' in code
+    # Solver chain prepends the RAG solver before generate()
+    assert "solver=[rag_prompt_solver(), generate()]" in code
+    # Wires the judge model at task-file import time
+    assert "_rag_configure_judge(next(iter(CONFIG[\"judge_models\"].values())))" in code
+    # Scorer call site
+    assert "scorer=faithfulness()" in code
+    assert cfg["scorers"] == ["faithfulness"]
+    ast.parse(code)
+
+
+def test_all_rag_scorers_compose_with_jury(jc: JudgeConfig) -> None:
+    scorers = [
+        "jury",
+        "faithfulness",
+        "answer_relevancy",
+        "contextual_precision",
+        "contextual_recall",
+        "contextual_relevancy",
+        "hallucination",
+    ]
+    code, cfg = _render(jc, scorers=scorers)
+    assert (
+        "scorer=[jury_scorer(), faithfulness(), answer_relevancy(), "
+        "contextual_precision(), contextual_recall(), "
+        "contextual_relevancy(), hallucination()]"
+    ) in code
+    # All RAG scorers reach the right import line
+    expected_import = (
+        "from eval_mcp.scorers.rag import "
+        "answer_relevancy, contextual_precision, contextual_recall, "
+        "contextual_relevancy, faithfulness, hallucination"
+    )
+    assert expected_import in code
+    assert "def jury_scorer" in code  # jury block still emitted
+    assert cfg["scorers"] == scorers
+    ast.parse(code)
+
+
+def test_no_rag_init_when_no_rag_scorer(jc: JudgeConfig) -> None:
+    code, _ = _render(jc, scorers=["jury", "f1"])
+    assert "_rag_configure_judge" not in code
+    assert "rag_prompt_solver" not in code
+    assert 'metadata=["retrieval_context"]' not in code
+    ast.parse(code)
+
+
+def test_rag_scorer_in_prompt_comparison(jc: JudgeConfig) -> None:
+    code, _ = create_inspect_task_file(
+        dataset_path="/tmp/ds.json",
+        providers=["mockllm/model"],
+        config_name="t",
+        config_dir="/tmp",
+        judge_config=jc,
+        prompts=["Prompt A: {question}", "Prompt B: {question}"],
+        scorers=["faithfulness"],
+    )
+    # Each @task variant carries both the RAG solver and the metadata spec
+    assert code.count("solver=[prompt_template") == 2
+    assert code.count("rag_prompt_solver()") == 2
+    assert code.count('metadata=["retrieval_context"]') == 2
+    assert code.count("scorer=faithfulness()") == 2
+    ast.parse(code)
 
 
 def test_prompt_template_carries_scorer_expr(jc: JudgeConfig) -> None:

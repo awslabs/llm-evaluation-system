@@ -266,14 +266,26 @@ async def save_dataset(
     persists it. Prefer `file_path` — the tool reads from disk (cheap).
     Pass `file_content` only if the data isn't on the local filesystem.
 
+    For RAG evaluation, also pass a retrieval_context column. The column
+    value must be a list of strings (the retrieved chunks for that
+    question, ordered by retriever rank — chunk 1 = most relevant). In
+    JSON/JSONL datasets this is a native array; in CSV the cell must be
+    a JSON-encoded list like ``["chunk1", "chunk2"]`` (or chunks joined
+    with `|||`). Any sample missing retrieval_context is still saved
+    but won't be usable with the RAG scorers.
+
     Args:
-        column_mapping: {"question": col_name, "golden_answer": col_name}
+        column_mapping: dict mapping canonical names to source column names.
+            Required: ``"question"`` and ``"golden_answer"``.
+            Optional: ``"retrieval_context"`` — enables RAG scorers.
         file_path: Absolute path to the dataset file (recommended).
         file_content: Raw file content as a string (fallback).
         filename: Optional display name (inferred from file_path when omitted).
 
     Returns:
-        JSON with success status, generated dataset name, and rows saved.
+        JSON with success status, generated dataset name, rows saved,
+        and (when retrieval_context was provided) the count of rows
+        with RAG context populated.
     """
     args = {
         "file_path": file_path,
@@ -554,9 +566,23 @@ async def create_eval_config(
             - "exact": Inspect's normalized exact-match
             - "includes": Inspect's substring containment check
             - "match": Inspect's location-aware string match (end/begin/any/exact)
+            - "faithfulness": fraction of answer claims that agree with retrieved chunks (RAG)
+            - "answer_relevancy": fraction of answer statements that address the question (RAG)
+            - "contextual_precision": precision-at-k of retrieved chunks vs golden answer (RAG)
+            - "contextual_recall": fraction of golden-answer sentences backed by retrieved chunks (RAG)
+            - "contextual_relevancy": fraction of chunk statements relevant to the question (RAG)
+            - "hallucination": 1 minus contradiction rate (higher = more grounded) (RAG)
             Compose by passing several names, e.g. ["jury", "f1"] runs both
             and stores both scores in the eval log. Pure deterministic runs
             (no "jury") skip judge LLM calls entirely — fast and free.
+
+            RAG scorers (faithfulness, answer_relevancy, contextual_*,
+            hallucination) REQUIRE a retrieval_context column on every
+            sample. Save the dataset with retrieval_context first, then
+            pass e.g. scorers=["faithfulness", "answer_relevancy",
+            "contextual_precision", "contextual_recall"]. Each RAG
+            metric runs one LLM-judge call per sample — opt into the
+            specific ones you need rather than all six by default.
 
     Returns:
         JSON with the auto-generated configName and summary. Pass that configName
@@ -614,7 +640,11 @@ async def create_agent_eval_config(
         description: Optional description of the evaluation
         judge_models: Optional list of model IDs to use as judges
         scorers: Optional list of scorers. Default: ["jury"]. Accepted names:
-            "jury", "f1", "exact", "includes", "match". Compose for both
+            "jury", "f1", "exact", "includes", "match", plus the RAG
+            family — "faithfulness", "answer_relevancy",
+            "contextual_precision", "contextual_recall",
+            "contextual_relevancy", "hallucination". RAG scorers require
+            a retrieval_context column on every sample. Compose for both
             deterministic and rubric signal on the same agent run.
             See create_eval_config for full details.
 

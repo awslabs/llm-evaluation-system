@@ -4,7 +4,7 @@ import csv
 import io
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from mcp.types import TextContent
 from eval_mcp.core.user_storage import save_dataset_to_db
@@ -48,28 +48,77 @@ def parse_content_to_rows(content: str, filename: str) -> List[Dict[str, Any]]:
         return list(reader)
 
 
+def _coerce_retrieval_context(raw: Any) -> Optional[List[str]]:
+    """Normalize a retrieval_context cell into ``list[str]`` or None.
+
+    Accepts:
+      - already a ``list[str]`` (JSON datasets — common path)
+      - a JSON-encoded string like ``'["chunk1", "chunk2"]'`` (CSV input)
+      - any string with the legacy ``"chunk1 ||| chunk2"`` separator
+        used by some retrievers
+      - falsy / empty values → None (row is treated as non-RAG)
+
+    Anything else (list of non-strings, dict, etc.) raises ``ValueError``
+    so callers can return a clean error instead of silently dropping.
+    """
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, list):
+        if all(isinstance(c, str) for c in raw):
+            return [c for c in raw if c.strip()]
+        raise ValueError("retrieval_context list must contain only strings")
+    if isinstance(raw, str):
+        stripped = raw.strip()
+        if not stripped:
+            return None
+        # JSON-encoded list (the only sensible CSV encoding).
+        if stripped.startswith("["):
+            try:
+                parsed = json.loads(stripped)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"retrieval_context looks like JSON but didn't parse: {e}"
+                )
+            return _coerce_retrieval_context(parsed)
+        # Pipe-separator fallback for retrievers that export plain CSV
+        # with chunks joined by `|||`. Unambiguous because real chunks
+        # rarely contain that token.
+        if "|||" in stripped:
+            return [c.strip() for c in stripped.split("|||") if c.strip()]
+        # Single chunk as a bare string.
+        return [stripped]
+    raise ValueError(f"retrieval_context must be a list or string, got {type(raw).__name__}")
+
+
 def rows_to_test_cases(
     rows: List[Dict[str, Any]],
     question_col: str,
     answer_col: str,
+    retrieval_context_col: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Convert rows to test case format.
 
     Returns:
-        List of test cases with vars.question and vars.golden_answer
+        List of test cases with vars.question, vars.golden_answer, and
+        optionally vars.retrieval_context (list[str], in retriever rank
+        order — order matters for contextual_precision).
     """
     test_cases = []
     for row in rows:
         q_val = str(row.get(question_col, "")).strip()
         a_val = str(row.get(answer_col, "")).strip()
 
-        if q_val and a_val:
-            test_cases.append({
-                "vars": {
-                    "question": q_val,
-                    "golden_answer": a_val,
-                }
-            })
+        if not (q_val and a_val):
+            continue
+        vars_dict: Dict[str, Any] = {
+            "question": q_val,
+            "golden_answer": a_val,
+        }
+        if retrieval_context_col:
+            chunks = _coerce_retrieval_context(row.get(retrieval_context_col))
+            if chunks:
+                vars_dict["retrieval_context"] = chunks
+        test_cases.append({"vars": vars_dict})
 
     return test_cases
 
@@ -141,6 +190,7 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
 
     question_col = column_mapping.get("question")
     answer_col = column_mapping.get("golden_answer")
+    retrieval_context_col = column_mapping.get("retrieval_context")
 
     if not question_col or not answer_col:
         return [TextContent(
@@ -154,7 +204,9 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
     try:
         # Parse content and convert to test case format
         rows = parse_content_to_rows(file_content, filename)
-        test_cases = rows_to_test_cases(rows, question_col, answer_col)
+        test_cases = rows_to_test_cases(
+            rows, question_col, answer_col, retrieval_context_col
+        )
 
         if not test_cases:
             return [TextContent(
@@ -177,15 +229,16 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
             source={"kind": "imported", "origin": filename},
         )
 
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "success": True,
-                "dataset_id": dataset_id,
-                "name": dataset_name,
-                "rows_saved": len(test_cases),
-            }),
-        )]
+        rag_rows = sum(1 for tc in test_cases if "retrieval_context" in tc.get("vars", {}))
+        result_payload = {
+            "success": True,
+            "dataset_id": dataset_id,
+            "name": dataset_name,
+            "rows_saved": len(test_cases),
+        }
+        if retrieval_context_col:
+            result_payload["retrieval_context_rows"] = rag_rows
+        return [TextContent(type="text", text=json.dumps(result_payload))]
 
     except Exception as e:
         return [TextContent(

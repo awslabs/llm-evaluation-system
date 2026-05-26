@@ -34,15 +34,68 @@ from eval_mcp.core.user_storage import (
 # scorers, which work directly against the ``(question, golden_answer,
 # completion)`` dataset shape this MCP already produces.
 
+# Each entry maps a public scorer name (the value users pass on the
+# ``scorers`` parameter) to:
+#   - expr:   the Python expression to emit into Task(scorer=[...])
+#   - import: the symbol to import (None when the scorer is defined inline
+#             in the generated task file, like jury)
+#   - module: where to import the symbol from. ``inspect_ai.scorer`` for
+#             the built-ins, ``eval_mcp.scorers.rag`` for the RAG suite.
 SCORER_REGISTRY: Dict[str, Dict[str, Any]] = {
-    "jury": {"expr": "jury_scorer()", "import": None},
-    "f1": {"expr": "f1()", "import": "f1"},
-    "exact": {"expr": "exact()", "import": "exact"},
-    "includes": {"expr": "includes()", "import": "includes"},
-    "match": {"expr": "match()", "import": "match"},
+    "jury": {"expr": "jury_scorer()", "import": None, "module": None},
+    "f1": {"expr": "f1()", "import": "f1", "module": "inspect_ai.scorer"},
+    "exact": {"expr": "exact()", "import": "exact", "module": "inspect_ai.scorer"},
+    "includes": {"expr": "includes()", "import": "includes", "module": "inspect_ai.scorer"},
+    "match": {"expr": "match()", "import": "match", "module": "inspect_ai.scorer"},
+    "faithfulness": {
+        "expr": "faithfulness()",
+        "import": "faithfulness",
+        "module": "eval_mcp.scorers.rag",
+    },
+    "answer_relevancy": {
+        "expr": "answer_relevancy()",
+        "import": "answer_relevancy",
+        "module": "eval_mcp.scorers.rag",
+    },
+    "contextual_precision": {
+        "expr": "contextual_precision()",
+        "import": "contextual_precision",
+        "module": "eval_mcp.scorers.rag",
+    },
+    "contextual_recall": {
+        "expr": "contextual_recall()",
+        "import": "contextual_recall",
+        "module": "eval_mcp.scorers.rag",
+    },
+    "contextual_relevancy": {
+        "expr": "contextual_relevancy()",
+        "import": "contextual_relevancy",
+        "module": "eval_mcp.scorers.rag",
+    },
+    "hallucination": {
+        "expr": "hallucination()",
+        "import": "hallucination",
+        "module": "eval_mcp.scorers.rag",
+    },
 }
 
+# Names that require ``retrieval_context`` on every sample. Used to
+# (a) opt into the RAG-aware solver and (b) fail-fast in the dataset
+# step if the column isn't present.
+RAG_SCORERS = frozenset({
+    "faithfulness",
+    "answer_relevancy",
+    "contextual_precision",
+    "contextual_recall",
+    "contextual_relevancy",
+    "hallucination",
+})
+
 DEFAULT_SCORERS: List[str] = ["jury"]
+
+
+def has_rag_scorer(scorers: List[str]) -> bool:
+    return any(s in RAG_SCORERS for s in scorers)
 
 
 def _validate_scorers(scorers: Optional[List[str]]) -> List[str]:
@@ -78,17 +131,38 @@ def _render_scorer_expression(scorers: List[str]) -> str:
 
 
 def _render_builtin_scorer_imports(scorers: List[str]) -> str:
-    """Render the extra ``from inspect_ai.scorer import …`` line for
-    built-in scorers. The jury defines its own scorer inline so it
-    doesn't contribute to this import."""
-    names = sorted({
-        SCORER_REGISTRY[s]["import"]
-        for s in scorers
-        if SCORER_REGISTRY[s]["import"]
-    })
-    if not names:
+    """Render extra ``from <module> import …`` lines for built-in and
+    library scorers, one line per module. The jury defines its own
+    scorer inline so it doesn't contribute to these imports.
+
+    The render is stable per module — sorted names within a module,
+    modules sorted alphabetically — so diffs of the generated task file
+    stay legible across runs.
+    """
+    by_module: Dict[str, List[str]] = {}
+    for s in scorers:
+        entry = SCORER_REGISTRY[s]
+        name = entry["import"]
+        module = entry.get("module")
+        if not name or not module:
+            continue
+        by_module.setdefault(module, []).append(name)
+    if not by_module:
         return ""
-    return f"from inspect_ai.scorer import {', '.join(names)}"
+    lines: List[str] = []
+    for module in sorted(by_module):
+        unique = sorted(set(by_module[module]))
+        lines.append(f"from {module} import {', '.join(unique)}")
+    # Inject the RAG judge-model wiring AND the solver import once when
+    # any RAG scorer is selected. Picks the first model from
+    # CONFIG["judge_models"] — mirrors what jury_scorer iterates over,
+    # so users see the SAME judge labels in cost reports regardless of
+    # which scorer ran.
+    if any(s in RAG_SCORERS for s in scorers):
+        lines.append(
+            "from eval_mcp.scorers.rag import configure_judge as _rag_configure_judge, rag_prompt_solver"
+        )
+    return "\n".join(lines)
 
 
 def build_judge_system_prompt(criteria: List[Dict[str, str]]) -> str:
@@ -165,7 +239,7 @@ CONFIG = json.loads(_config_path.read_text())
 
 DATASET_PATH = CONFIG["dataset_path"]
 PROVIDERS = CONFIG["providers"]
-'''
+{rag_init}'''
 
 
 JURY_SCORER_BLOCK = '''
@@ -336,8 +410,8 @@ SINGLE_TASK_TEMPLATE = '''
 @task
 def eval_task():
     return Task(
-        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
-        solver=[generate()],
+        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer"{field_spec_metadata})),
+        solver=[{solver_chain}],
         scorer={scorer_expr},
     )
 '''
@@ -346,8 +420,8 @@ PROMPT_TASK_TEMPLATE = '''
 @task
 def eval_{index}():
     return Task(
-        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
-        solver=[prompt_template({prompt_repr}), generate()],
+        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer"{field_spec_metadata})),
+        solver=[prompt_template({prompt_repr}), {solver_chain}],
         scorer={scorer_expr},
     )
 '''
@@ -376,11 +450,26 @@ def create_inspect_task_file(
     extra_imports = _render_builtin_scorer_imports(scorers)
     scorer_expr = _render_scorer_expression(scorers)
 
+    rag_enabled = has_rag_scorer(scorers)
+    rag_init = ""
+    if rag_enabled:
+        # Picks the first judge model so RAG scorers share whatever the
+        # user already configured for the jury. ``next(iter(...))`` keeps
+        # the order stable (Python dict insertion order).
+        rag_init = (
+            "\n# Wire RAG scorers up to the same judge model the jury uses.\n"
+            "if CONFIG.get(\"judge_models\"):\n"
+            "    _rag_configure_judge(next(iter(CONFIG[\"judge_models\"].values())))\n"
+        )
+    field_spec_metadata = ', metadata=["retrieval_context"]' if rag_enabled else ""
+    solver_chain = "rag_prompt_solver(), generate()" if rag_enabled else "generate()"
+
     parts: List[str] = []
     parts.append(TASK_FILE_BASE.format(
         config_name=config_name,
         scorers_doc=", ".join(scorers),
         extra_imports=(extra_imports + "\n") if extra_imports else "",
+        rag_init=rag_init,
     ))
     if "jury" in scorers:
         parts.append(JURY_SCORER_BLOCK)
@@ -397,10 +486,18 @@ def create_inspect_task_file(
             # prompt_template() uses {prompt} as the placeholder for input text
             normalized = prompt.replace("{question}", "{prompt}")
             parts.append(PROMPT_TASK_TEMPLATE.format(
-                index=i + 1, prompt_repr=repr(normalized), scorer_expr=scorer_expr
+                index=i + 1,
+                prompt_repr=repr(normalized),
+                scorer_expr=scorer_expr,
+                field_spec_metadata=field_spec_metadata,
+                solver_chain=solver_chain,
             ))
     else:
-        parts.append(SINGLE_TASK_TEMPLATE.format(scorer_expr=scorer_expr))
+        parts.append(SINGLE_TASK_TEMPLATE.format(
+            scorer_expr=scorer_expr,
+            field_spec_metadata=field_spec_metadata,
+            solver_chain=solver_chain,
+        ))
 
     return "".join(parts), config_data
 
@@ -459,13 +556,33 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
         temp_dir.mkdir(parents=True, exist_ok=True)
         dataset_file = temp_dir / f"{dataset_name}.json"
 
+        rag_enabled = has_rag_scorer(scorers)
         inspect_samples = []
-        for test in tests:
+        missing_rc_indices: List[int] = []
+        for i, test in enumerate(tests):
             v = test.get("vars", test)
-            inspect_samples.append({
+            sample: Dict[str, Any] = {
                 "question": v.get("question", ""),
                 "golden_answer": v.get("golden_answer", ""),
-            })
+            }
+            rc = v.get("retrieval_context")
+            if rc:
+                sample["retrieval_context"] = rc
+            elif rag_enabled:
+                missing_rc_indices.append(i)
+            inspect_samples.append(sample)
+
+        if rag_enabled and missing_rc_indices:
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": (
+                    f"Dataset '{dataset_name}' has {len(missing_rc_indices)} sample(s) "
+                    f"without retrieval_context (first missing index: {missing_rc_indices[0]}). "
+                    f"RAG scorers {sorted(set(scorers) & RAG_SCORERS)} require a "
+                    f"retrieval_context column (list[str]) on every sample. Re-upload "
+                    f"the dataset via save_dataset with a retrieval_context column."
+                ),
+            }))]
 
         with open(dataset_file, "w") as f:
             json.dump(inspect_samples, f, indent=2)

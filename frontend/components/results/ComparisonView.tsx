@@ -45,6 +45,9 @@ interface Sample {
   input: string;
   target: string;
   results: Record<string, SampleResult>;
+  // RAG runs surface the retrieved chunks the candidate model was given.
+  // Ordered by retriever rank (chunk 1 = most relevant per the retriever).
+  retrievalContext?: string[];
 }
 
 interface PipelineStage {

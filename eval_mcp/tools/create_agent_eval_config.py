@@ -20,9 +20,11 @@ from eval_mcp.core.user_storage import (
     get_user_dir,
 )
 from eval_mcp.tools.create_config import (
+    RAG_SCORERS,
     _render_builtin_scorer_imports,
     _render_scorer_expression,
     _validate_scorers,
+    has_rag_scorer,
 )
 
 
@@ -48,6 +50,7 @@ CONFIG = json.loads(_config_path.read_text())
 
 DATASET_PATH = CONFIG["dataset_path"]
 AGENT_CMD = CONFIG["agent_cmd"]
+{rag_init}
 
 
 @agent
@@ -216,7 +219,7 @@ AGENT_TASK_DEFINITION = '''
 @task
 def eval_task():
     return Task(
-        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
+        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer"{field_spec_metadata})),
         solver=agent_solver(),
         scorer={scorer_expr},
         sandbox=("docker", "compose.yaml"),
@@ -277,15 +280,29 @@ def create_agent_eval_files(
     extra_imports = _render_builtin_scorer_imports(scorers)
     scorer_expr = _render_scorer_expression(scorers)
 
+    rag_enabled = has_rag_scorer(scorers)
+    rag_init = ""
+    if rag_enabled:
+        rag_init = (
+            "\n# Wire RAG scorers up to the same judge model the jury uses.\n"
+            "if CONFIG.get(\"judge_models\"):\n"
+            "    _rag_configure_judge(next(iter(CONFIG[\"judge_models\"].values())))\n"
+        )
+    field_spec_metadata = ', metadata=["retrieval_context"]' if rag_enabled else ""
+
     parts: List[str] = []
     parts.append(AGENT_TASK_BASE.format(
         config_name=config_name,
         scorers_doc=", ".join(scorers),
         extra_imports=(extra_imports + "\n") if extra_imports else "",
+        rag_init=rag_init,
     ))
     if "jury" in scorers:
         parts.append(AGENT_JURY_BLOCK)
-    parts.append(AGENT_TASK_DEFINITION.format(scorer_expr=scorer_expr))
+    parts.append(AGENT_TASK_DEFINITION.format(
+        scorer_expr=scorer_expr,
+        field_spec_metadata=field_spec_metadata,
+    ))
     task_code = "".join(parts)
     compose_yaml = AGENT_COMPOSE_TEMPLATE.format(image=agent_image)
 
@@ -347,13 +364,33 @@ async def handle_create_agent_eval_config(args: Dict[str, Any]) -> List[TextCont
         temp_dir.mkdir(parents=True, exist_ok=True)
         dataset_file = temp_dir / f"{dataset_name}.json"
 
+        rag_enabled = has_rag_scorer(scorers)
         inspect_samples = []
-        for test in tests:
+        missing_rc_indices: List[int] = []
+        for i, test in enumerate(tests):
             v = test.get("vars", test)
-            inspect_samples.append({
+            sample: Dict[str, Any] = {
                 "question": v.get("question", ""),
                 "golden_answer": v.get("golden_answer", ""),
-            })
+            }
+            rc = v.get("retrieval_context")
+            if rc:
+                sample["retrieval_context"] = rc
+            elif rag_enabled:
+                missing_rc_indices.append(i)
+            inspect_samples.append(sample)
+
+        if rag_enabled and missing_rc_indices:
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": (
+                    f"Dataset '{dataset_name}' has {len(missing_rc_indices)} sample(s) "
+                    f"without retrieval_context (first missing index: {missing_rc_indices[0]}). "
+                    f"RAG scorers {sorted(set(scorers) & RAG_SCORERS)} require a "
+                    f"retrieval_context column (list[str]) on every sample. Re-upload "
+                    f"the dataset via save_dataset with a retrieval_context column."
+                ),
+            }))]
 
         with open(dataset_file, "w") as f:
             json.dump(inspect_samples, f, indent=2)

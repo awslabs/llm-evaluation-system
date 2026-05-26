@@ -156,52 +156,11 @@ Opens http://localhost:4001. Each service hot-reloads independently; see [`local
 
 ## Architecture
 
-```
-                         ┌─────────────────────────────────────────┐
-                         │      CloudFront + WAF → Internal ALB    │
-                         └───────────────────┬─────────────────────┘
-                                             │
-              ┌──────────────────────────────┼──────────────────────────────┐
-              │                              │                              │
-              ▼                              ▼                              ▼
-     ┌─────────────────┐          ┌─────────────────┐          ┌─────────────────┐
-     │    Frontend     │          │     Backend     │          │   MCP Servers   │
-     │    (Next.js)    │          │    (FastAPI)    │          │  - synthetic    │
-     │                 │          │  - Chat/Agent   │          │  - providers    │
-     └─────────────────┘          │  - Viewer Proxy │          │  - dataset      │
-                                  └────────┬────────┘          └─────────────────┘
-                                           │
-                    ┌──────────────────────┼──────────────────────┐
-                    │                      │                      │
-                    ▼                      ▼                      ▼
-           ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
-           │   User A     │       │   User B     │       │   User C     │
-           │ /data/users/ │       │ /data/users/ │       │ /data/users/ │
-           │  - configs   │       │  - configs   │       │  - configs   │
-           │  - datasets  │       │  - datasets  │       │  - datasets  │
-           │  - viewer    │       │  - viewer    │       │  - viewer    │
-           └──────────────┘       └──────────────┘       └──────────────┘
-                    │                      │                      │
-                    └──────────────────────┼──────────────────────┘
-                                           │
-                              ┌────────────▼────────────┐
-                              │   JSON + EBS Storage   │
-                              │  Periodic S3 backup      │
-                              └─────────────────────────┘
-```
-
-## Security Architecture
-
-```
-Internet → CloudFront (HTTPS + WAF) → VPC Origin → Internal ALB → Pods
-```
-
-- **Internal ALB**: Not internet-facing. Only reachable via CloudFront VPC Origins.
-- **VPC Origins**: CloudFront connects to ALB via AWS private network.
-- **WAF**: Rate limiting (2000 req/5min per IP), AWS managed rules.
-- **Authentication**: Cognito (native or external OIDC IdP) via oauth2-proxy.
-- **Secrets**: Stored in AWS Secrets Manager, synced to K8s via External Secrets Operator.
-- **Database auth**: IAM token authentication (no static passwords).
+System architecture, request flow, and security boundaries are in
+[ARCHITECTURE.md](../ARCHITECTURE.md) — three mermaid diagrams covering
+eval execution, the MCP server, and the EKS deployment. This file
+focuses on operational procedures (commands, terraform variables,
+troubleshooting) rather than what the system is.
 
 ## Project Structure
 
@@ -238,37 +197,11 @@ llm-evaluation-system/
 
 The EKS/web-app content below is the heavyweight deployment path. For the MCP, the section above ("Working on the MCP locally") is what you want.
 
-## Infrastructure Layout
+## How the Terraform layers connect
 
-Infrastructure is split into two Terraform layers with separate state:
+Infrastructure is split into `infra/data/` (persistent: VPC, RDS, S3 — survives `./destroy.sh`) and `infra/platform/` (compute: EKS, ALB, CloudFront, Cognito — recreated by deploy/destroy). Resource breakdowns are in [ARCHITECTURE.md](../ARCHITECTURE.md#3-eks-deployment).
 
-### Data Layer (`infra/data/`)
-
-Persistent resources that survive `./destroy.sh`:
-
-- **VPC** — 10.0.0.0/16 CIDR, 2 AZs, public/private/intra subnets, NAT gateway, S3 VPC endpoint
-- **RDS PostgreSQL** — db.t3.micro, 20GB (auto-scales to 100GB), IAM auth enabled
-- **S3 Documents Bucket** — User uploads, versioned
-- **S3 Backup Bucket** — Periodic JSON backups, versioned
-
-### Platform Layer (`infra/platform/`)
-
-Compute and networking resources destroyed/recreated by scripts:
-
-- **EKS** — Kubernetes 1.34, 2x t4g.medium managed node group (ARM64/Graviton)
-- **Karpenter** — Auto-scaling with c/m/r/t instance types (arm64, medium-xlarge)
-- **ALB** — Internal (non-internet-facing), targets: backend (8080), frontend (3000), oauth2-proxy (4180)
-- **CloudFront** — HTTPS CDN with VPC Origin to internal ALB, HTTP/2+3
-- **WAF** — Rate limiting (2000 req/5min per IP), AWS managed rules
-- **Cognito** — User Pool with admin-only signup, optional external OIDC IdP
-- **CodeBuild** — ARM64 image builds, source from S3
-- **ECR** — Private container registry
-- **Bedrock Logging** — Multi-region (us-west-2, us-east-1, us-east-2) CloudWatch logs
-- **Kubernetes resources** — Namespace, ConfigMap, StorageClass, External Secrets, Pod Identity, TGBs
-
-### How Layers Connect
-
-The deploy script reads data-layer outputs and passes them as `-var` flags to the platform layer. This avoids `terraform_remote_state` (which exposes entire state including secrets).
+`deploy.sh` reads data-layer outputs and passes them to the platform layer as `-var` flags rather than using `terraform_remote_state` (which would expose the entire data-state including secrets):
 
 ```bash
 # deploy.sh internally does:
@@ -297,9 +230,9 @@ helm/eval/
 ├── values.yaml           # Shared defaults (multi-environment)
 ├── values-aws.yaml       # AWS EKS overrides
 └── templates/
-    ├── deployment.yaml   # Backend + Frontend + 3 MCP sidecars + s3-backup
+    ├── deployment.yaml   # Backend Pod (backend + eval-mcp sidecar) + Frontend
     ├── service.yaml      # Backend, Frontend services
-    ├── pvc.yaml          # Backend EBS gp3 storage (200Gi)
+    ├── pvc.yaml          # Intentionally empty — backend is stateless (data in S3)
     ├── hpa.yaml          # Horizontal Pod Autoscaling
     ├── pdb.yaml          # Pod Disruption Budgets
     └── rbac.yaml         # RBAC configuration
@@ -336,19 +269,6 @@ Inherits `region` and `project_name`, plus:
 | `vpc_id` | (required) | From data layer output |
 | `private_subnets` | (required) | From data layer output |
 | ... | | (13 data-layer variables total, passed by deploy.sh) |
-
-## Ingress Routes
-
-| Path | Service | Description |
-|------|---------|-------------|
-| `/api/auth/*` | frontend | NextAuth authentication |
-| `/api/*` | backend | FastAPI endpoints |
-| `/viewer/*` | backend | Per-user viewer proxy |
-| `/health` | backend | Health check |
-| `/*` | frontend | Next.js app |
-
-Public routes (no auth): `/`, `/_next/*`, `/favicon.ico` — bypassed at ALB level.
-Protected routes: `/chat`, `/api/*`, `/viewer/*` — through oauth2-proxy.
 
 ## Manual Deployment Steps
 
@@ -448,18 +368,23 @@ helm template eval ./helm/eval -f ./helm/eval/values-aws.yaml \
 
 ### Storage Management
 
-Backend uses single-pod architecture with EBS gp3 storage (200Gi). Sidecar backs up JSON databases to S3 every 15 minutes. Brief downtime (~30s) occurs during deploys.
+Backend is **stateless** — `/data` is an `emptyDir` volume (lost on pod restart). All durable state lives in S3:
+
+- **S3 data bucket** (`infra/data/storage.tf` → `data_bucket`) — configs, datasets, judges, eval logs, PDF reports. Written directly by `eval-mcp` via `USER_STORAGE_BASE=/data/users` plus the S3 sync layer.
+- **S3 documents bucket** — user-uploaded PDFs and knowledge bases.
+- **RDS Postgres** — chat history.
+
+Pod restarts and rolling deploys are therefore non-disruptive to durable state. HPA scaling works without volume coordination. There is no PVC and no `s3-backup` sidecar; `helm/eval/templates/pvc.yaml` is intentionally empty (see its comment).
 
 ```bash
-# Check disk usage
-kubectl exec -n eval-managed deployment/backend -- df -h /data
+# Inspect the ephemeral working dir (resets on pod restart)
+kubectl exec -n eval-managed deployment/backend -c backend -- df -h /data
 
-# Expand storage (no downtime, applies automatically)
-kubectl patch pvc backend-data -n eval-managed \
-  -p '{"spec":{"resources":{"requests":{"storage":"400Gi"}}}}'
+# Verify durable state is in S3
+aws s3 ls s3://$(cd infra/data && terraform output -raw data_bucket)/users/
 
-# Check backup status
-kubectl logs -n eval-managed -l app=backend -c s3-backup
+# Tail MCP sidecar logs (where the S3 writes happen)
+kubectl logs -n eval-managed -l app=backend -c eval-mcp
 ```
 
 ### Terraform State

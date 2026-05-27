@@ -617,6 +617,7 @@ def _build_detail_from_logs(
                 pass
 
     display_models = models
+    score_only = bool(config_data and config_data.get("score_only"))
     if agent_image and len(models) == 1:
         display_models = [f"agent/{agent_image}"]
         old_model = models[0]
@@ -627,6 +628,20 @@ def _build_detail_from_logs(
         for sample in samples_by_id.values():
             if old_model in sample.get("results", {}):
                 sample["results"][f"agent/{agent_image}"] = sample["results"].pop(old_model)
+    elif score_only and len(models) == 1:
+        # Inspect AI logs the model as "none/none" when no --model is
+        # passed. That literal isn't user-facing — relabel for the
+        # viewer so the column header reads "pre-generated".
+        score_only_label = "pre-generated"
+        display_models = [score_only_label]
+        old_model = models[0]
+        if old_model in aggregate:
+            aggregate[score_only_label] = aggregate.pop(old_model)
+        if old_model in stats:
+            stats[score_only_label] = stats.pop(old_model)
+        for sample in samples_by_id.values():
+            if old_model in sample.get("results", {}):
+                sample["results"][score_only_label] = sample["results"].pop(old_model)
 
     result = {
         "groupId": group_id,
@@ -642,6 +657,8 @@ def _build_detail_from_logs(
         result["pipeline"] = pipeline_stages
     if agent_image:
         result["agentImage"] = agent_image
+    if score_only:
+        result["scoreOnly"] = True
     if config_data and config_data.get("prompts"):
         result["prompts"] = config_data["prompts"]
     return result

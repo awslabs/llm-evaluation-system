@@ -266,14 +266,25 @@ async def save_dataset(
     persists it. Prefer `file_path` — the tool reads from disk (cheap).
     Pass `file_content` only if the data isn't on the local filesystem.
 
+    For score-only mode (evaluate pre-generated outputs WITHOUT calling a
+    candidate model), also pass an actual_output column. When every
+    sample in the saved dataset has actual_output populated,
+    create_eval_config switches into score-only mode automatically:
+    no candidate model is invoked, and scorers grade the static answers
+    against golden_answer.
+
     Args:
-        column_mapping: {"question": col_name, "golden_answer": col_name}
+        column_mapping: dict mapping canonical names to source column names.
+            Required: ``"question"`` and ``"golden_answer"``.
+            Optional: ``"actual_output"`` — opt into score-only mode.
         file_path: Absolute path to the dataset file (recommended).
         file_content: Raw file content as a string (fallback).
         filename: Optional display name (inferred from file_path when omitted).
 
     Returns:
-        JSON with success status, generated dataset name, and rows saved.
+        JSON with success status, generated dataset name, rows saved,
+        and (when actual_output was mapped) the count of rows that
+        ended up with a populated actual_output.
     """
     args = {
         "file_path": file_path,
@@ -516,8 +527,8 @@ async def generate_judge(
 @mcp.tool(annotations=CREATE_LOCAL)
 async def create_eval_config(
     dataset: DatasetName,
-    providers: ProvidersList,
     judge: JudgeName,
+    providers: list = None,
     user_id: str = None,
     prompts: str | list = "{question}",
     description: str = None,
@@ -538,11 +549,20 @@ async def create_eval_config(
     For agent evaluations: pass agent_path to evaluate a local Python agent
     with full Bedrock call tracing. The agent code is not modified.
 
+    Score-only mode: when the named dataset has actual_output populated
+    on every sample (see save_dataset's actual_output column),
+    create_eval_config automatically switches into score-only mode —
+    no candidate model is invoked, providers becomes optional, and the
+    scorers grade the pre-generated outputs against golden_answer. This
+    is the right mode when you have already run your RAG / agent /
+    chatbot in production and just want to score the captured outputs.
+
     Args:
         dataset: Name of dataset from list_datasets
-        providers: List of target models to evaluate (used for jury judges routing).
-            For agent evals, the agent calls Bedrock directly.
         judge: Name of judge from list_judges (REQUIRED - criteria adapted to QA pairs)
+        providers: List of target models to evaluate (used for jury judges routing).
+            For agent evals, the agent calls Bedrock directly. Optional in
+            score-only mode (the dataset already carries actual_output).
         prompts: Single prompt string OR list of prompts for comparison. Use {question} or {prompt} as placeholder.
         description: Optional description of the evaluation
         judge_models: Optional list of model IDs to use as judges

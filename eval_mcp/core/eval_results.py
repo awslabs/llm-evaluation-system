@@ -664,6 +664,48 @@ def _build_detail_from_logs(
     return result
 
 
+def _relabel_score_only_groups(groups_response: dict, user_dir: Path) -> None:
+    """For each group whose backing config has ``score_only: true``, relabel
+    the model entries from Inspect's ``"none/none"`` literal to the
+    user-facing ``"pre-generated"`` label. Mutates ``groups_response`` in place.
+
+    Matches the relabel applied by :func:`_build_detail_from_logs` so the
+    sidebar (groups list) and the detail view show the same label.
+    """
+    base_real = os.path.realpath(str(get_user_base_dir()))
+    configs_real = os.path.realpath(str(user_dir / "configs"))
+    if not configs_real.startswith(base_real + os.sep):
+        return
+    if not os.path.isdir(configs_real):
+        return
+    for group in groups_response.get("groups", []):
+        models = group.get("models") or []
+        if models != ["none/none"]:
+            continue
+        # Need the task file name to find the right config JSON. Use the
+        # group's configName as a fallback.
+        config_name = group.get("configName") or ""
+        candidates = [f"{config_name}.json"]
+        # Also handle the auto-generated eval_NNN naming convention.
+        for cand in candidates:
+            cand_path = os.path.realpath(os.path.join(configs_real, os.path.basename(cand)))
+            if not cand_path.startswith(configs_real + os.sep):
+                continue
+            if not os.path.isfile(cand_path):
+                continue
+            try:
+                with open(cand_path) as f:
+                    cfg = json.loads(f.read())
+                if cfg.get("score_only"):
+                    group["models"] = ["pre-generated"]
+                    if "scores" in group and "none/none" in group["scores"]:
+                        group["scores"]["pre-generated"] = group["scores"].pop("none/none")
+                    group["scoreOnly"] = True
+                break
+            except Exception:
+                continue
+
+
 async def precompute_eval_results(user_id: str, force: bool = False) -> None:
     """Parse all .eval files for a user and save pre-computed JSON to S3/disk.
 
@@ -677,6 +719,13 @@ async def precompute_eval_results(user_id: str, force: bool = False) -> None:
         return
 
     groups_response = _build_groups_from_headers(headers)
+    # Apply the same model-name relabel the detail builder does, so the
+    # groups list (sidebar / list_evaluations) stays consistent with the
+    # detail view for score-only and agent runs. The detail builder reads
+    # config_data itself; here we only relabel score-only because it's the
+    # simplest signal (model == "none/none") and agent_image already shows
+    # up correctly via the existing display path.
+    _relabel_score_only_groups(groups_response, user_dir)
     save_eval_groups(user_id, groups_response)
     logger.info(f"Saved pre-computed groups JSON for user {user_id} ({len(groups_response['groups'])} groups)")
 

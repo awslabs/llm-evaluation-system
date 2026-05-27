@@ -277,6 +277,12 @@ def _build_groups_from_headers(headers: list[dict]) -> dict:
             "status": status,
             "scores": scores_by_key,
         }
+        # Stash the raw task_file (e.g. "eval_<timestamp>.py") so downstream
+        # post-processing (score-only relabel, future config-driven UI bits)
+        # can locate the sibling JSON config without re-deriving it.
+        task_file = run_logs[0].get("task_file")
+        if task_file:
+            group["taskFile"] = task_file
         if is_prompt_comparison:
             group["promptComparison"] = True
             group["promptCount"] = len(distinct_tasks)
@@ -682,28 +688,32 @@ def _relabel_score_only_groups(groups_response: dict, user_dir: Path) -> None:
         models = group.get("models") or []
         if models != ["none/none"]:
             continue
-        # Need the task file name to find the right config JSON. Use the
-        # group's configName as a fallback.
-        config_name = group.get("configName") or ""
-        candidates = [f"{config_name}.json"]
-        # Also handle the auto-generated eval_NNN naming convention.
-        for cand in candidates:
-            cand_path = os.path.realpath(os.path.join(configs_real, os.path.basename(cand)))
-            if not cand_path.startswith(configs_real + os.sep):
-                continue
-            if not os.path.isfile(cand_path):
-                continue
-            try:
-                with open(cand_path) as f:
-                    cfg = json.loads(f.read())
-                if cfg.get("score_only"):
-                    group["models"] = ["pre-generated"]
-                    if "scores" in group and "none/none" in group["scores"]:
-                        group["scores"]["pre-generated"] = group["scores"].pop("none/none")
-                    group["scoreOnly"] = True
-                break
-            except Exception:
-                continue
+        # Derive the config JSON name. Inspect's log header carries the
+        # original task file ("eval_<timestamp>.py"); the JSON config is the
+        # sibling with the .json suffix. Fall back to configName for older
+        # logs that predate the taskFile stash.
+        task_file = group.get("taskFile")
+        if task_file:
+            config_filename = Path(task_file).with_suffix(".json").name
+        else:
+            config_filename = f"{group.get('configName') or ''}.json"
+        cand_path = os.path.realpath(
+            os.path.join(configs_real, os.path.basename(config_filename))
+        )
+        if not cand_path.startswith(configs_real + os.sep):
+            continue
+        if not os.path.isfile(cand_path):
+            continue
+        try:
+            with open(cand_path) as f:
+                cfg = json.loads(f.read())
+            if cfg.get("score_only"):
+                group["models"] = ["pre-generated"]
+                if "scores" in group and "none/none" in group["scores"]:
+                    group["scores"]["pre-generated"] = group["scores"].pop("none/none")
+                group["scoreOnly"] = True
+        except Exception:
+            continue
 
 
 async def precompute_eval_results(user_id: str, force: bool = False) -> None:

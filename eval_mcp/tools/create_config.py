@@ -198,8 +198,14 @@ def build_config_json(
     description: Optional[str] = None,
     prompts: Optional[List[str]] = None,
     scorers: Optional[List[str]] = None,
+    score_only: bool = False,
 ) -> dict:
-    """Build the JSON config that the task file will load."""
+    """Build the JSON config that the task file will load.
+
+    ``score_only`` flips the config into "score pre-generated outputs"
+    mode: ``providers`` is allowed to be empty (no candidate model is
+    invoked), and ``run_eval.py`` skips the ``--model`` subprocess flag.
+    """
     config = {
         "dataset_path": dataset_path,
         "providers": providers,
@@ -211,6 +217,8 @@ def build_config_json(
     }
     if prompts and len(prompts) > 1:
         config["prompts"] = prompts
+    if score_only:
+        config["score_only"] = True
     return config
 
 
@@ -224,7 +232,7 @@ def build_config_json(
 
 TASK_FILE_BASE = '''"""Inspect AI evaluation task: {config_name}
 
-Auto-generated. Scorers: {scorers_doc}
+Auto-generated. Scorers: {scorers_doc}{mode_doc}
 """
 
 import json
@@ -238,7 +246,7 @@ _config_path = Path(__file__).with_suffix(".json")
 CONFIG = json.loads(_config_path.read_text())
 
 DATASET_PATH = CONFIG["dataset_path"]
-PROVIDERS = CONFIG["providers"]
+PROVIDERS = CONFIG.get("providers", [])
 {rag_init}'''
 
 
@@ -436,18 +444,33 @@ def create_inspect_task_file(
     description: Optional[str] = None,
     prompts: Optional[List[str]] = None,
     scorers: Optional[List[str]] = None,
+    score_only: bool = False,
 ) -> tuple[str, dict]:
     """Create task file code and config JSON.
+
+    When ``score_only`` is True the task file imports
+    ``static_output_solver`` and runs it instead of ``generate()``;
+    each sample's ``actual_output`` metadata field is written directly
+    into ``state.output`` so scorers run against the pre-generated answer.
 
     Returns:
         (task_code, config_dict) — caller writes both to disk.
     """
     scorers = _validate_scorers(scorers)
     config_data = build_config_json(
-        dataset_path, providers, judge_config, description, prompts, scorers
+        dataset_path, providers, judge_config, description, prompts, scorers,
+        score_only=score_only,
     )
 
-    extra_imports = _render_builtin_scorer_imports(scorers)
+    extra_imports_parts: List[str] = []
+    builtin = _render_builtin_scorer_imports(scorers)
+    if builtin:
+        extra_imports_parts.append(builtin)
+    if score_only:
+        extra_imports_parts.append(
+            "from eval_mcp.solvers.static_output import static_output_solver"
+        )
+    extra_imports = "\n".join(extra_imports_parts)
     scorer_expr = _render_scorer_expression(scorers)
 
     rag_enabled = has_rag_scorer(scorers)
@@ -461,14 +484,45 @@ def create_inspect_task_file(
             "if CONFIG.get(\"judge_models\"):\n"
             "    _rag_configure_judge(next(iter(CONFIG[\"judge_models\"].values())))\n"
         )
-    field_spec_metadata = ', metadata=["retrieval_context"]' if rag_enabled else ""
-    solver_chain = "rag_prompt_solver(), generate()" if rag_enabled else "generate()"
+
+    # FieldSpec metadata combines both modes. Order is stable for diff
+    # legibility: score-only first, RAG second.
+    metadata_keys: List[str] = []
+    if score_only:
+        metadata_keys.append("actual_output")
+    if rag_enabled:
+        metadata_keys.append("retrieval_context")
+    field_spec_metadata = (
+        ", metadata=[" + ", ".join(f'"{k}"' for k in metadata_keys) + "]"
+        if metadata_keys
+        else ""
+    )
+
+    # Solver chain:
+    # - score-only: static_output_solver alone — no model call, so
+    #   rag_prompt_solver (which rewrites the model's prompt) is moot
+    #   and skipped even when RAG scorers are selected.
+    # - RAG (live model): inject chunks via rag_prompt_solver, then generate.
+    # - default: plain generate.
+    if score_only:
+        solver_chain = "static_output_solver()"
+    elif rag_enabled:
+        solver_chain = "rag_prompt_solver(), generate()"
+    else:
+        solver_chain = "generate()"
+
+    mode_doc = ""
+    if score_only:
+        mode_doc = "\nMode: score-only (no candidate model invoked)."
+    elif rag_enabled:
+        mode_doc = "\nMode: RAG (retrieval_context injected into prompt)."
 
     parts: List[str] = []
     parts.append(TASK_FILE_BASE.format(
         config_name=config_name,
         scorers_doc=", ".join(scorers),
         extra_imports=(extra_imports + "\n") if extra_imports else "",
+        mode_doc=mode_doc,
         rag_init=rag_init,
     ))
     if "jury" in scorers:
@@ -522,8 +576,9 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": "dataset is required"}))]
         if not judge_name:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": "judge is required"}))]
-        if not providers:
-            return [TextContent(type="text", text=json.dumps({"success": False, "error": "At least one provider is required"}))]
+        # ``providers`` validity is checked AFTER we know whether this is a
+        # score-only dataset — in score-only mode no candidate model is
+        # invoked and providers can be empty.
 
         try:
             scorers = _validate_scorers(scorers_arg)
@@ -557,6 +612,47 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
         dataset_file = temp_dir / f"{dataset_name}.json"
 
         rag_enabled = has_rag_scorer(scorers)
+
+        # Detect score-only mode from the dataset itself: if EVERY sample
+        # carries an actual_output, we score the pre-generated answers
+        # without invoking a candidate model. Mixed datasets (some with,
+        # some without) are refused — the contract is all-or-none so the
+        # subprocess invocation can deterministically skip --model.
+        rows_with_ao = 0
+        rows_without_ao_indices: List[int] = []
+        for i, test in enumerate(tests):
+            v = test.get("vars", test)
+            ao = v.get("actual_output")
+            if isinstance(ao, str) and ao.strip():
+                rows_with_ao += 1
+            else:
+                rows_without_ao_indices.append(i)
+
+        score_only = rows_with_ao > 0 and not rows_without_ao_indices
+        if rows_with_ao > 0 and rows_without_ao_indices:
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": (
+                    f"Dataset '{dataset_name}' has {rows_with_ao}/{len(tests)} samples "
+                    f"with actual_output. Score-only mode requires every sample to have "
+                    f"actual_output (or none — in which case the candidate model is "
+                    f"invoked). Mixed datasets are not supported. Missing rows: "
+                    f"{rows_without_ao_indices[:5]}"
+                    + (" ..." if len(rows_without_ao_indices) > 5 else "")
+                ),
+            }))]
+
+        if not score_only and not providers:
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": (
+                    "At least one provider is required when the dataset has no "
+                    "actual_output column. To score pre-generated answers without "
+                    "calling a candidate model, re-upload the dataset via "
+                    "save_dataset with an actual_output column mapping."
+                ),
+            }))]
+
         inspect_samples = []
         missing_rc_indices: List[int] = []
         for i, test in enumerate(tests):
@@ -565,6 +661,8 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
                 "question": v.get("question", ""),
                 "golden_answer": v.get("golden_answer", ""),
             }
+            if score_only:
+                sample["actual_output"] = v.get("actual_output", "")
             rc = v.get("retrieval_context")
             if rc:
                 sample["retrieval_context"] = rc
@@ -601,13 +699,14 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
 
         task_code, config_data = create_inspect_task_file(
             dataset_path=str(dataset_file),
-            providers=providers,
+            providers=providers or [],
             config_name=config_name,
             config_dir=str(config_dir),
             description=description,
             judge_config=judge_config,
             prompts=prompts,
             scorers=scorers,
+            score_only=score_only,
         )
 
         # Write both files
@@ -620,7 +719,7 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             "summary": {
                 "dataset": dataset_name,
                 "judge": judge_name,
-                "providers": len(providers),
+                "providers": len(providers or []),
                 "testCases": len(tests),
                 "judges": list(judge_config.judges.keys()),
                 "criteria": [c["name"] for c in criteria],
@@ -630,6 +729,8 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             },
             "nextStep": f"Run evaluation: run_evaluation(configName='{config_name}')",
         }
+        if score_only:
+            result["summary"]["mode"] = "score-only"
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 

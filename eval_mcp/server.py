@@ -266,26 +266,36 @@ async def save_dataset(
     persists it. Prefer `file_path` — the tool reads from disk (cheap).
     Pass `file_content` only if the data isn't on the local filesystem.
 
-    For RAG evaluation, also pass a retrieval_context column. The column
-    value must be a list of strings (the retrieved chunks for that
-    question, ordered by retriever rank — chunk 1 = most relevant). In
-    JSON/JSONL datasets this is a native array; in CSV the cell must be
-    a JSON-encoded list like ``["chunk1", "chunk2"]`` (or chunks joined
-    with `|||`). Any sample missing retrieval_context is still saved
-    but won't be usable with the RAG scorers.
+    Two optional columns unlock specialised modes:
+
+    - ``retrieval_context`` (RAG mode) — a list of retrieved chunks
+      per sample, in retriever rank order (chunk 1 = most relevant).
+      JSON/JSONL datasets carry it as a native array; CSV cells must
+      be a JSON-encoded list like ``["chunk1", "chunk2"]`` (or chunks
+      joined with ``|||``). Required by the faithfulness /
+      contextual_* / hallucination scorers.
+    - ``actual_output`` (score-only mode) — a pre-generated answer
+      per sample. When every sample has actual_output populated,
+      create_eval_config switches into score-only mode automatically:
+      no candidate model is invoked, and scorers grade the static
+      answers against ``golden_answer`` (and the retrieved chunks if
+      ``retrieval_context`` is also present — that's the pure DeepEval
+      workflow).
 
     Args:
         column_mapping: dict mapping canonical names to source column names.
             Required: ``"question"`` and ``"golden_answer"``.
-            Optional: ``"retrieval_context"`` — enables RAG scorers.
+            Optional: ``"retrieval_context"`` (enables RAG scorers) and
+            ``"actual_output"`` (opts into score-only mode). The two
+            are independent and may be combined on the same dataset.
         file_path: Absolute path to the dataset file (recommended).
         file_content: Raw file content as a string (fallback).
         filename: Optional display name (inferred from file_path when omitted).
 
     Returns:
-        JSON with success status, generated dataset name, rows saved,
-        and (when retrieval_context was provided) the count of rows
-        with RAG context populated.
+        JSON with success status, generated dataset name, and rows saved.
+        Includes ``retrieval_context_rows`` when retrieval_context was
+        mapped, and ``actual_output_rows`` when actual_output was mapped.
     """
     args = {
         "file_path": file_path,
@@ -528,8 +538,8 @@ async def generate_judge(
 @mcp.tool(annotations=CREATE_LOCAL)
 async def create_eval_config(
     dataset: DatasetName,
-    providers: ProvidersList,
     judge: JudgeName,
+    providers: list = None,
     user_id: str = None,
     prompts: str | list = "{question}",
     description: str = None,
@@ -550,11 +560,20 @@ async def create_eval_config(
     For agent evaluations: pass agent_path to evaluate a local Python agent
     with full Bedrock call tracing. The agent code is not modified.
 
+    Score-only mode: when the named dataset has actual_output populated
+    on every sample (see save_dataset's actual_output column),
+    create_eval_config automatically switches into score-only mode —
+    no candidate model is invoked, providers becomes optional, and the
+    scorers grade the pre-generated outputs against golden_answer. This
+    is the right mode when you have already run your RAG / agent /
+    chatbot in production and just want to score the captured outputs.
+
     Args:
         dataset: Name of dataset from list_datasets
-        providers: List of target models to evaluate (used for jury judges routing).
-            For agent evals, the agent calls Bedrock directly.
         judge: Name of judge from list_judges (REQUIRED - criteria adapted to QA pairs)
+        providers: List of target models to evaluate (used for jury judges routing).
+            For agent evals, the agent calls Bedrock directly. Optional in
+            score-only mode (the dataset already carries actual_output).
         prompts: Single prompt string OR list of prompts for comparison. Use {question} or {prompt} as placeholder.
         description: Optional description of the evaluation
         judge_models: Optional list of model IDs to use as judges

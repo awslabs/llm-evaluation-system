@@ -95,13 +95,23 @@ def rows_to_test_cases(
     question_col: str,
     answer_col: str,
     retrieval_context_col: Optional[str] = None,
+    actual_output_col: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Convert rows to test case format.
 
     Returns:
-        List of test cases with vars.question, vars.golden_answer, and
-        optionally vars.retrieval_context (list[str], in retriever rank
-        order — order matters for contextual_precision).
+        List of test cases with ``vars.question`` and ``vars.golden_answer``.
+        Optional columns:
+          - ``retrieval_context_col`` (RAG mode) — captured as
+            ``vars.retrieval_context`` (list[str], in retriever rank
+            order — order matters for contextual_precision).
+          - ``actual_output_col`` (score-only mode) — captured as
+            ``vars.actual_output`` — signals ``create_eval_config`` to
+            run in score-only mode (no candidate model invoked; the
+            static answer is scored directly).
+
+    The two columns are independent and can both be set on the same
+    dataset (e.g. score pre-generated RAG outputs end-to-end).
     """
     test_cases = []
     for row in rows:
@@ -118,6 +128,11 @@ def rows_to_test_cases(
             chunks = _coerce_retrieval_context(row.get(retrieval_context_col))
             if chunks:
                 vars_dict["retrieval_context"] = chunks
+        if actual_output_col:
+            ao_raw = row.get(actual_output_col)
+            ao_val = str(ao_raw).strip() if ao_raw is not None else ""
+            if ao_val:
+                vars_dict["actual_output"] = ao_val
         test_cases.append({"vars": vars_dict})
 
     return test_cases
@@ -191,6 +206,7 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
     question_col = column_mapping.get("question")
     answer_col = column_mapping.get("golden_answer")
     retrieval_context_col = column_mapping.get("retrieval_context")
+    actual_output_col = column_mapping.get("actual_output")
 
     if not question_col or not answer_col:
         return [TextContent(
@@ -205,7 +221,11 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
         # Parse content and convert to test case format
         rows = parse_content_to_rows(file_content, filename)
         test_cases = rows_to_test_cases(
-            rows, question_col, answer_col, retrieval_context_col
+            rows,
+            question_col,
+            answer_col,
+            retrieval_context_col=retrieval_context_col,
+            actual_output_col=actual_output_col,
         )
 
         if not test_cases:
@@ -230,7 +250,8 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
         )
 
         rag_rows = sum(1 for tc in test_cases if "retrieval_context" in tc.get("vars", {}))
-        result_payload = {
+        ao_rows = sum(1 for tc in test_cases if "actual_output" in tc.get("vars", {}))
+        result_payload: Dict[str, Any] = {
             "success": True,
             "dataset_id": dataset_id,
             "name": dataset_name,
@@ -238,6 +259,8 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
         }
         if retrieval_context_col:
             result_payload["retrieval_context_rows"] = rag_rows
+        if actual_output_col:
+            result_payload["actual_output_rows"] = ao_rows
         return [TextContent(type="text", text=json.dumps(result_payload))]
 
     except Exception as e:

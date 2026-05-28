@@ -61,7 +61,7 @@ def test_rows_to_test_cases_omits_retrieval_context_when_unmapped() -> None:
 
 def test_rows_to_test_cases_includes_retrieval_context_when_mapped() -> None:
     rows = [{"q": "Q1?", "a": "A1.", "rc": ["chunk one", "chunk two"]}]
-    cases = rows_to_test_cases(rows, "q", "a", "rc")
+    cases = rows_to_test_cases(rows, "q", "a", retrieval_context_col="rc")
     assert cases == [
         {
             "vars": {
@@ -83,7 +83,7 @@ def test_rows_to_test_cases_drops_missing_rc_silently_when_mapped() -> None:
         {"q": "Q2?", "a": "A2.", "rc": ""},
         {"q": "Q3?", "a": "A3."},
     ]
-    cases = rows_to_test_cases(rows, "q", "a", "rc")
+    cases = rows_to_test_cases(rows, "q", "a", retrieval_context_col="rc")
     assert len(cases) == 3
     assert "retrieval_context" in cases[0]["vars"]
     assert "retrieval_context" not in cases[1]["vars"]

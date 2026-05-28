@@ -77,11 +77,11 @@ export const SCORER_INFO: Record<string, ScorerInfo> = {
     description:
       "Fraction of statements across the retrieved chunks that are relevant to the question. High when chunks are tightly scoped; low when they're padded with off-topic boilerplate.",
   },
-  hallucination: {
+  groundedness: {
     label: "Groundedness",
     short: "1 − contradiction",
     description:
-      "1 minus the fraction of answer sentences contradicted by the retrieved context. Higher means more grounded; 1.0 means no sentence is contradicted. Inverted from DeepEval's raw 'hallucination rate' so higher is better.",
+      "1 minus the fraction of answer sentences contradicted by the retrieved context. Higher means more grounded; 1.0 means no sentence is contradicted. Equivalent to (1 − DeepEval's hallucination rate); naming matches Mistral's RAG-eval convention so higher = better, aligned with the viewer's color scale.",
   },
 };
 

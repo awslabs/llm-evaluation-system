@@ -94,8 +94,8 @@ def rows_to_test_cases(
     rows: List[Dict[str, Any]],
     question_col: str,
     answer_col: str,
-    retrieval_context_col: Optional[str] = None,
     actual_output_col: Optional[str] = None,
+    retrieval_context_col: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Convert rows to test case format.
 

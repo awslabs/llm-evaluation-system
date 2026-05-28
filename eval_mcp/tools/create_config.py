@@ -72,9 +72,9 @@ SCORER_REGISTRY: Dict[str, Dict[str, Any]] = {
         "import": "contextual_relevancy",
         "module": "eval_mcp.scorers.rag",
     },
-    "hallucination": {
-        "expr": "hallucination()",
-        "import": "hallucination",
+    "groundedness": {
+        "expr": "groundedness()",
+        "import": "groundedness",
         "module": "eval_mcp.scorers.rag",
     },
 }
@@ -88,7 +88,7 @@ RAG_SCORERS = frozenset({
     "contextual_precision",
     "contextual_recall",
     "contextual_relevancy",
-    "hallucination",
+    "groundedness",
 })
 
 DEFAULT_SCORERS: List[str] = ["jury"]

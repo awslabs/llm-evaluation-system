@@ -13,7 +13,10 @@ The six metrics mirror DeepEval's RAG suite:
 - ``contextual_precision``— precision-at-k of relevant chunks (rewards relevant chunks ranked early).
 - ``contextual_recall``  — fraction of expected-answer sentences backed by some chunk.
 - ``contextual_relevancy``— fraction of chunk-level statements relevant to the question.
-- ``hallucination``      — 1 minus the contradiction rate (higher = more grounded).
+- ``groundedness``       — 1 minus the contradiction rate (higher = more grounded).
+  Named "Groundedness" instead of DeepEval's "Hallucination" because the value
+  is inverted (higher = better) — matches Mistral's RAG-eval naming and the
+  viewer's color scale.
 
 Why one call per metric (vs DeepEval's two-step extract-then-verdict)?
 Modern Bedrock judges have a long-enough output budget to do extraction
@@ -134,14 +137,33 @@ RAG_PROMPT_TEMPLATE = (
 )
 
 
+CONTEXT_PLACEHOLDER = "{context}"
+
+
 @solver
 def rag_prompt_solver():
-    """Wrap the last user message with the retrieved chunks before generation.
+    """Inject retrieved chunks into the candidate model's prompt.
+
+    Two modes:
+
+    - **Default wrap** (no placeholder): the user message is wrapped with
+      :data:`RAG_PROMPT_TEMPLATE` — a generic "Answer using ONLY the
+      provided context" template. Good for ad-hoc evals where the user
+      hasn't tuned a custom prompt.
+    - **User-controlled** (``{context}`` placeholder): when the user's
+      prompt template (via ``prompts=`` on ``create_eval_config``) puts
+      a literal ``{context}`` somewhere in its body, we substitute the
+      formatted chunks there and leave the rest of the prompt intact.
+      Lets users test against the *exact* prompt they ship in production
+      — including chunk position, surrounding instructions, etc.
+
+    Inspect's ``prompt_template`` solver is configured with
+    ``skip_unknown=True``, so ``{context}`` flows through it untouched
+    and arrives at this solver as a literal placeholder.
 
     No-op when ``state.metadata['retrieval_context']`` is absent or empty
     (so the same task file works for samples without RAG context, e.g. a
-    smoke test). When present, the chunks are formatted in retriever
-    rank order and prepended as ``CONTEXT:`` above the original question.
+    smoke test).
     """
     async def solve(state, generate):
         chunks = (state.metadata or {}).get("retrieval_context")
@@ -150,14 +172,17 @@ def rag_prompt_solver():
         formatted = _format_chunks(list(chunks))
         for i in range(len(state.messages) - 1, -1, -1):
             msg = state.messages[i]
-            if getattr(msg, "role", None) == "user":
-                existing = msg.text if hasattr(msg, "text") else str(getattr(msg, "content", ""))
-                state.messages[i] = ChatMessageUser(
-                    content=RAG_PROMPT_TEMPLATE.format(
-                        context=formatted, question=existing
-                    )
+            if getattr(msg, "role", None) != "user":
+                continue
+            existing = msg.text if hasattr(msg, "text") else str(getattr(msg, "content", ""))
+            if CONTEXT_PLACEHOLDER in existing:
+                new_content = existing.replace(CONTEXT_PLACEHOLDER, formatted)
+            else:
+                new_content = RAG_PROMPT_TEMPLATE.format(
+                    context=formatted, question=existing
                 )
-                break
+            state.messages[i] = ChatMessageUser(content=new_content)
+            break
         return state
 
     return solve
@@ -165,7 +190,7 @@ def rag_prompt_solver():
 
 # ---------------------------------------------------------------------------
 # Tool schemas — one per scorer, each named uniquely so the judge can't
-# confuse them across compositions (e.g. when faithfulness + hallucination
+# confuse them across compositions (e.g. when faithfulness + groundedness
 # both run on the same sample, the tool calls don't collide).
 # ---------------------------------------------------------------------------
 
@@ -590,37 +615,40 @@ def contextual_relevancy(judge_model: Optional[str] = None):
 
 
 @scorer(metrics=[mean(), stderr()])
-def hallucination(judge_model: Optional[str] = None):
+def groundedness(judge_model: Optional[str] = None):
     """1 minus the fraction of answer sentences contradicted by chunks.
 
-    Inverted from DeepEval's raw "hallucination rate" so HIGHER = MORE
-    GROUNDED, matching the viewer's color scale (green/high = good,
-    red/low = bad). A score of 1.0 means no sentence in the answer is
-    contradicted by the retrieved context.
+    Reports as "groundedness" (higher = more grounded) rather than
+    DeepEval's "hallucination rate" (higher = worse). The math is
+    identical to ``1 - hallucination_rate`` — see ``contradiction_rate``
+    in score metadata for the raw DeepEval value. The renaming matches
+    Mistral's RAG-eval naming and the viewer's color scale (green/high
+    = good, red/low = bad). A score of 1.0 means no sentence in the
+    answer is contradicted by the retrieved context.
     """
     async def score(state, target):
-        chunks = _require_retrieval_context(state, "hallucination")
+        chunks = _require_retrieval_context(state, "groundedness")
         judge = _resolve_judge(judge_model)
         answer = state.output.completion if state.output else ""
         if not answer.strip():
             return Score(value=0.0, explanation="No answer produced.")
 
         system = (
-            "You are a hallucination detector. Break the model's answer "
-            "into atomic factual sentences. For each sentence, decide "
-            "whether the retrieved context CONTRADICTS it (the answer says "
-            "X, but the context says not-X or implies otherwise):\n"
+            "You are a groundedness judge. Break the model's answer into "
+            "atomic factual sentences. For each sentence, decide whether "
+            "the retrieved context CONTRADICTS it (the answer says X, but "
+            "the context says not-X or implies otherwise):\n"
             "  yes — the context contradicts the sentence (hallucinated)\n"
             "  no  — the context does not contradict (consistent or unaddressed)\n"
-            "Return the list via the submit_hallucination_verdicts tool."
+            "Return the list via the submit_groundedness_verdicts tool."
         )
         user = (
             f"ANSWER:\n{answer}\n\n"
             f"RETRIEVED CONTEXT:\n{_format_chunks(chunks)}"
         )
         tool = _verdict_list_tool(
-            "submit_hallucination_verdicts",
-            "Submit per-sentence hallucination verdicts.",
+            "submit_groundedness_verdicts",
+            "Submit per-sentence contradiction verdicts (used to derive groundedness).",
             ["yes", "no"],
         )
         try:
@@ -631,7 +659,7 @@ def hallucination(judge_model: Optional[str] = None):
         contradiction_rate = _binary_yes_fraction(verdicts)
         value = 1.0 - contradiction_rate
         explanation = (
-            f"hallucination (groundedness) = {value:.2f} "
+            f"groundedness = {value:.2f} "
             f"({sum(1 for v in verdicts if v.get('verdict') == 'no')}/{len(verdicts)} sentences consistent; "
             f"contradiction_rate={contradiction_rate:.2f})\n"
             + _summarise_verdicts(verdicts)

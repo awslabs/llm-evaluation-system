@@ -143,3 +143,90 @@ def test_configure_judge_is_module_global() -> None:
     assert rag_mod._DEFAULT_JUDGE_MODEL == "mockllm/model-A"
     configure_judge("mockllm/model-B")
     assert rag_mod._DEFAULT_JUDGE_MODEL == "mockllm/model-B"
+
+
+# ---------------------------------------------------------------------------
+# rag_prompt_solver behaviour — covers default wrap + {context} placeholder
+# ---------------------------------------------------------------------------
+
+
+class _StubMsg:
+    """Minimal stand-in for ChatMessageUser so we can drive solve() in tests."""
+
+    def __init__(self, content: str) -> None:
+        self.role = "user"
+        self.text = content
+        self.content = content
+
+
+class _StubState:
+    def __init__(self, message_text: str, metadata: dict) -> None:
+        self.metadata = metadata
+        self.messages = [_StubMsg(message_text)]
+
+
+async def _noop_generate(state):  # pragma: no cover - never called by solver
+    return state
+
+
+def _run_solver(state):
+    """Sync helper to drive the async rag_prompt_solver in-process."""
+    import asyncio
+
+    from eval_mcp.scorers.rag import rag_prompt_solver
+
+    solver = rag_prompt_solver()
+    return asyncio.run(solver(state, _noop_generate))
+
+
+def test_rag_solver_wraps_when_no_context_placeholder() -> None:
+    state = _StubState(
+        "What is the capital of France?",
+        {"retrieval_context": ["Paris is the capital of France."]},
+    )
+    out = _run_solver(state)
+    content = out.messages[0].content
+    # Default wrap: our template framed around the user's bare question
+    assert "Answer the following question using ONLY" in content
+    assert "[chunk 1] Paris is the capital of France." in content
+    assert "QUESTION: What is the capital of France?" in content
+
+
+def test_rag_solver_substitutes_context_placeholder() -> None:
+    # User-tuned prompt with {context} placeholder — solver should NOT
+    # apply the default wrap, only substitute the chunks in place.
+    template = (
+        "You are a careful assistant. Use ONLY these passages:\n"
+        "{context}\n"
+        "Think step by step, then answer: What is the capital of France?"
+    )
+    state = _StubState(template, {"retrieval_context": ["Paris is the capital."]})
+    out = _run_solver(state)
+    content = out.messages[0].content
+    # The wrap header is NOT present
+    assert "Answer the following question using ONLY" not in content
+    # Chunks landed where the placeholder was
+    assert "[chunk 1] Paris is the capital." in content
+    # User-controlled instructions are preserved verbatim
+    assert "You are a careful assistant" in content
+    assert "Think step by step" in content
+    # No leftover placeholder
+    assert "{context}" not in content
+
+
+def test_rag_solver_noop_without_retrieval_context() -> None:
+    state = _StubState("Bare question.", {})
+    out = _run_solver(state)
+    # State pass-through, message unchanged
+    assert out.messages[0].content == "Bare question."
+
+
+def test_rag_solver_handles_multiple_context_placeholders() -> None:
+    # Edge case: template references {context} twice (e.g. for emphasis).
+    # Both occurrences should get substituted, not just the first.
+    template = "Context: {context}\n---\nReference again: {context}\nAnswer:"
+    state = _StubState(template, {"retrieval_context": ["chunk-A"]})
+    out = _run_solver(state)
+    content = out.messages[0].content
+    assert content.count("[chunk 1] chunk-A") == 2
+    assert "{context}" not in content

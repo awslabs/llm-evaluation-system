@@ -273,7 +273,7 @@ async def save_dataset(
       JSON/JSONL datasets carry it as a native array; CSV cells must
       be a JSON-encoded list like ``["chunk1", "chunk2"]`` (or chunks
       joined with ``|||``). Required by the faithfulness /
-      contextual_* / hallucination scorers.
+      contextual_* / groundedness scorers.
     - ``actual_output`` (score-only mode) — a pre-generated answer
       per sample. When every sample has actual_output populated,
       create_eval_config switches into score-only mode automatically:
@@ -574,7 +574,14 @@ async def create_eval_config(
         providers: List of target models to evaluate (used for jury judges routing).
             For agent evals, the agent calls Bedrock directly. Optional in
             score-only mode (the dataset already carries actual_output).
-        prompts: Single prompt string OR list of prompts for comparison. Use {question} or {prompt} as placeholder.
+        prompts: Single prompt string OR list of prompts for comparison.
+            Use {question} or {prompt} as the placeholder for the
+            sample's input. For RAG evals you may ALSO include
+            {context} — the retrieved chunks will be substituted there
+            so you keep full control of where they land in your
+            production prompt. If {context} is absent in a RAG eval,
+            the chunks are wrapped around your prompt with a generic
+            "Answer using ONLY the provided context" template.
         description: Optional description of the evaluation
         judge_models: Optional list of model IDs to use as judges
         agent_path: Path to a Python agent file to evaluate. The agent must have a callable entry function.
@@ -590,13 +597,13 @@ async def create_eval_config(
             - "contextual_precision": precision-at-k of retrieved chunks vs golden answer (RAG)
             - "contextual_recall": fraction of golden-answer sentences backed by retrieved chunks (RAG)
             - "contextual_relevancy": fraction of chunk statements relevant to the question (RAG)
-            - "hallucination": 1 minus contradiction rate (higher = more grounded) (RAG)
+            - "groundedness": 1 minus contradiction rate (higher = more grounded) (RAG)
             Compose by passing several names, e.g. ["jury", "f1"] runs both
             and stores both scores in the eval log. Pure deterministic runs
             (no "jury") skip judge LLM calls entirely — fast and free.
 
             RAG scorers (faithfulness, answer_relevancy, contextual_*,
-            hallucination) REQUIRE a retrieval_context column on every
+            groundedness) REQUIRE a retrieval_context column on every
             sample. Save the dataset with retrieval_context first, then
             pass e.g. scorers=["faithfulness", "answer_relevancy",
             "contextual_precision", "contextual_recall"]. Each RAG
@@ -662,7 +669,7 @@ async def create_agent_eval_config(
             "jury", "f1", "exact", "includes", "match", plus the RAG
             family — "faithfulness", "answer_relevancy",
             "contextual_precision", "contextual_recall",
-            "contextual_relevancy", "hallucination". RAG scorers require
+            "contextual_relevancy", "groundedness". RAG scorers require
             a retrieval_context column on every sample. Compose for both
             deterministic and rubric signal on the same agent run.
             See create_eval_config for full details.

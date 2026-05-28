@@ -1,0 +1,186 @@
+[
+  {
+    "id": "perfect_grounded",
+    "description": "Answer fully grounded in single relevant chunk. All metrics should be high.",
+    "question": "What is the capital of France?",
+    "golden_answer": "The capital of France is Paris.",
+    "actual_output": "The capital of France is Paris.",
+    "retrieval_context": [
+      "Paris is the capital and largest city of France. It is located on the Seine river in the north of the country."
+    ],
+    "expected_direction": {
+      "faithfulness": "high",
+      "answer_relevancy": "high",
+      "contextual_precision": "high",
+      "contextual_recall": "high",
+      "contextual_relevancy": "high",
+      "groundedness": "high"
+    }
+  },
+  {
+    "id": "hallucinated_contradiction",
+    "description": "Answer contradicts the retrieved context. Faithfulness + groundedness should be low; retrieval metrics still high.",
+    "question": "What is the capital of France?",
+    "golden_answer": "The capital of France is Paris.",
+    "actual_output": "The capital of France is London. Paris is just a tourist city.",
+    "retrieval_context": [
+      "Paris is the capital and largest city of France. It is located on the Seine river in the north of the country."
+    ],
+    "expected_direction": {
+      "faithfulness": "low",
+      "answer_relevancy": "high",
+      "contextual_precision": "high",
+      "contextual_recall": "high",
+      "contextual_relevancy": "high",
+      "groundedness": "low"
+    }
+  },
+  {
+    "id": "irrelevant_chunks_first",
+    "description": "Useful chunk exists but is ranked LAST. contextual_precision should drop sharply; recall stays high.",
+    "question": "What is the boiling point of water at sea level?",
+    "golden_answer": "Water boils at 100 degrees Celsius (212 Fahrenheit) at standard atmospheric pressure.",
+    "actual_output": "Water boils at 100 degrees Celsius at sea level.",
+    "retrieval_context": [
+      "The history of cooking dates back thousands of years and includes diverse traditions across cultures.",
+      "Many liquids change phase under different temperature conditions, depending on pressure and purity.",
+      "At standard atmospheric pressure (1 atm), pure water boils at 100 degrees Celsius (212 degrees Fahrenheit)."
+    ],
+    "expected_direction": {
+      "faithfulness": "high",
+      "answer_relevancy": "high",
+      "contextual_precision": "low",
+      "contextual_recall": "high",
+      "contextual_relevancy": "low",
+      "groundedness": "high"
+    }
+  },
+  {
+    "id": "missing_chunk_for_golden",
+    "description": "Retrieved chunks cover the question superficially but miss the specific fact the golden answer relies on. Recall should be low.",
+    "question": "Who painted the Mona Lisa and in what year was it completed?",
+    "golden_answer": "Leonardo da Vinci painted the Mona Lisa, completing it around 1519.",
+    "actual_output": "Leonardo da Vinci painted the Mona Lisa.",
+    "retrieval_context": [
+      "Leonardo da Vinci was an Italian Renaissance polymath known for his contributions to art, science, and engineering.",
+      "The Mona Lisa is a famous portrait painting attributed to Leonardo da Vinci."
+    ],
+    "expected_direction": {
+      "faithfulness": "high",
+      "answer_relevancy": "high",
+      "contextual_precision": "high",
+      "contextual_recall": "low",
+      "contextual_relevancy": "high",
+      "groundedness": "high"
+    }
+  },
+  {
+    "id": "off_topic_answer",
+    "description": "Chunks are relevant but the answer goes off-topic. answer_relevancy should be low.",
+    "question": "What is photosynthesis?",
+    "golden_answer": "Photosynthesis is the process by which plants convert sunlight, water, and CO2 into glucose and oxygen.",
+    "actual_output": "Plants are very interesting. They come in many shapes and colors. My favorite is the rose. Roses have thorns and bloom in spring. Many people grow them in gardens.",
+    "retrieval_context": [
+      "Photosynthesis is the process used by plants to convert light energy into chemical energy. It produces glucose from carbon dioxide and water, releasing oxygen as a byproduct."
+    ],
+    "expected_direction": {
+      "faithfulness": "low",
+      "answer_relevancy": "low",
+      "contextual_precision": "high",
+      "contextual_recall": "low",
+      "contextual_relevancy": "high",
+      "groundedness": "high"
+    }
+  },
+  {
+    "id": "noisy_chunks",
+    "description": "Chunks contain the right answer buried in mostly irrelevant text. contextual_relevancy should be low; other metrics depend on answer quality.",
+    "question": "How many planets are in the solar system?",
+    "golden_answer": "There are eight planets in the solar system.",
+    "actual_output": "There are eight planets in the solar system.",
+    "retrieval_context": [
+      "Astronomy is a fascinating field studied for thousands of years across many cultures. Ancient Greeks, Babylonians, Mayans, and Chinese all developed sophisticated astronomical observations. The solar system contains eight planets following the 2006 IAU reclassification of Pluto. Telescopes have evolved significantly since Galileo first observed Jupiter's moons in 1610. Modern observatories use adaptive optics and space-based platforms."
+    ],
+    "expected_direction": {
+      "faithfulness": "high",
+      "answer_relevancy": "high",
+      "contextual_precision": "high",
+      "contextual_recall": "high",
+      "contextual_relevancy": "low",
+      "groundedness": "high"
+    }
+  },
+  {
+    "id": "partial_answer",
+    "description": "Answer is correct but only covers half the facts in the golden. Recall on the answer's claims should be ok; recall of golden facts from chunks may vary.",
+    "question": "Name two main characteristics of mammals.",
+    "golden_answer": "Mammals have hair or fur and produce milk to feed their young. They are also warm-blooded vertebrates that give birth to live young (with rare exceptions).",
+    "actual_output": "Mammals have fur or hair.",
+    "retrieval_context": [
+      "Mammals are a class of warm-blooded vertebrates that are characterized by the presence of hair or fur, mammary glands that produce milk for their young, and (with few exceptions like monotremes) the birth of live offspring."
+    ],
+    "expected_direction": {
+      "faithfulness": "high",
+      "answer_relevancy": "high",
+      "contextual_precision": "high",
+      "contextual_recall": "high",
+      "contextual_relevancy": "high",
+      "groundedness": "high"
+    }
+  },
+  {
+    "id": "correct_plus_unsupported",
+    "description": "Answer has some grounded claims plus extra fabricated ones. Faithfulness should be middling; groundedness too if the extras contradict.",
+    "question": "What language is spoken in Brazil?",
+    "golden_answer": "Portuguese is the official language of Brazil.",
+    "actual_output": "Portuguese is the official language of Brazil. It is also the only language spoken in all of South America and was introduced by the Vikings in the 800s.",
+    "retrieval_context": [
+      "Brazil is the only country in the Americas where Portuguese is the official language, a legacy of Portuguese colonization beginning in 1500."
+    ],
+    "expected_direction": {
+      "faithfulness": "low",
+      "answer_relevancy": "high",
+      "contextual_precision": "high",
+      "contextual_recall": "high",
+      "contextual_relevancy": "high",
+      "groundedness": "low"
+    }
+  },
+  {
+    "id": "empty_answer",
+    "description": "Empty answer. All metrics should be 0 — degenerate edge case.",
+    "question": "What is gravity?",
+    "golden_answer": "Gravity is the force by which a planet or other body draws objects toward its center.",
+    "actual_output": "",
+    "retrieval_context": [
+      "Gravity is a fundamental force of nature by which all things with mass are brought toward one another."
+    ],
+    "expected_direction": {
+      "faithfulness": "low",
+      "answer_relevancy": "low",
+      "contextual_precision": "high",
+      "contextual_recall": "low",
+      "contextual_relevancy": "high",
+      "groundedness": "low"
+    }
+  },
+  {
+    "id": "multi_chunk_grounded",
+    "description": "Answer synthesises facts from MULTIPLE chunks. All metrics should be high; tests chunk-aggregation logic.",
+    "question": "What is the largest planet in the solar system and what is it made of?",
+    "golden_answer": "Jupiter is the largest planet in the solar system. It is a gas giant composed primarily of hydrogen and helium.",
+    "actual_output": "Jupiter is the largest planet in the solar system. It is a gas giant composed mostly of hydrogen and helium.",
+    "retrieval_context": [
+      "Jupiter is the fifth planet from the Sun and the largest in the Solar System. It has a diameter about 11 times that of Earth.",
+      "Gas giants like Jupiter and Saturn are composed primarily of hydrogen and helium, with traces of other elements and compounds in their atmospheres."
+    ],
+    "expected_direction": {
+      "faithfulness": "high",
+      "answer_relevancy": "high",
+      "contextual_precision": "high",
+      "contextual_recall": "high",
+      "contextual_relevancy": "high",
+      "groundedness": "high"
+    }
+  }
+]

@@ -142,3 +142,75 @@ def test_prompt_template_carries_scorer_expr(jc: JudgeConfig) -> None:
     assert "def eval_1" in code
     assert "def eval_2" in code
     ast.parse(code)
+
+
+# ----- score-only mode -----
+
+
+def _render_score_only(jc: JudgeConfig, scorers=None, prompts=None) -> tuple[str, dict]:
+    return create_inspect_task_file(
+        dataset_path="/tmp/ds.json",
+        providers=[],
+        config_name="t",
+        config_dir="/tmp",
+        judge_config=jc,
+        scorers=scorers,
+        prompts=prompts,
+        score_only=True,
+    )
+
+
+def test_score_only_emits_static_solver(jc: JudgeConfig) -> None:
+    code, cfg = _render_score_only(jc, scorers=["f1"])
+    # Imports the solver from our module
+    assert (
+        "from eval_mcp.solvers.static_output import static_output_solver"
+        in code
+    )
+    # Solver chain uses the static solver instead of generate()
+    assert "solver=[static_output_solver()]" in code
+    # No `generate()` call in the solver chain (the chain itself —
+    # `generate` is still imported via the base template, used as a
+    # fallback inside the solver factory itself).
+    assert "solver=[generate()]" not in code
+    # FieldSpec carries actual_output as metadata
+    assert 'metadata=["actual_output"]' in code
+    # Config has the score_only flag set
+    assert cfg["score_only"] is True
+    ast.parse(code)
+
+
+def test_score_only_with_jury(jc: JudgeConfig) -> None:
+    code, _ = _render_score_only(jc, scorers=["jury"])
+    # Jury scorer block still emitted — jury grades the pre-generated answer
+    assert "def jury_scorer" in code
+    assert "scorer=jury_scorer()" in code
+    # Static solver still wired in
+    assert "solver=[static_output_solver()]" in code
+    ast.parse(code)
+
+
+def test_score_only_doc_mentions_mode(jc: JudgeConfig) -> None:
+    code, _ = _render_score_only(jc, scorers=["f1"])
+    assert "score-only" in code.lower()
+
+
+def test_score_only_with_prompts(jc: JudgeConfig) -> None:
+    code, _ = _render_score_only(
+        jc, scorers=["f1"], prompts=["Prompt A: {question}", "Prompt B: {question}"]
+    )
+    # Both @task defs use the static solver
+    assert code.count("static_output_solver()") == 2
+    assert code.count('metadata=["actual_output"]') == 2
+    assert "solver=[generate()" not in code
+    ast.parse(code)
+
+
+def test_non_score_only_unchanged(jc: JudgeConfig) -> None:
+    # Sanity: backward-compat path. Default mode emits generate(), no
+    # static solver, no metadata field, no score_only flag.
+    code, cfg = _render(jc, scorers=["f1"])
+    assert "solver=[generate()]" in code
+    assert "static_output_solver" not in code
+    assert 'metadata=["actual_output"]' not in code
+    assert "score_only" not in cfg

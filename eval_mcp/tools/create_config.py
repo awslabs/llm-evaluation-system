@@ -124,8 +124,14 @@ def build_config_json(
     description: Optional[str] = None,
     prompts: Optional[List[str]] = None,
     scorers: Optional[List[str]] = None,
+    score_only: bool = False,
 ) -> dict:
-    """Build the JSON config that the task file will load."""
+    """Build the JSON config that the task file will load.
+
+    ``score_only`` flips the config into "score pre-generated outputs"
+    mode: ``providers`` is allowed to be empty (no candidate model is
+    invoked), and ``run_eval.py`` skips the ``--model`` subprocess flag.
+    """
     config = {
         "dataset_path": dataset_path,
         "providers": providers,
@@ -137,6 +143,8 @@ def build_config_json(
     }
     if prompts and len(prompts) > 1:
         config["prompts"] = prompts
+    if score_only:
+        config["score_only"] = True
     return config
 
 
@@ -150,7 +158,7 @@ def build_config_json(
 
 TASK_FILE_BASE = '''"""Inspect AI evaluation task: {config_name}
 
-Auto-generated. Scorers: {scorers_doc}
+Auto-generated. Scorers: {scorers_doc}{mode_doc}
 """
 
 import json
@@ -164,7 +172,7 @@ _config_path = Path(__file__).with_suffix(".json")
 CONFIG = json.loads(_config_path.read_text())
 
 DATASET_PATH = CONFIG["dataset_path"]
-PROVIDERS = CONFIG["providers"]
+PROVIDERS = CONFIG.get("providers", [])
 '''
 
 
@@ -336,8 +344,8 @@ SINGLE_TASK_TEMPLATE = '''
 @task
 def eval_task():
     return Task(
-        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
-        solver=[generate()],
+        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer"{field_spec_metadata})),
+        solver=[{solver_chain}],
         scorer={scorer_expr},
     )
 '''
@@ -346,8 +354,8 @@ PROMPT_TASK_TEMPLATE = '''
 @task
 def eval_{index}():
     return Task(
-        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer")),
-        solver=[prompt_template({prompt_repr}), generate()],
+        dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer"{field_spec_metadata})),
+        solver=[prompt_template({prompt_repr}), {solver_chain}],
         scorer={scorer_expr},
     )
 '''
@@ -362,25 +370,48 @@ def create_inspect_task_file(
     description: Optional[str] = None,
     prompts: Optional[List[str]] = None,
     scorers: Optional[List[str]] = None,
+    score_only: bool = False,
 ) -> tuple[str, dict]:
     """Create task file code and config JSON.
+
+    When ``score_only`` is True the task file imports
+    ``static_output_solver`` and runs it instead of ``generate()``;
+    each sample's ``actual_output`` metadata field is written directly
+    into ``state.output`` so scorers run against the pre-generated answer.
 
     Returns:
         (task_code, config_dict) — caller writes both to disk.
     """
     scorers = _validate_scorers(scorers)
     config_data = build_config_json(
-        dataset_path, providers, judge_config, description, prompts, scorers
+        dataset_path, providers, judge_config, description, prompts, scorers,
+        score_only=score_only,
     )
 
-    extra_imports = _render_builtin_scorer_imports(scorers)
+    extra_imports_parts: List[str] = []
+    builtin = _render_builtin_scorer_imports(scorers)
+    if builtin:
+        extra_imports_parts.append(builtin)
+    if score_only:
+        extra_imports_parts.append(
+            "from eval_mcp.solvers.static_output import static_output_solver"
+        )
+    extra_imports = "\n".join(extra_imports_parts)
     scorer_expr = _render_scorer_expression(scorers)
+
+    # Solver chain + FieldSpec metadata both swap when score-only is on.
+    # Score-only skips the model call entirely; the static solver lifts
+    # actual_output from sample.metadata and sets state.output.
+    field_spec_metadata = ', metadata=["actual_output"]' if score_only else ""
+    solver_chain = "static_output_solver()" if score_only else "generate()"
+    mode_doc = "\nMode: score-only (no candidate model invoked)." if score_only else ""
 
     parts: List[str] = []
     parts.append(TASK_FILE_BASE.format(
         config_name=config_name,
         scorers_doc=", ".join(scorers),
         extra_imports=(extra_imports + "\n") if extra_imports else "",
+        mode_doc=mode_doc,
     ))
     if "jury" in scorers:
         parts.append(JURY_SCORER_BLOCK)
@@ -397,10 +428,18 @@ def create_inspect_task_file(
             # prompt_template() uses {prompt} as the placeholder for input text
             normalized = prompt.replace("{question}", "{prompt}")
             parts.append(PROMPT_TASK_TEMPLATE.format(
-                index=i + 1, prompt_repr=repr(normalized), scorer_expr=scorer_expr
+                index=i + 1,
+                prompt_repr=repr(normalized),
+                scorer_expr=scorer_expr,
+                field_spec_metadata=field_spec_metadata,
+                solver_chain=solver_chain,
             ))
     else:
-        parts.append(SINGLE_TASK_TEMPLATE.format(scorer_expr=scorer_expr))
+        parts.append(SINGLE_TASK_TEMPLATE.format(
+            scorer_expr=scorer_expr,
+            field_spec_metadata=field_spec_metadata,
+            solver_chain=solver_chain,
+        ))
 
     return "".join(parts), config_data
 
@@ -425,8 +464,9 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": "dataset is required"}))]
         if not judge_name:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": "judge is required"}))]
-        if not providers:
-            return [TextContent(type="text", text=json.dumps({"success": False, "error": "At least one provider is required"}))]
+        # ``providers`` validity is checked AFTER we know whether this is a
+        # score-only dataset — in score-only mode no candidate model is
+        # invoked and providers can be empty.
 
         try:
             scorers = _validate_scorers(scorers_arg)
@@ -459,13 +499,56 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
         temp_dir.mkdir(parents=True, exist_ok=True)
         dataset_file = temp_dir / f"{dataset_name}.json"
 
+        # Detect score-only mode from the dataset itself: if EVERY sample
+        # carries an actual_output, we score the pre-generated answers
+        # without invoking a candidate model. Mixed datasets (some with,
+        # some without) are refused — the contract is all-or-none so the
+        # subprocess invocation can deterministically skip --model.
+        rows_with_ao = 0
+        rows_without_ao_indices: List[int] = []
+        for i, test in enumerate(tests):
+            v = test.get("vars", test)
+            ao = v.get("actual_output")
+            if isinstance(ao, str) and ao.strip():
+                rows_with_ao += 1
+            else:
+                rows_without_ao_indices.append(i)
+
+        score_only = rows_with_ao > 0 and not rows_without_ao_indices
+        if rows_with_ao > 0 and rows_without_ao_indices:
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": (
+                    f"Dataset '{dataset_name}' has {rows_with_ao}/{len(tests)} samples "
+                    f"with actual_output. Score-only mode requires every sample to have "
+                    f"actual_output (or none — in which case the candidate model is "
+                    f"invoked). Mixed datasets are not supported. Missing rows: "
+                    f"{rows_without_ao_indices[:5]}"
+                    + (" ..." if len(rows_without_ao_indices) > 5 else "")
+                ),
+            }))]
+
+        if not score_only and not providers:
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": (
+                    "At least one provider is required when the dataset has no "
+                    "actual_output column. To score pre-generated answers without "
+                    "calling a candidate model, re-upload the dataset via "
+                    "save_dataset with an actual_output column mapping."
+                ),
+            }))]
+
         inspect_samples = []
         for test in tests:
             v = test.get("vars", test)
-            inspect_samples.append({
+            sample: Dict[str, Any] = {
                 "question": v.get("question", ""),
                 "golden_answer": v.get("golden_answer", ""),
-            })
+            }
+            if score_only:
+                sample["actual_output"] = v.get("actual_output", "")
+            inspect_samples.append(sample)
 
         with open(dataset_file, "w") as f:
             json.dump(inspect_samples, f, indent=2)
@@ -484,13 +567,14 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
 
         task_code, config_data = create_inspect_task_file(
             dataset_path=str(dataset_file),
-            providers=providers,
+            providers=providers or [],
             config_name=config_name,
             config_dir=str(config_dir),
             description=description,
             judge_config=judge_config,
             prompts=prompts,
             scorers=scorers,
+            score_only=score_only,
         )
 
         # Write both files
@@ -503,7 +587,7 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             "summary": {
                 "dataset": dataset_name,
                 "judge": judge_name,
-                "providers": len(providers),
+                "providers": len(providers or []),
                 "testCases": len(tests),
                 "judges": list(judge_config.judges.keys()),
                 "criteria": [c["name"] for c in criteria],
@@ -513,6 +597,8 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             },
             "nextStep": f"Run evaluation: run_evaluation(configName='{config_name}')",
         }
+        if score_only:
+            result["summary"]["mode"] = "score-only"
 
         return [TextContent(type="text", text=json.dumps(result, indent=2))]
 

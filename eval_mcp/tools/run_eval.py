@@ -366,9 +366,11 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         # Extract model providers from the JSON config file
         models = []
         config_data = None
+        score_only = False
         config_json_path = user_dir / "configs" / f"{config_name}.json"
         if config_json_path.exists():
             config_data = json.loads(config_json_path.read_text())
+            score_only = bool(config_data.get("score_only"))
             # Agent evals use single "model" field; standard evals use "providers" list
             if config_data.get("model"):
                 models = [config_data["model"]]
@@ -441,8 +443,10 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             "--log-shared", "10",
         ]
 
-        # Pass models to inspect eval (comma-separated for multiple)
-        if models:
+        # Pass models to inspect eval (comma-separated for multiple).
+        # Score-only configs invoke no model — Inspect AI supports running
+        # without --model when the task's solver never calls generate().
+        if models and not score_only:
             cmd.extend(["--model", ",".join(models)])
 
         # Run the evaluation from the user's directory

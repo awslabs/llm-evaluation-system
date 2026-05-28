@@ -4,7 +4,7 @@ import csv
 import io
 import json
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from mcp.types import TextContent
 from eval_mcp.core.user_storage import save_dataset_to_db
@@ -52,24 +52,34 @@ def rows_to_test_cases(
     rows: List[Dict[str, Any]],
     question_col: str,
     answer_col: str,
+    actual_output_col: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Convert rows to test case format.
 
     Returns:
-        List of test cases with vars.question and vars.golden_answer
+        List of test cases with ``vars.question`` and ``vars.golden_answer``.
+        When ``actual_output_col`` is provided, the corresponding column
+        is also captured as ``vars.actual_output`` — that signals
+        ``create_eval_config`` to run in score-only mode (no candidate
+        model invoked; the static answer is scored directly).
     """
     test_cases = []
     for row in rows:
         q_val = str(row.get(question_col, "")).strip()
         a_val = str(row.get(answer_col, "")).strip()
 
-        if q_val and a_val:
-            test_cases.append({
-                "vars": {
-                    "question": q_val,
-                    "golden_answer": a_val,
-                }
-            })
+        if not (q_val and a_val):
+            continue
+        vars_dict: Dict[str, Any] = {
+            "question": q_val,
+            "golden_answer": a_val,
+        }
+        if actual_output_col:
+            ao_raw = row.get(actual_output_col)
+            ao_val = str(ao_raw).strip() if ao_raw is not None else ""
+            if ao_val:
+                vars_dict["actual_output"] = ao_val
+        test_cases.append({"vars": vars_dict})
 
     return test_cases
 
@@ -141,6 +151,7 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
 
     question_col = column_mapping.get("question")
     answer_col = column_mapping.get("golden_answer")
+    actual_output_col = column_mapping.get("actual_output")
 
     if not question_col or not answer_col:
         return [TextContent(
@@ -154,7 +165,9 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
     try:
         # Parse content and convert to test case format
         rows = parse_content_to_rows(file_content, filename)
-        test_cases = rows_to_test_cases(rows, question_col, answer_col)
+        test_cases = rows_to_test_cases(
+            rows, question_col, answer_col, actual_output_col
+        )
 
         if not test_cases:
             return [TextContent(
@@ -177,15 +190,16 @@ async def handle_save_dataset(args: Dict[str, Any]) -> List[TextContent]:
             source={"kind": "imported", "origin": filename},
         )
 
-        return [TextContent(
-            type="text",
-            text=json.dumps({
-                "success": True,
-                "dataset_id": dataset_id,
-                "name": dataset_name,
-                "rows_saved": len(test_cases),
-            }),
-        )]
+        ao_rows = sum(1 for tc in test_cases if "actual_output" in tc.get("vars", {}))
+        result_payload: Dict[str, Any] = {
+            "success": True,
+            "dataset_id": dataset_id,
+            "name": dataset_name,
+            "rows_saved": len(test_cases),
+        }
+        if actual_output_col:
+            result_payload["actual_output_rows"] = ao_rows
+        return [TextContent(type="text", text=json.dumps(result_payload))]
 
     except Exception as e:
         return [TextContent(

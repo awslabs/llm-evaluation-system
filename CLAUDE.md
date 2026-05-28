@@ -127,5 +127,5 @@ Claude Code and other agentic tools auto-summarize prior conversation turns when
 
 These [marketplace skills](https://code.claude.com/docs/en/skills) from the official Anthropic marketplace pair well with this repo's workflows. They're user-installed (not bundled here), so the recommendation only fires for sessions where the user has them available — but if you do, lean on them rather than reinventing the wheel.
 
-- **`webapp-testing`** — after any UI or routing change to the Next.js frontend (web app on `:3000`) or the bundled viewer (`eval-mcp view` on `:4001`). Spins up Playwright and actually clicks through pages, rather than trusting that type-checks caught nav regressions.
+- **`webapp-testing`** — after any change the viewer renders, including: UI/routing edits under `frontend/` (web app on `:3000` or the bundled viewer on `:4001`), and backend edits that change the JSON shape the viewer consumes (e.g. `eval_mcp/core/eval_results.py`, `eval_mcp/viewer.py`, `list_evaluations`). Spins up Playwright and actually clicks through pages. A label or column-header change in a Python file is still a UI change — verify it in the browser, don't just inspect the JSON.
 - **`frontend-design`** — when adding or restyling components in `frontend/`. Same source builds both the web app and the static viewer export, so component quality lands in both deliverables.

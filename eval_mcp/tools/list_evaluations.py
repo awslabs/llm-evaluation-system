@@ -80,7 +80,15 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
                 run_id = log.eval.run_id
                 model_id = log.eval.model
                 detail = _detail_for(run_id)
-                aggregate = (detail or {}).get("aggregate", {}).get(model_id) or {}
+                # Score-only runs log model="none/none"; the detail builder
+                # relabels to "pre-generated" — surface the same label here
+                # so the list view doesn't say one thing and the detail view
+                # another.
+                if detail and detail.get("scoreOnly") and model_id == "none/none":
+                    display_model = (detail.get("models") or [model_id])[0]
+                else:
+                    display_model = model_id
+                aggregate = (detail or {}).get("aggregate", {}).get(display_model) or {}
 
                 score_summary: Dict[str, Any] = {"scorer": "jury_scorer", "metrics": {}}
                 if "overall" in aggregate:
@@ -99,7 +107,7 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
                     "id": run_id,
                     "createdAt": str(log.eval.created),
                     "task": log.eval.task,
-                    "model": model_id,
+                    "model": display_model,
                     "totalSamples": log.eval.dataset.samples if log.eval.dataset else 0,
                     "score": score_summary,
                     "status": log.status,

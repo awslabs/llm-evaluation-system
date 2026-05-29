@@ -72,11 +72,6 @@ SCORER_REGISTRY: Dict[str, Dict[str, Any]] = {
         "import": "contextual_relevancy",
         "module": "eval_mcp.scorers.rag",
     },
-    "groundedness": {
-        "expr": "groundedness()",
-        "import": "groundedness",
-        "module": "eval_mcp.scorers.rag",
-    },
 }
 
 # Names that require ``retrieval_context`` on every sample. Used to
@@ -88,7 +83,6 @@ RAG_SCORERS = frozenset({
     "contextual_precision",
     "contextual_recall",
     "contextual_relevancy",
-    "groundedness",
 })
 
 DEFAULT_SCORERS: List[str] = ["jury"]

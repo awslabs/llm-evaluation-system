@@ -127,7 +127,6 @@ async def _run_eval_mcp(sample: dict, judge_model: str) -> dict[str, float]:
         contextual_recall,
         contextual_relevancy,
         faithfulness,
-        groundedness,
     )
 
     configure_judge(judge_model)
@@ -144,7 +143,6 @@ async def _run_eval_mcp(sample: dict, judge_model: str) -> dict[str, float]:
         "contextual_precision": contextual_precision(),
         "contextual_recall": contextual_recall(),
         "contextual_relevancy": contextual_relevancy(),
-        "groundedness": groundedness(),
     }
 
     out: dict[str, float] = {}
@@ -174,7 +172,6 @@ def _run_deepeval(sample: dict, judge_model: str) -> dict[str, float]:
         ContextualRecallMetric,
         ContextualRelevancyMetric,
         FaithfulnessMetric,
-        HallucinationMetric,
     )
     from deepeval.models import AmazonBedrockModel
 
@@ -193,7 +190,6 @@ def _run_deepeval(sample: dict, judge_model: str) -> dict[str, float]:
         actual_output=sample["actual_output"],
         expected_output=sample["golden_answer"],
         retrieval_context=sample["retrieval_context"],
-        context=sample["retrieval_context"],  # hallucination uses this in DeepEval
     )
 
     metrics = {
@@ -202,17 +198,13 @@ def _run_deepeval(sample: dict, judge_model: str) -> dict[str, float]:
         "contextual_precision": ContextualPrecisionMetric(model=model, include_reason=False),
         "contextual_recall": ContextualRecallMetric(model=model, include_reason=False),
         "contextual_relevancy": ContextualRelevancyMetric(model=model, include_reason=False),
-        # DeepEval reports raw hallucination_rate (higher = worse). Invert so
-        # the parity comparison aligns with our "groundedness" direction.
-        "groundedness": HallucinationMetric(model=model, include_reason=False),
     }
 
     out: dict[str, float] = {}
     for name, metric in metrics.items():
         try:
             metric.measure(tc)
-            raw = float(metric.score)
-            out[name] = (1.0 - raw) if name == "groundedness" else raw
+            out[name] = float(metric.score)
         except Exception as e:  # pragma: no cover — diagnostic only
             print(f"  [deepeval] {name} failed: {e}", file=sys.stderr)
             out[name] = 0.0
@@ -230,7 +222,6 @@ METRICS = [
     "contextual_precision",
     "contextual_recall",
     "contextual_relevancy",
-    "groundedness",
 ]
 
 

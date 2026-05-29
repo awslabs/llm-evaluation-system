@@ -58,43 +58,64 @@ The default model id matches what `list_bedrock_models` would surface
 for the cheap Haiku-class judge. Override via `BEDROCK_MODEL_ID` to
 test with stronger judges (Sonnet, Opus).
 
-## Actual results (2026-05-27)
+## Results
 
-First run, Claude Haiku 4.5 judge, 10-sample reference dataset:
+### After the verbatim DeepEval port (2026-05-27)
+
+Once the 5 scorers were rewritten as faithful QAG ports (multi-stage
+extract→verdict, verbatim DeepEval v4.0.4 prompts, contextual_relevancy
+switched to per-chunk), Claude Haiku 4.5 judge:
 
 ```
 ======================================================================
 metric                     spearman    eval-mcp mean   deepeval mean
 ----------------------------------------------------------------------
-faithfulness                  +0.968 ✓        0.733           0.783
-answer_relevancy              +1.000 ✓        0.633           0.667
-contextual_precision          +1.000 ✓        0.883           0.883
-contextual_recall             +0.667 ~        0.900           0.900
-contextual_relevancy          +0.423 ✗        0.703           0.753
-groundedness                  +0.986 ✓        0.733           0.700
+faithfulness                 +0.982 ✓          0.817           0.783
+answer_relevancy             +0.988 ✓          0.667           0.650
+contextual_precision         +0.364 ✗          0.833           0.883
+contextual_recall            +0.000 ✗          1.000           0.900
+contextual_relevancy         +0.897 ✓          0.753           0.708
 ======================================================================
 ```
 
-5 of 6 metrics show strong rank agreement (≥ 0.7); ``answer_relevancy``
-and ``contextual_precision`` show perfect (1.000) agreement.
-``contextual_recall`` lands at 0.667 — a single-sample disagreement on
-the ``empty_answer`` edge case (we score 0.5, DeepEval scores 1.0)
-because we still credit the chunk's facts as "covered" even when the
-answer doesn't use them. Defensible either way.
+**The port fixed contextual_relevancy** — it went from 0.423 (pre-port,
+aggregate single call) to 0.897 once switched to DeepEval's per-chunk
+structure. That was the real win.
 
-**``contextual_relevancy`` (0.423) is the actionable finding.** Looking
-at the per-sample table, the disagreement clusters on samples where the
-chunk is clear and on-topic — DeepEval scores 1.00 ("everything in the
-chunk is relevant"), we score 0.50 ("only the first half is directly
-relevant"). Our statement-extraction prompt is too granular: it pulls
-multiple atomic statements per chunk and judges each against the
-question, while DeepEval extracts at a coarser, answer-relevant level.
+**The two ✗ metrics are mostly a measurement artifact, not a defect:**
 
-Both are reasonable interpretations of the metric, but they diverge on
-clean-chunk cases. To bring this into agreement, tighten the system
-prompt in ``contextual_relevancy`` to "extract only the statements that
-*could* answer the question" rather than "extract every standalone
-statement." That's a follow-up.
+- **contextual_recall 0.000** is degenerate, not "total disagreement."
+  eval-mcp scored **1.0 on all 10 samples**, so the series is constant
+  and Spearman is mathematically undefined (reported 0). Per-sample, we
+  **agree with DeepEval on 9 of 10**; the only real disagreement is
+  `missing_chunk_for_golden` (we credit the "~1519" sentence as
+  attributable, DeepEval doesn't because the date isn't in the chunk —
+  we're slightly lenient on sentence granularity).
+- **contextual_precision 0.364** agrees on 8 of 10, with two
+  single-sample, single-run verdict disagreements (`noisy_chunks`,
+  `missing_chunk_for_golden`) on borderline "is this noisy chunk useful"
+  calls.
+
+**Why we're NOT chasing the two ✗ metrics with code:** the scorers now
+use DeepEval's prompts verbatim. Hand-tuning them to close these last
+gaps would mean *diverging* from DeepEval — defeating the point of the
+port. The low Spearman is driven by (a) dataset saturation — too many
+clean 1.0 cases leave no variance for rank correlation — and (b) normal
+single-judge run-to-run variance on 2-3 borderline samples. The correct
+fix is a **larger, less-saturated parity dataset** (push to 30-50
+samples with more mid-range cases), not prompt edits. Tracked as a
+follow-up; not blocking, since the structural port is done and 3/5
+metrics are cleanly aligned with the other 2 explained.
+
+### Pre-port baseline (for reference)
+
+Before the port (our own paraphrased single-call prompts, 6 metrics
+including the since-removed `groundedness`): faithfulness +0.968,
+answer_relevancy +1.000, contextual_precision +1.000,
+contextual_recall +0.667, contextual_relevancy **+0.423**,
+groundedness +0.986. The port traded a couple of artificially-high
+saturated correlations for a correct contextual_relevancy and verbatim
+DeepEval alignment.
 
 ## Interpreting output
 

@@ -1,33 +1,39 @@
-"""DeepEval-style RAG scorers for Inspect AI.
+"""DeepEval-style RAG scorers for Inspect AI (ported from DeepEval v4.0.4).
 
-Each scorer reads ``state.metadata["retrieval_context"]`` (a
-``list[str]`` of retrieved chunks in the retriever's ranking order)
-plus the usual ``(state.input, state.output.completion, target.text)``
-trio, runs ONE LLM-judge call with a forced-tool-output schema, and
-returns a 0..1 score with an explanation string.
+These are faithful ports of DeepEval's RAG-triad metrics — the QAG
+(Question-Answer-Generation) pattern: an LLM extracts atomic units
+(claims / statements / sentences), a second pass assigns a verdict to
+each, and the score is a ratio of the verdicts. The prompts below are
+copied verbatim from DeepEval's templates so our scores track theirs;
+the only thing that differs is the execution shell — we run the judge
+through Inspect AI's ``get_model`` (forced tool output) rather than
+DeepEval's free-JSON parsing, which keeps Bedrock cost/OTLP capture
+working.
 
-The six metrics mirror DeepEval's RAG suite:
+Five metrics, mirroring DeepEval's RAG suite exactly:
 
-- ``faithfulness``       — fraction of answer claims that agree with chunks.
-- ``answer_relevancy``   — fraction of answer statements that address the question.
-- ``contextual_precision``— precision-at-k of relevant chunks (rewards relevant chunks ranked early).
-- ``contextual_recall``  — fraction of expected-answer sentences backed by some chunk.
-- ``contextual_relevancy``— fraction of chunk-level statements relevant to the question.
-- ``groundedness``       — 1 minus the contradiction rate (higher = more grounded).
-  Named "Groundedness" instead of DeepEval's "Hallucination" because the value
-  is inverted (higher = better) — matches Mistral's RAG-eval naming and the
-  viewer's color scale.
+- ``faithfulness``          — 3 calls: truths(context) → claims(answer) →
+  verdict each claim vs truths. Score = non-contradicting / total claims.
+- ``answer_relevancy``      — 2 calls: statements(answer) → verdict each vs
+  question. Score = relevant / total statements.
+- ``contextual_precision``  — 1 call: per-node relevance vs expected answer.
+  Score = weighted precision-at-k (rewards relevant nodes ranked early).
+- ``contextual_recall``     — 1 call: each expected-answer sentence
+  attributable to context? Score = attributable / total sentences.
+- ``contextual_relevancy``  — N calls (one per chunk): extract statements
+  from the chunk + verdict each vs question. Score = relevant / total
+  across all chunks.
 
-Why one call per metric (vs DeepEval's two-step extract-then-verdict)?
-Modern Bedrock judges have a long-enough output budget to do extraction
-+ verdict in one tool call, halving cost. The shape DeepEval uses
-(claim list, then verdict list) is preserved inside the tool-call
-arguments — we just don't split it across two HTTP turns.
+NOT ported: DeepEval's ``HallucinationMetric``. It uses the ground-truth
+``context`` field (not ``retrieval_context``) and is a factual-correctness
+check, not a RAG-pipeline metric. Groundedness-against-retrieved-chunks is
+already covered by ``faithfulness``; factual-correctness-against-truth is
+covered by the jury scorer's correctness criterion.
 
-Judge selection: each scorer factory accepts ``judge_model``. The
-generated task file passes the first model from ``CONFIG["judge_models"]``
-via :func:`configure_judge`, so users get the same judge they configured
-for the jury. Override per-scorer with ``faithfulness(judge_model=...)``.
+Judge selection: each scorer factory accepts ``judge_model``. The generated
+task file calls :func:`configure_judge` once at import so scorers default to
+the same judge configured for the jury. Override per-scorer with
+``faithfulness(judge_model=...)``.
 """
 
 from __future__ import annotations
@@ -43,15 +49,19 @@ from inspect_ai.tool._tool_params import ToolParams
 
 _DEFAULT_JUDGE_MODEL: Optional[str] = None
 
+# Minimal system framing — DeepEval puts everything in one user prompt and
+# parses free JSON. We force structured output via a tool instead, so the
+# system message just tells the judge to use the tool. The actual
+# instructions live in the verbatim DeepEval prompt (the user message).
+_SYSTEM = (
+    "You are a meticulous evaluation judge. Follow the instructions exactly "
+    "and return your answer by calling the provided tool — one entry per item, "
+    "in order, with no extra commentary."
+)
+
 
 def configure_judge(model_id: str) -> None:
-    """Set the default judge model for RAG scorers in this process.
-
-    The generated task file calls this once at module import so each
-    scorer factory below can run with no explicit ``judge_model`` arg.
-    Tests / callers that want per-call control can pass ``judge_model=``
-    directly to any scorer factory.
-    """
+    """Set the default judge model for RAG scorers in this process."""
     global _DEFAULT_JUDGE_MODEL
     _DEFAULT_JUDGE_MODEL = model_id
 
@@ -77,45 +87,9 @@ def _require_retrieval_context(state, scorer_name: str) -> List[str]:
         )
     if not isinstance(rc, list) or any(not isinstance(c, str) for c in rc):
         raise ValueError(
-            f"retrieval_context must be a list[str]; got {type(rc).__name__} "
-            f"for sample with {len(rc) if hasattr(rc, '__len__') else '?'} entries."
+            f"retrieval_context must be a list[str]; got {type(rc).__name__}."
         )
     return rc
-
-
-async def _judge_with_tool(
-    judge_model: str,
-    system_prompt: str,
-    user_prompt: str,
-    tool: ToolInfo,
-) -> dict:
-    """Run one tool-forced judge call. Returns the tool's arguments dict.
-
-    Raises ``RuntimeError`` if the judge didn't call the tool or returned
-    no parseable arguments — the scorer surfaces that as a 0.0 with an
-    explanation rather than crashing the whole eval.
-    """
-    judge = get_model(judge_model)
-    result = await judge.generate(
-        [
-            ChatMessageSystem(content=system_prompt),
-            ChatMessageUser(content=user_prompt),
-        ],
-        tools=[tool],
-        tool_choice="any",
-    )
-
-    if not result or not result.message or not result.message.tool_calls:
-        body = result.completion[:200] if result and result.completion else "(empty)"
-        raise RuntimeError(f"Judge did not call the tool. Response: {body}")
-
-    args: dict = {}
-    for tc in result.message.tool_calls:
-        if tc.function == tool.name:
-            args.update(tc.arguments)
-    if not args:
-        raise RuntimeError(f"Judge called no tool named {tool.name!r}.")
-    return args
 
 
 def _format_chunks(chunks: List[str]) -> str:
@@ -124,10 +98,9 @@ def _format_chunks(chunks: List[str]) -> str:
 
 # ---------------------------------------------------------------------------
 # RAG-aware solver: injects retrieval_context into the candidate model's
-# prompt before the model generates. Slots into the solver chain BEFORE
-# generate(), so the standard generate() solver still issues the model call.
+# prompt before generation. Supports a {context} placeholder for prompt
+# fidelity; otherwise wraps with a generic template.
 # ---------------------------------------------------------------------------
-
 
 RAG_PROMPT_TEMPLATE = (
     "Answer the following question using ONLY the provided context. "
@@ -136,7 +109,6 @@ RAG_PROMPT_TEMPLATE = (
     "QUESTION: {question}"
 )
 
-
 CONTEXT_PLACEHOLDER = "{context}"
 
 
@@ -144,26 +116,10 @@ CONTEXT_PLACEHOLDER = "{context}"
 def rag_prompt_solver():
     """Inject retrieved chunks into the candidate model's prompt.
 
-    Two modes:
-
-    - **Default wrap** (no placeholder): the user message is wrapped with
-      :data:`RAG_PROMPT_TEMPLATE` — a generic "Answer using ONLY the
-      provided context" template. Good for ad-hoc evals where the user
-      hasn't tuned a custom prompt.
-    - **User-controlled** (``{context}`` placeholder): when the user's
-      prompt template (via ``prompts=`` on ``create_eval_config``) puts
-      a literal ``{context}`` somewhere in its body, we substitute the
-      formatted chunks there and leave the rest of the prompt intact.
-      Lets users test against the *exact* prompt they ship in production
-      — including chunk position, surrounding instructions, etc.
-
-    Inspect's ``prompt_template`` solver is configured with
-    ``skip_unknown=True``, so ``{context}`` flows through it untouched
-    and arrives at this solver as a literal placeholder.
-
-    No-op when ``state.metadata['retrieval_context']`` is absent or empty
-    (so the same task file works for samples without RAG context, e.g. a
-    smoke test).
+    If the user's prompt template contains ``{context}``, the formatted
+    chunks are substituted there (full prompt fidelity). Otherwise the
+    user message is wrapped with :data:`RAG_PROMPT_TEMPLATE`. No-op when
+    ``state.metadata['retrieval_context']`` is absent.
     """
     async def solve(state, generate):
         chunks = (state.metadata or {}).get("retrieval_context")
@@ -189,14 +145,79 @@ def rag_prompt_solver():
 
 
 # ---------------------------------------------------------------------------
-# Tool schemas — one per scorer, each named uniquely so the judge can't
-# confuse them across compositions (e.g. when faithfulness + groundedness
-# both run on the same sample, the tool calls don't collide).
+# Judge call helpers — force structured output via a tool, return the list.
 # ---------------------------------------------------------------------------
 
 
-def _verdict_list_tool(name: str, description: str, verdict_values: List[str]) -> ToolInfo:
-    """Build a tool that takes a list of {claim, verdict, reason} verdicts."""
+async def _call_tool(judge_model: str, prompt: str, tool: ToolInfo) -> dict:
+    """Run one tool-forced judge call. Returns the tool's arguments dict.
+
+    Raises RuntimeError if the judge didn't call the tool (caller turns
+    that into a 0.0 score rather than crashing the eval).
+    """
+    judge = get_model(judge_model)
+    result = await judge.generate(
+        [ChatMessageSystem(content=_SYSTEM), ChatMessageUser(content=prompt)],
+        tools=[tool],
+        tool_choice="any",
+    )
+    if not result or not result.message or not result.message.tool_calls:
+        body = result.completion[:200] if result and result.completion else "(empty)"
+        raise RuntimeError(f"Judge did not call the tool. Response: {body}")
+    args: dict = {}
+    for tc in result.message.tool_calls:
+        if tc.function == tool.name:
+            args.update(tc.arguments)
+    if not args:
+        raise RuntimeError(f"Judge called no tool named {tool.name!r}.")
+    return args
+
+
+def _string_list_tool(name: str, key: str, description: str) -> ToolInfo:
+    """Tool that returns {key: [str, ...]} — for truths/claims/statements."""
+    return ToolInfo(
+        name=name,
+        description=description,
+        parameters=ToolParams(
+            type="object",
+            properties={
+                key: {
+                    "type": "array",
+                    "description": f"List of {key}.",
+                    "items": {"type": "string"},
+                }
+            },
+            required=[key],
+        ),
+    )
+
+
+def _verdict_tool(
+    name: str,
+    description: str,
+    verdict_values: List[str],
+    extra_props: Optional[dict] = None,
+    required_extra: Optional[List[str]] = None,
+) -> ToolInfo:
+    """Tool that returns {verdicts: [{verdict, reason, ...}]}.
+
+    ``verdict_values`` is the enum of allowed verdicts (e.g. yes/no/idk).
+    ``extra_props`` adds item fields (e.g. ``statement`` for relevancy).
+    """
+    item_props = {
+        "verdict": {
+            "type": "string",
+            "enum": verdict_values,
+            "description": f"One of {verdict_values}.",
+        },
+        "reason": {
+            "type": "string",
+            "description": "Justification (required for non-affirmative verdicts).",
+        },
+    }
+    if extra_props:
+        item_props.update(extra_props)
+    required = ["verdict"] + (required_extra or [])
     return ToolInfo(
         name=name,
         description=description,
@@ -206,80 +227,23 @@ def _verdict_list_tool(name: str, description: str, verdict_values: List[str]) -
                 "verdicts": {
                     "type": "array",
                     "description": (
-                        "One entry per atomic claim/statement extracted from "
-                        "the source text. Order does not matter."
+                        "One entry per item, in the SAME ORDER as the items "
+                        "given. Length MUST equal the number of items."
                     ),
                     "items": {
                         "type": "object",
-                        "properties": {
-                            "claim": {
-                                "type": "string",
-                                "description": "The atomic claim being judged.",
-                            },
-                            "verdict": {
-                                "type": "string",
-                                "enum": verdict_values,
-                                "description": (
-                                    "Verdict relative to the reference. "
-                                    f"Allowed: {verdict_values}."
-                                ),
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": "Short justification for the verdict.",
-                            },
-                        },
-                        "required": ["claim", "verdict"],
+                        "properties": item_props,
+                        "required": required,
                     },
-                },
+                }
             },
             required=["verdicts"],
         ),
     )
 
 
-def _chunk_verdict_tool(name: str, description: str) -> ToolInfo:
-    """Build a tool that emits ONE verdict per chunk in order."""
-    return ToolInfo(
-        name=name,
-        description=description,
-        parameters=ToolParams(
-            type="object",
-            properties={
-                "chunk_verdicts": {
-                    "type": "array",
-                    "description": (
-                        "MUST have exactly one entry per retrieved chunk, in "
-                        "the same order as the chunks were given."
-                    ),
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "chunk_index": {
-                                "type": "integer",
-                                "description": "1-based index of the chunk.",
-                            },
-                            "verdict": {
-                                "type": "string",
-                                "enum": ["yes", "no"],
-                                "description": "yes if the chunk is relevant; no otherwise.",
-                            },
-                            "reason": {
-                                "type": "string",
-                                "description": "Short justification.",
-                            },
-                        },
-                        "required": ["chunk_index", "verdict"],
-                    },
-                },
-            },
-            required=["chunk_verdicts"],
-        ),
-    )
-
-
 # ---------------------------------------------------------------------------
-# Aggregation helpers — pure functions, tested in tests/test_rag_scorers.py.
+# Score formulas (pure functions; tested in tests/test_rag_scorers.py).
 # ---------------------------------------------------------------------------
 
 
@@ -287,57 +251,187 @@ def _fraction(numer: int, denom: int) -> float:
     return numer / denom if denom > 0 else 0.0
 
 
-def _faithfulness_score(verdicts: List[dict]) -> float:
-    """yes + idk counted as faithful; no penalises. Matches DeepEval default."""
+def _not_no_fraction(verdicts: List[dict]) -> float:
+    """DeepEval faithfulness/answer_relevancy: yes AND idk count (only 'no' fails)."""
     if not verdicts:
-        return 0.0
-    faithful = sum(1 for v in verdicts if v.get("verdict") in ("yes", "idk"))
-    return _fraction(faithful, len(verdicts))
+        return 1.0  # DeepEval returns 1 when there are no claims/statements
+    good = sum(1 for v in verdicts if str(v.get("verdict", "")).strip().lower() != "no")
+    return _fraction(good, len(verdicts))
 
 
-def _binary_yes_fraction(verdicts: List[dict]) -> float:
+def _yes_fraction(verdicts: List[dict]) -> float:
+    """DeepEval contextual_recall/relevancy: only explicit 'yes' counts."""
     if not verdicts:
         return 0.0
-    yes = sum(1 for v in verdicts if v.get("verdict") == "yes")
+    yes = sum(1 for v in verdicts if str(v.get("verdict", "")).strip().lower() == "yes")
     return _fraction(yes, len(verdicts))
 
 
-def _precision_at_k(chunk_verdicts: List[dict]) -> float:
-    """DeepEval-style precision-at-k weighted by ranking position.
+def _weighted_precision_at_k(verdicts: List[dict]) -> float:
+    """DeepEval contextual_precision: order-sensitive precision@k.
 
-    For each relevant chunk at rank k (1-based), add precision@k. Divide
-    by the total count of relevant chunks. 0 if no chunk is relevant.
+    For each relevant node at rank k (1-based), add (relevant-so-far / k),
+    divide by total relevant. Verdicts are in retrieval rank order.
     """
-    if not chunk_verdicts:
+    if not verdicts:
         return 0.0
-    ordered = sorted(
-        chunk_verdicts,
-        key=lambda v: int(v.get("chunk_index", 0)),
-    )
-    total_relevant = sum(1 for v in ordered if v.get("verdict") == "yes")
-    if total_relevant == 0:
-        return 0.0
+    node_relevant = [
+        1 if str(v.get("verdict", "")).strip().lower() == "yes" else 0
+        for v in verdicts
+    ]
+    sum_weighted = 0.0
     relevant_so_far = 0
-    accum = 0.0
-    for k, v in enumerate(ordered, start=1):
-        if v.get("verdict") == "yes":
+    for k, is_rel in enumerate(node_relevant, start=1):
+        if is_rel:
             relevant_so_far += 1
-            accum += relevant_so_far / k
-    return accum / total_relevant
+            sum_weighted += (relevant_so_far / k) * is_rel
+    if relevant_so_far == 0:
+        return 0.0
+    return sum_weighted / relevant_so_far
 
 
-def _summarise_verdicts(verdicts: List[dict], limit: int = 6) -> str:
+def _summarise(verdicts: List[dict], limit: int = 6) -> str:
     if not verdicts:
         return "(no verdicts returned by judge)"
     lines = []
     for v in verdicts[:limit]:
         verdict = v.get("verdict", "?")
-        claim = (v.get("claim") or "")[:80]
-        reason = (v.get("reason") or "")[:80]
-        lines.append(f"  [{verdict}] {claim} — {reason}")
+        label = v.get("statement") or v.get("claim") or v.get("reason") or ""
+        lines.append(f"  [{verdict}] {str(label)[:90]}")
     if len(verdicts) > limit:
         lines.append(f"  ... ({len(verdicts) - limit} more)")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Verbatim DeepEval prompts (v4.0.4). Sentinel placeholders (__X__) are used
+# instead of {x} so the JSON examples' braces survive untouched.
+# ---------------------------------------------------------------------------
+
+_TRUTHS_PROMPT = """Based on the given text, please generate a comprehensive list of FACTUAL, undisputed truths, that can inferred from the provided text.
+These truths, MUST BE COHERENT. They must NOT be taken out of context.
+
+Example:
+Example Text:
+"Albert Einstein, the genius often associated with wild hair and mind-bending theories, famously won the Nobel Prize in Physics—though not for his groundbreaking work on relativity, as many assume. Instead, in 1968, he was honored for his discovery of the photoelectric effect, a phenomenon that laid the foundation for quantum mechanics."
+
+Example truths: ["Einstein won the noble prize for his discovery of the photoelectric effect in 1968.", "The photoelectric effect is a phenomenon that laid the foundation for quantum mechanics."]
+===== END OF EXAMPLE ======
+
+IMPORTANT: Only include truths that are factual, BUT IT DOESN'T MATTER IF THEY ARE FACTUALLY CORRECT.
+
+Text:
+__TEXT__
+"""
+
+_CLAIMS_PROMPT = """Based on the given text, please extract a comprehensive list of FACTUAL, undisputed truths, that can inferred from the provided actual AI output.
+These truths, MUST BE COHERENT, and CANNOT be taken out of context.
+
+Example Text:
+"Albert Einstein, the genius often associated with wild hair and mind-bending theories, famously won the Nobel Prize in Physics—though not for his groundbreaking work on relativity, as many assume. Instead, in 1968, he was honored for his discovery of the photoelectric effect, a phenomenon that laid the foundation for quantum mechanics."
+
+Example claims: ["Einstein won the noble prize for his discovery of the photoelectric effect in 1968.", "The photoelectric effect is a phenomenon that laid the foundation for quantum mechanics."]
+===== END OF EXAMPLE ======
+
+IMPORTANT: Only include claims that are factual, BUT IT DOESN'T MATTER IF THEY ARE FACTUALLY CORRECT. The claims you extract should include the full context it was presented in, NOT cherry picked facts. You should NOT include any prior knowledge, and take the text at face value when extracting claims. You should be aware that it is an AI that is outputting these claims.
+
+AI Output:
+__TEXT__
+"""
+
+_FAITHFULNESS_VERDICTS_PROMPT = """Based on the given claims, which is a list of strings, generate a list indicating whether EACH claim contradicts any facts in the retrieval context. For each claim provide a 'verdict' and (when not 'yes') a 'reason'.
+The 'verdict' should STRICTLY be either 'yes', 'no', or 'idk', which states whether the given claim agrees with the context.
+
+Generate ONE verdict per claim - the number of verdicts MUST equal the number of claims, in the same order.
+No 'reason' needed for 'yes' verdicts.
+Only use 'no' if the retrieval context DIRECTLY CONTRADICTS the claim - never use prior knowledge.
+Use 'idk' for claims not backed up by the context OR factually incorrect but non-contradictory - do not assume your knowledge.
+Vague/speculative language in claims (e.g. 'may have', 'possibility') does NOT count as a contradiction.
+
+Retrieval Contexts:
+__CONTEXT__
+
+Claims:
+__CLAIMS__
+"""
+
+_STATEMENTS_PROMPT = """Given the text, breakdown and generate a list of statements presented. Ambiguous statements and single words can be considered as statements, but only if outside of a coherent statement.
+
+Example text:
+Our new laptop model features a high-resolution Retina display for crystal-clear visuals. It also includes a fast-charging battery, giving you up to 12 hours of usage on a single charge. For security, we've added fingerprint authentication and an encrypted SSD. Plus, every purchase comes with a one-year warranty and 24/7 customer support.
+
+Example statements: ["The new laptop model has a high-resolution Retina display.", "It includes a fast-charging battery with up to 12 hours of usage.", "Security features include fingerprint authentication and an encrypted SSD.", "Every purchase comes with a one-year warranty.", "24/7 customer support is included."]
+===== END OF EXAMPLE ======
+
+Text:
+__TEXT__
+"""
+
+_ANSWER_RELEVANCY_VERDICTS_PROMPT = """For the provided list of statements, determine whether each statement is relevant to address the input.
+For each statement provide a 'verdict' and (when not 'yes') a 'reason'. The statements are from an AI's actual output.
+
+Generate ONE verdict per statement - the number of verdicts MUST equal the number of statements, in the same order.
+'verdict' must be STRICTLY 'yes', 'no', or 'idk':
+- 'yes': statement is relevant to addressing the input
+- 'no': statement is irrelevant to the input
+- 'idk': statement is ambiguous (not directly relevant but could be supporting information)
+Provide 'reason' ONLY for 'no' or 'idk' verdicts.
+
+Input:
+__INPUT__
+
+Statements:
+__STATEMENTS__
+"""
+
+_CONTEXTUAL_PRECISION_VERDICTS_PROMPT = """Given the input, expected output, and retrieval context, please generate a list to determine whether each node in the retrieval context was remotely useful in arriving at the expected output. For each node provide a 'verdict' ('yes' or 'no') and a 'reason' that quotes parts of the context.
+
+Example Retrieval Context: ["Einstein won the Nobel Prize for his discovery of the photoelectric effect", "He won the Nobel Prize in 1968.", "There was a cat."]
+Example Input: "Who won the Nobel Prize in 1968 and for what?"
+Example Expected Output: "Einstein won the Nobel Prize in 1968 for his discovery of the photoelectric effect."
+Example verdicts: [{"reason": "It clearly addresses the question...", "verdict": "yes"}, {"reason": "The text verifies the prize was won in 1968.", "verdict": "yes"}, {"reason": "'There was a cat' is not relevant.", "verdict": "no"}]
+
+Generate a verdict for EACH node - the number of verdicts SHOULD BE STRICTLY EQUAL to the number of nodes, in the same order.
+
+Input:
+__INPUT__
+
+Expected output:
+__EXPECTED_OUTPUT__
+
+Retrieval Context:
+__CONTEXT__
+"""
+
+_CONTEXTUAL_RECALL_VERDICTS_PROMPT = """For EACH sentence in the given expected output below, determine whether the sentence can be attributed to the nodes of retrieval contexts. For each sentence provide a 'verdict' and a 'reason'.
+The 'verdict' should STRICTLY be either 'yes' or 'no'. Answer 'yes' if the sentence can be attributed to any parts of the retrieval context, else answer 'no'.
+In the 'reason', aim to include the node(s) count in the retrieval context (e.g. 1st node, 2nd node) attributed to the sentence, and quote the specific part of the retrieval context, kept extremely concise.
+
+Generate a verdict for EACH sentence - the number of verdicts SHOULD BE STRICTLY EQUAL to the number of sentences in the expected output, in the same order.
+
+Expected Output:
+__EXPECTED_OUTPUT__
+
+Retrieval Context:
+__CONTEXT__
+"""
+
+_CONTEXTUAL_RELEVANCY_VERDICTS_PROMPT = """Based on the input and context, please generate a list of verdicts to indicate whether each statement found in the context is relevant to the provided input. Each verdict has a 'verdict', a 'statement', and (only when 'no') a 'reason'.
+You should first extract statements found in the context, which are high level information found in the context, before deciding on a verdict for each statement.
+The 'verdict' should STRICTLY be either 'yes' or 'no', and states whether the statement is relevant to the input.
+Provide a 'reason' ONLY IF the verdict is 'no'. You MUST quote the irrelevant parts of the statement to back up your reason.
+If the provided context contains no actual content or statements, give 'no' as the verdict, put the context into 'statement', and "No statements found in provided context." into 'reason'.
+
+Example Context: "Einstein won the Nobel Prize for his discovery of the photoelectric effect. He won the Nobel Prize in 1968. There was a cat."
+Example Input: "What were some of Einstein's achievements?"
+Example verdicts: [{"statement": "Einstein won the Nobel Prize for his discovery of the photoelectric effect in 1968", "verdict": "yes"}, {"statement": "There was a cat.", "reason": "The context mentioned 'There was a cat' which has nothing to do with Einstein's achievements.", "verdict": "no"}]
+
+Input:
+__INPUT__
+
+Context:
+__CONTEXT__
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -347,10 +441,11 @@ def _summarise_verdicts(verdicts: List[dict], limit: int = 6) -> str:
 
 @scorer(metrics=[mean(), stderr()])
 def faithfulness(judge_model: Optional[str] = None):
-    """Fraction of claims in the answer that agree with the retrieved chunks.
+    """Fraction of answer claims that don't contradict the retrieved context.
 
-    yes/idk counted as faithful (idk = "the chunk neither confirms nor
-    contradicts"). DeepEval default behaviour.
+    Ported from DeepEval (3 stages): extract truths from context, extract
+    claims from the answer, then verdict each claim against the truths.
+    yes + idk both count as faithful; only 'no' (direct contradiction) fails.
     """
     async def score(state, target):
         chunks = _require_retrieval_context(state, "faithfulness")
@@ -358,51 +453,57 @@ def faithfulness(judge_model: Optional[str] = None):
         answer = state.output.completion if state.output else ""
         if not answer.strip():
             return Score(value=0.0, explanation="No answer produced.")
-
-        system = (
-            "You are a grounding judge. Given a model's answer and a list of "
-            "retrieved context chunks, extract every atomic factual claim from "
-            "the answer and assign each claim a verdict relative to the chunks:\n"
-            "  yes  — the chunks support the claim\n"
-            "  no   — the chunks contradict the claim or it is fabricated\n"
-            "  idk  — the chunks neither confirm nor contradict\n"
-            "Return the list via the submit_faithfulness_verdicts tool."
-        )
-        user = (
-            f"ANSWER:\n{answer}\n\n"
-            f"RETRIEVED CONTEXT:\n{_format_chunks(chunks)}"
-        )
-        tool = _verdict_list_tool(
-            "submit_faithfulness_verdicts",
-            "Submit per-claim faithfulness verdicts.",
-            ["yes", "no", "idk"],
-        )
         try:
-            args = await _judge_with_tool(judge, system, user, tool)
+            truths_args = await _call_tool(
+                judge,
+                _TRUTHS_PROMPT.replace("__TEXT__", _format_chunks(chunks)),
+                _string_list_tool("submit_truths", "truths", "Extract factual truths from the context."),
+            )
+            truths = [str(t) for t in (truths_args.get("truths") or [])]
+
+            claims_args = await _call_tool(
+                judge,
+                _CLAIMS_PROMPT.replace("__TEXT__", answer),
+                _string_list_tool("submit_claims", "claims", "Extract claims from the AI output."),
+            )
+            claims = [str(c) for c in (claims_args.get("claims") or [])]
+
+            if not claims:
+                return Score(value=1.0, explanation="No claims extracted from the answer.")
+
+            verdict_args = await _call_tool(
+                judge,
+                _FAITHFULNESS_VERDICTS_PROMPT
+                .replace("__CONTEXT__", "\n\n".join(truths))
+                .replace("__CLAIMS__", "\n".join(f"- {c}" for c in claims)),
+                _verdict_tool(
+                    "submit_faithfulness_verdicts",
+                    "One verdict per claim: does it contradict the context?",
+                    ["yes", "no", "idk"],
+                ),
+            )
         except RuntimeError as e:
             return Score(value=0.0, explanation=f"Judge failure: {e}")
-        verdicts = args.get("verdicts") or []
-        value = _faithfulness_score(verdicts)
+        verdicts = verdict_args.get("verdicts") or []
+        value = _not_no_fraction(verdicts)
+        n_good = sum(1 for v in verdicts if str(v.get("verdict", "")).lower() != "no")
         explanation = (
-            f"faithfulness = {value:.2f} "
-            f"({sum(1 for v in verdicts if v.get('verdict') in ('yes', 'idk'))}/{len(verdicts)} claims grounded)\n"
-            + _summarise_verdicts(verdicts)
+            f"faithfulness = {value:.2f} ({n_good}/{len(verdicts)} claims not contradicted; "
+            f"{len(truths)} truths, {len(claims)} claims)\n" + _summarise(verdicts)
         )
-        return Score(
-            value=value,
-            explanation=explanation,
-            metadata={"verdicts": verdicts},
-        )
+        return Score(value=value, explanation=explanation,
+                     metadata={"truths": truths, "claims": claims, "verdicts": verdicts})
 
     return score
 
 
 @scorer(metrics=[mean(), stderr()])
 def answer_relevancy(judge_model: Optional[str] = None):
-    """Fraction of statements in the answer that address the question.
+    """Fraction of answer statements relevant to the question.
 
-    Doesn't look at retrieval_context — just question vs answer. Catches
-    answers that ramble about adjacent topics.
+    Ported from DeepEval (2 stages): extract statements from the answer,
+    verdict each against the question. yes + idk count as relevant.
+    Doesn't use retrieval_context.
     """
     async def score(state, target):
         judge = _resolve_judge(judge_model)
@@ -410,48 +511,49 @@ def answer_relevancy(judge_model: Optional[str] = None):
         answer = state.output.completion if state.output else ""
         if not answer.strip():
             return Score(value=0.0, explanation="No answer produced.")
-
-        system = (
-            "You are a relevance judge. Given a question and the model's "
-            "answer, extract every standalone statement from the answer and "
-            "for each one decide whether it directly addresses the question:\n"
-            "  yes  — the statement is on-topic and addresses what was asked\n"
-            "  no   — the statement is off-topic, tangential, or unrelated\n"
-            "Return the list via the submit_relevancy_verdicts tool."
-        )
-        user = f"QUESTION:\n{question}\n\nANSWER:\n{answer}"
-        tool = _verdict_list_tool(
-            "submit_relevancy_verdicts",
-            "Submit per-statement relevancy verdicts.",
-            ["yes", "no"],
-        )
         try:
-            args = await _judge_with_tool(judge, system, user, tool)
+            stmt_args = await _call_tool(
+                judge,
+                _STATEMENTS_PROMPT.replace("__TEXT__", answer),
+                _string_list_tool("submit_statements", "statements", "Break the answer into statements."),
+            )
+            statements = [str(s) for s in (stmt_args.get("statements") or [])]
+            if not statements:
+                return Score(value=1.0, explanation="No statements extracted from the answer.")
+
+            verdict_args = await _call_tool(
+                judge,
+                _ANSWER_RELEVANCY_VERDICTS_PROMPT
+                .replace("__INPUT__", question)
+                .replace("__STATEMENTS__", "\n".join(f"- {s}" for s in statements)),
+                _verdict_tool(
+                    "submit_relevancy_verdicts",
+                    "One verdict per statement: is it relevant to the input?",
+                    ["yes", "no", "idk"],
+                ),
+            )
         except RuntimeError as e:
             return Score(value=0.0, explanation=f"Judge failure: {e}")
-        verdicts = args.get("verdicts") or []
-        value = _binary_yes_fraction(verdicts)
+        verdicts = verdict_args.get("verdicts") or []
+        value = _not_no_fraction(verdicts)
+        n_good = sum(1 for v in verdicts if str(v.get("verdict", "")).lower() != "no")
         explanation = (
-            f"answer_relevancy = {value:.2f} "
-            f"({sum(1 for v in verdicts if v.get('verdict') == 'yes')}/{len(verdicts)} statements on-topic)\n"
-            + _summarise_verdicts(verdicts)
+            f"answer_relevancy = {value:.2f} ({n_good}/{len(verdicts)} statements relevant)\n"
+            + _summarise(verdicts)
         )
-        return Score(
-            value=value,
-            explanation=explanation,
-            metadata={"verdicts": verdicts},
-        )
+        return Score(value=value, explanation=explanation,
+                     metadata={"statements": statements, "verdicts": verdicts})
 
     return score
 
 
 @scorer(metrics=[mean(), stderr()])
 def contextual_precision(judge_model: Optional[str] = None):
-    """Precision-at-k of relevant chunks against the expected answer.
+    """Weighted precision-at-k of retrieved nodes vs the expected answer.
 
-    Rewards retrievers that put relevant chunks first. Lower when
-    irrelevant chunks are ranked above relevant ones. Needs both
-    retrieval_context AND target (expected_output).
+    Ported from DeepEval (1 call): verdict each node relevant/not (in rank
+    order), then order-sensitive precision@k — rewards relevant nodes
+    ranked early. Needs retrieval_context AND target (expected answer).
     """
     async def score(state, target):
         chunks = _require_retrieval_context(state, "contextual_precision")
@@ -459,218 +561,118 @@ def contextual_precision(judge_model: Optional[str] = None):
         question = str(state.input)
         expected = target.text if target else ""
         if not expected.strip():
-            return Score(
-                value=0.0,
-                explanation="contextual_precision requires an expected answer (target.text).",
-            )
-
-        system = (
-            "You are a retrieval-quality judge. For each retrieved chunk in "
-            "order, decide whether the chunk is USEFUL for arriving at the "
-            "expected answer to the question (not whether it contains the "
-            "exact answer — usefulness, including supporting context, counts):\n"
-            "  yes — the chunk helps arrive at the expected answer\n"
-            "  no  — the chunk is irrelevant or actively unhelpful\n"
-            "Emit EXACTLY one verdict per chunk, in the same order. Use the "
-            "1-based chunk_index that matches the [chunk N] header in the prompt."
-        )
-        user = (
-            f"QUESTION:\n{question}\n\n"
-            f"EXPECTED ANSWER:\n{expected}\n\n"
-            f"RETRIEVED CHUNKS (in retriever rank order):\n{_format_chunks(chunks)}"
-        )
-        tool = _chunk_verdict_tool(
-            "submit_chunk_relevance",
-            "Submit one usefulness verdict per chunk, in order.",
-        )
+            return Score(value=0.0,
+                         explanation="contextual_precision requires an expected answer (target).")
         try:
-            args = await _judge_with_tool(judge, system, user, tool)
+            args = await _call_tool(
+                judge,
+                _CONTEXTUAL_PRECISION_VERDICTS_PROMPT
+                .replace("__INPUT__", question)
+                .replace("__EXPECTED_OUTPUT__", expected)
+                .replace("__CONTEXT__", _format_chunks(chunks)),
+                _verdict_tool(
+                    "submit_node_verdicts",
+                    "One verdict per node, in rank order: useful for the expected output?",
+                    ["yes", "no"],
+                ),
+            )
         except RuntimeError as e:
             return Score(value=0.0, explanation=f"Judge failure: {e}")
-        chunk_verdicts = args.get("chunk_verdicts") or []
-        value = _precision_at_k(chunk_verdicts)
-        yes_count = sum(1 for v in chunk_verdicts if v.get("verdict") == "yes")
+        verdicts = args.get("verdicts") or []
+        value = _weighted_precision_at_k(verdicts)
+        n_rel = sum(1 for v in verdicts if str(v.get("verdict", "")).lower() == "yes")
         explanation = (
-            f"contextual_precision = {value:.2f} "
-            f"(precision@k over {yes_count}/{len(chunks)} relevant chunks)\n"
-            + "\n".join(
-                f"  chunk {v.get('chunk_index')}: {v.get('verdict')} — {(v.get('reason') or '')[:80]}"
-                for v in sorted(chunk_verdicts, key=lambda x: int(x.get("chunk_index", 0)))
-            )
+            f"contextual_precision = {value:.2f} (precision@k over {n_rel}/{len(chunks)} relevant nodes)\n"
+            + _summarise(verdicts)
         )
-        return Score(
-            value=value,
-            explanation=explanation,
-            metadata={"chunk_verdicts": chunk_verdicts},
-        )
+        return Score(value=value, explanation=explanation, metadata={"verdicts": verdicts})
 
     return score
 
 
 @scorer(metrics=[mean(), stderr()])
 def contextual_recall(judge_model: Optional[str] = None):
-    """Fraction of expected-answer sentences backed by at least one chunk.
+    """Fraction of expected-answer sentences attributable to the context.
 
-    Measures whether the retriever fetched enough context to support the
-    golden answer. Independent of ordering.
+    Ported from DeepEval (1 call): verdict each expected-answer sentence
+    yes/no on whether the context supports it. Needs retrieval_context
+    AND target. Only explicit 'yes' counts.
     """
     async def score(state, target):
         chunks = _require_retrieval_context(state, "contextual_recall")
         judge = _resolve_judge(judge_model)
         expected = target.text if target else ""
         if not expected.strip():
-            return Score(
-                value=0.0,
-                explanation="contextual_recall requires an expected answer (target.text).",
-            )
-
-        system = (
-            "You are a retrieval-completeness judge. Break the expected "
-            "answer into atomic sentences. For each sentence, decide "
-            "whether ANY of the retrieved chunks contains the information "
-            "needed to support that sentence:\n"
-            "  yes — at least one chunk supports the sentence\n"
-            "  no  — no chunk supports the sentence; retrieval missed it\n"
-            "Return the list via the submit_recall_verdicts tool."
-        )
-        user = (
-            f"EXPECTED ANSWER:\n{expected}\n\n"
-            f"RETRIEVED CONTEXT:\n{_format_chunks(chunks)}"
-        )
-        tool = _verdict_list_tool(
-            "submit_recall_verdicts",
-            "Submit per-sentence recall verdicts.",
-            ["yes", "no"],
-        )
+            return Score(value=0.0,
+                         explanation="contextual_recall requires an expected answer (target).")
         try:
-            args = await _judge_with_tool(judge, system, user, tool)
+            args = await _call_tool(
+                judge,
+                _CONTEXTUAL_RECALL_VERDICTS_PROMPT
+                .replace("__EXPECTED_OUTPUT__", expected)
+                .replace("__CONTEXT__", _format_chunks(chunks)),
+                _verdict_tool(
+                    "submit_recall_verdicts",
+                    "One verdict per expected-output sentence: attributable to context?",
+                    ["yes", "no"],
+                ),
+            )
         except RuntimeError as e:
             return Score(value=0.0, explanation=f"Judge failure: {e}")
         verdicts = args.get("verdicts") or []
-        value = _binary_yes_fraction(verdicts)
+        value = _yes_fraction(verdicts)
+        n_yes = sum(1 for v in verdicts if str(v.get("verdict", "")).lower() == "yes")
         explanation = (
-            f"contextual_recall = {value:.2f} "
-            f"({sum(1 for v in verdicts if v.get('verdict') == 'yes')}/{len(verdicts)} sentences covered)\n"
-            + _summarise_verdicts(verdicts)
+            f"contextual_recall = {value:.2f} ({n_yes}/{len(verdicts)} sentences attributable)\n"
+            + _summarise(verdicts)
         )
-        return Score(
-            value=value,
-            explanation=explanation,
-            metadata={"verdicts": verdicts},
-        )
+        return Score(value=value, explanation=explanation, metadata={"verdicts": verdicts})
 
     return score
 
 
 @scorer(metrics=[mean(), stderr()])
 def contextual_relevancy(judge_model: Optional[str] = None):
-    """Fraction of chunk-level statements relevant to the question.
+    """Fraction of context statements relevant to the question.
 
-    Per-chunk, asks the judge to extract statements and decide which are
-    relevant to the question. Captures noise — high when the retriever
-    returns terse chunks tightly scoped to the query.
+    Ported from DeepEval: ONE judge call PER chunk — extract the chunk's
+    statements and verdict each relevant/not to the question — then
+    aggregate relevant/total across all chunks. Only explicit 'yes' counts.
     """
     async def score(state, target):
         chunks = _require_retrieval_context(state, "contextual_relevancy")
         judge = _resolve_judge(judge_model)
         question = str(state.input)
-
-        system = (
-            "You are a context-relevance judge. Given a question and a list "
-            "of retrieved chunks, extract every standalone statement that "
-            "appears across the chunks and for each one decide whether it is "
-            "RELEVANT to answering the question:\n"
-            "  yes — the statement helps answer the question\n"
-            "  no  — the statement is off-topic noise (boilerplate, unrelated facts, etc.)\n"
-            "Include claim text verbatim so we can audit later. Return the "
-            "list via the submit_chunk_statements tool."
-        )
-        user = (
-            f"QUESTION:\n{question}\n\n"
-            f"RETRIEVED CONTEXT:\n{_format_chunks(chunks)}"
-        )
-        tool = _verdict_list_tool(
-            "submit_chunk_statements",
-            "Submit per-statement relevancy verdicts for the chunk contents.",
-            ["yes", "no"],
-        )
+        all_verdicts: List[dict] = []
         try:
-            args = await _judge_with_tool(judge, system, user, tool)
+            for chunk in chunks:
+                args = await _call_tool(
+                    judge,
+                    _CONTEXTUAL_RELEVANCY_VERDICTS_PROMPT
+                    .replace("__INPUT__", question)
+                    .replace("__CONTEXT__", chunk),
+                    _verdict_tool(
+                        "submit_statement_verdicts",
+                        "Extract statements from THIS chunk and verdict each vs the input.",
+                        ["yes", "no"],
+                        extra_props={
+                            "statement": {
+                                "type": "string",
+                                "description": "The statement extracted from the context.",
+                            }
+                        },
+                        required_extra=["statement"],
+                    ),
+                )
+                all_verdicts.extend(args.get("verdicts") or [])
         except RuntimeError as e:
             return Score(value=0.0, explanation=f"Judge failure: {e}")
-        verdicts = args.get("verdicts") or []
-        value = _binary_yes_fraction(verdicts)
+        value = _yes_fraction(all_verdicts)
+        n_yes = sum(1 for v in all_verdicts if str(v.get("verdict", "")).lower() == "yes")
         explanation = (
-            f"contextual_relevancy = {value:.2f} "
-            f"({sum(1 for v in verdicts if v.get('verdict') == 'yes')}/{len(verdicts)} chunk statements relevant)\n"
-            + _summarise_verdicts(verdicts)
+            f"contextual_relevancy = {value:.2f} ({n_yes}/{len(all_verdicts)} statements relevant "
+            f"across {len(chunks)} chunks)\n" + _summarise(all_verdicts)
         )
-        return Score(
-            value=value,
-            explanation=explanation,
-            metadata={"verdicts": verdicts},
-        )
-
-    return score
-
-
-@scorer(metrics=[mean(), stderr()])
-def groundedness(judge_model: Optional[str] = None):
-    """1 minus the fraction of answer sentences contradicted by chunks.
-
-    Reports as "groundedness" (higher = more grounded) rather than
-    DeepEval's "hallucination rate" (higher = worse). The math is
-    identical to ``1 - hallucination_rate`` — see ``contradiction_rate``
-    in score metadata for the raw DeepEval value. The renaming matches
-    Mistral's RAG-eval naming and the viewer's color scale (green/high
-    = good, red/low = bad). A score of 1.0 means no sentence in the
-    answer is contradicted by the retrieved context.
-    """
-    async def score(state, target):
-        chunks = _require_retrieval_context(state, "groundedness")
-        judge = _resolve_judge(judge_model)
-        answer = state.output.completion if state.output else ""
-        if not answer.strip():
-            return Score(value=0.0, explanation="No answer produced.")
-
-        system = (
-            "You are a groundedness judge. Break the model's answer into "
-            "atomic factual sentences. For each sentence, decide whether "
-            "the retrieved context CONTRADICTS it (the answer says X, but "
-            "the context says not-X or implies otherwise):\n"
-            "  yes — the context contradicts the sentence (hallucinated)\n"
-            "  no  — the context does not contradict (consistent or unaddressed)\n"
-            "Return the list via the submit_groundedness_verdicts tool."
-        )
-        user = (
-            f"ANSWER:\n{answer}\n\n"
-            f"RETRIEVED CONTEXT:\n{_format_chunks(chunks)}"
-        )
-        tool = _verdict_list_tool(
-            "submit_groundedness_verdicts",
-            "Submit per-sentence contradiction verdicts (used to derive groundedness).",
-            ["yes", "no"],
-        )
-        try:
-            args = await _judge_with_tool(judge, system, user, tool)
-        except RuntimeError as e:
-            return Score(value=0.0, explanation=f"Judge failure: {e}")
-        verdicts = args.get("verdicts") or []
-        contradiction_rate = _binary_yes_fraction(verdicts)
-        value = 1.0 - contradiction_rate
-        explanation = (
-            f"groundedness = {value:.2f} "
-            f"({sum(1 for v in verdicts if v.get('verdict') == 'no')}/{len(verdicts)} sentences consistent; "
-            f"contradiction_rate={contradiction_rate:.2f})\n"
-            + _summarise_verdicts(verdicts)
-        )
-        return Score(
-            value=value,
-            explanation=explanation,
-            metadata={
-                "verdicts": verdicts,
-                "contradiction_rate": contradiction_rate,
-            },
-        )
+        return Score(value=value, explanation=explanation, metadata={"verdicts": all_verdicts})
 
     return score

@@ -10,12 +10,12 @@ import pytest
 
 from eval_mcp.scorers.rag import (
     RAG_PROMPT_TEMPLATE,
-    _binary_yes_fraction,
-    _faithfulness_score,
     _format_chunks,
     _fraction,
-    _precision_at_k,
-    _summarise_verdicts,
+    _not_no_fraction,
+    _summarise,
+    _weighted_precision_at_k,
+    _yes_fraction,
     configure_judge,
 )
 
@@ -35,94 +35,100 @@ def test_fraction_handles_zero_denominator() -> None:
     assert _fraction(2, 4) == 0.5
 
 
-def test_faithfulness_counts_yes_and_idk_as_faithful() -> None:
+# --- _not_no_fraction: DeepEval faithfulness / answer_relevancy ---
+# yes AND idk count as good; only "no" fails. Empty list → 1.0 (DeepEval
+# returns 1 when there are no claims/statements).
+
+def test_not_no_counts_yes_and_idk() -> None:
     verdicts = [
         {"verdict": "yes"},
         {"verdict": "idk"},
         {"verdict": "no"},
         {"verdict": "no"},
     ]
-    assert _faithfulness_score(verdicts) == 0.5
+    assert _not_no_fraction(verdicts) == 0.5
 
 
-def test_faithfulness_all_yes_is_one() -> None:
-    assert _faithfulness_score([{"verdict": "yes"}, {"verdict": "yes"}]) == 1.0
+def test_not_no_all_yes_is_one() -> None:
+    assert _not_no_fraction([{"verdict": "yes"}, {"verdict": "idk"}]) == 1.0
 
 
-def test_faithfulness_empty_is_zero() -> None:
-    assert _faithfulness_score([]) == 0.0
+def test_not_no_empty_is_one() -> None:
+    # Matches DeepEval: no claims → faithfulness 1.0
+    assert _not_no_fraction([]) == 1.0
 
 
-def test_binary_yes_fraction() -> None:
+def test_not_no_case_insensitive() -> None:
+    assert _not_no_fraction([{"verdict": "NO"}, {"verdict": "Yes"}]) == 0.5
+
+
+# --- _yes_fraction: DeepEval contextual_recall / contextual_relevancy ---
+# only explicit "yes" counts; empty → 0.0.
+
+def test_yes_fraction() -> None:
     verdicts = [
         {"verdict": "yes"},
         {"verdict": "no"},
         {"verdict": "yes"},
         {"verdict": "yes"},
     ]
-    assert _binary_yes_fraction(verdicts) == 0.75
+    assert _yes_fraction(verdicts) == 0.75
 
+
+def test_yes_fraction_empty_is_zero() -> None:
+    assert _yes_fraction([]) == 0.0
+
+
+def test_yes_fraction_idk_does_not_count() -> None:
+    # Unlike _not_no_fraction, idk is NOT counted here.
+    assert _yes_fraction([{"verdict": "yes"}, {"verdict": "idk"}]) == 0.5
+
+
+# --- _weighted_precision_at_k: DeepEval contextual_precision ---
+# Operates on verdicts in the order given (retriever rank order).
 
 def test_precision_at_k_all_relevant() -> None:
-    # 3 chunks, all relevant. precision@1=1, @2=1, @3=1. Mean=1.
-    verdicts = [
-        {"chunk_index": 1, "verdict": "yes"},
-        {"chunk_index": 2, "verdict": "yes"},
-        {"chunk_index": 3, "verdict": "yes"},
-    ]
-    assert _precision_at_k(verdicts) == 1.0
+    verdicts = [{"verdict": "yes"}, {"verdict": "yes"}, {"verdict": "yes"}]
+    assert _weighted_precision_at_k(verdicts) == 1.0
 
 
 def test_precision_at_k_no_relevant() -> None:
-    verdicts = [
-        {"chunk_index": 1, "verdict": "no"},
-        {"chunk_index": 2, "verdict": "no"},
-    ]
-    assert _precision_at_k(verdicts) == 0.0
+    assert _weighted_precision_at_k([{"verdict": "no"}, {"verdict": "no"}]) == 0.0
+
+
+def test_precision_at_k_empty() -> None:
+    assert _weighted_precision_at_k([]) == 0.0
 
 
 def test_precision_at_k_irrelevant_first_punishes() -> None:
-    # Irrelevant first, then relevant: precision@2 = 1/2 over 1 relevant.
-    verdicts = [
-        {"chunk_index": 1, "verdict": "no"},
-        {"chunk_index": 2, "verdict": "yes"},
-    ]
-    assert _precision_at_k(verdicts) == pytest.approx(0.5)
+    # no, yes → relevant at k=2: precision@2 = 1/2, over 1 relevant.
+    verdicts = [{"verdict": "no"}, {"verdict": "yes"}]
+    assert _weighted_precision_at_k(verdicts) == pytest.approx(0.5)
 
 
 def test_precision_at_k_relevant_first_rewards() -> None:
-    # Relevant first, then irrelevant: precision@1 = 1/1 over 1 relevant.
-    verdicts = [
-        {"chunk_index": 1, "verdict": "yes"},
-        {"chunk_index": 2, "verdict": "no"},
-    ]
-    assert _precision_at_k(verdicts) == 1.0
+    # yes, no → relevant at k=1: precision@1 = 1/1, over 1 relevant.
+    verdicts = [{"verdict": "yes"}, {"verdict": "no"}]
+    assert _weighted_precision_at_k(verdicts) == 1.0
 
 
-def test_precision_at_k_respects_chunk_index_order() -> None:
-    # Verdicts returned out of order — function must sort by chunk_index
-    # before computing precision-at-k. (Judges return arrays in arbitrary
-    # order sometimes.)
-    verdicts = [
-        {"chunk_index": 3, "verdict": "yes"},
-        {"chunk_index": 1, "verdict": "no"},
-        {"chunk_index": 2, "verdict": "yes"},
-    ]
-    # Sorted: no, yes, yes. Precision@2 + precision@3 / 2 = (1/2 + 2/3)/2.
+def test_precision_at_k_mixed_order() -> None:
+    # no, yes, yes (in list order). relevant at k=2 (1/2) and k=3 (2/3),
+    # over 2 relevant → (1/2 + 2/3) / 2.
+    verdicts = [{"verdict": "no"}, {"verdict": "yes"}, {"verdict": "yes"}]
     expected = (0.5 + (2 / 3)) / 2
-    assert _precision_at_k(verdicts) == pytest.approx(expected)
+    assert _weighted_precision_at_k(verdicts) == pytest.approx(expected)
 
 
-def test_summarise_verdicts_truncates() -> None:
-    verdicts = [{"verdict": "yes", "claim": "c", "reason": "r"} for _ in range(20)]
-    out = _summarise_verdicts(verdicts, limit=3)
+def test_summarise_truncates() -> None:
+    verdicts = [{"verdict": "yes", "statement": "s", "reason": "r"} for _ in range(20)]
+    out = _summarise(verdicts, limit=3)
     assert "(17 more)" in out
-    # Three actual lines + the ellipsis line
     assert out.count("[yes]") == 3
 
 
-def test_summarise_verdicts_empty_message() -> None:
-    assert "no verdicts" in _summarise_verdicts([])
+def test_summarise_empty_message() -> None:
+    assert "no verdicts" in _summarise([])
 
 
 def test_rag_prompt_template_has_placeholders() -> None:

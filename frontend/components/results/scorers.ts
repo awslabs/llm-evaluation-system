@@ -45,13 +45,14 @@ export const SCORER_INFO: Record<string, ScorerInfo> = {
       "Configurable string match between the model's answer and the reference. By default the reference must appear at the end of the model's output.",
   },
   // RAG scorers — each one needs retrieval_context on every sample and
-  // runs ONE LLM-judge call per metric. Order in this object is
-  // insertion order, which is also the order the chip row will render.
+  // ported from DeepEval's QAG metrics (extract → verdict → ratio).
+  // Order in this object is insertion order, which is also the order
+  // the chip row will render.
   faithfulness: {
     label: "Faithfulness",
     short: "answer ↔ context",
     description:
-      "Fraction of claims in the model's answer that agree with the retrieved chunks. 1.0 means every claim is grounded; lower means the model invented or contradicted facts.",
+      "Fraction of claims in the model's answer that don't contradict the retrieved chunks. 1.0 means no claim is contradicted; lower means the model contradicted the context. Claims not mentioned in the context (but not contradicted) still count as faithful.",
   },
   answer_relevancy: {
     label: "Relevancy",
@@ -76,12 +77,6 @@ export const SCORER_INFO: Record<string, ScorerInfo> = {
     short: "chunk noise",
     description:
       "Fraction of statements across the retrieved chunks that are relevant to the question. High when chunks are tightly scoped; low when they're padded with off-topic boilerplate.",
-  },
-  groundedness: {
-    label: "Groundedness",
-    short: "1 − contradiction",
-    description:
-      "1 minus the fraction of answer sentences contradicted by the retrieved context. Higher means more grounded; 1.0 means no sentence is contradicted. Equivalent to (1 − DeepEval's hallucination rate); naming matches Mistral's RAG-eval convention so higher = better, aligned with the viewer's color scale.",
   },
 };
 

@@ -122,13 +122,12 @@ def test_registry_keys_are_documented_set() -> None:
         "exact",
         "includes",
         "match",
-        # RAG suite
+        # RAG suite (DeepEval QAG ports)
         "faithfulness",
         "answer_relevancy",
         "contextual_precision",
         "contextual_recall",
         "contextual_relevancy",
-        "groundedness",
     }
 
 
@@ -160,19 +159,18 @@ def test_all_rag_scorers_compose_with_jury(jc: JudgeConfig) -> None:
         "contextual_precision",
         "contextual_recall",
         "contextual_relevancy",
-        "groundedness",
     ]
     code, cfg = _render(jc, scorers=scorers)
     assert (
         "scorer=[jury_scorer(), faithfulness(), answer_relevancy(), "
         "contextual_precision(), contextual_recall(), "
-        "contextual_relevancy(), groundedness()]"
+        "contextual_relevancy()]"
     ) in code
     # All RAG scorers reach the right import line
     expected_import = (
         "from eval_mcp.scorers.rag import "
         "answer_relevancy, contextual_precision, contextual_recall, "
-        "contextual_relevancy, faithfulness, groundedness"
+        "contextual_relevancy, faithfulness"
     )
     assert expected_import in code
     assert "def jury_scorer" in code  # jury block still emitted

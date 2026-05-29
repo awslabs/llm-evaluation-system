@@ -273,7 +273,7 @@ async def save_dataset(
       JSON/JSONL datasets carry it as a native array; CSV cells must
       be a JSON-encoded list like ``["chunk1", "chunk2"]`` (or chunks
       joined with ``|||``). Required by the faithfulness /
-      contextual_* / groundedness scorers.
+      answer_relevancy / contextual_* scorers.
     - ``actual_output`` (score-only mode) — a pre-generated answer
       per sample. When every sample has actual_output populated,
       create_eval_config switches into score-only mode automatically:
@@ -597,18 +597,21 @@ async def create_eval_config(
             - "contextual_precision": precision-at-k of retrieved chunks vs golden answer (RAG)
             - "contextual_recall": fraction of golden-answer sentences backed by retrieved chunks (RAG)
             - "contextual_relevancy": fraction of chunk statements relevant to the question (RAG)
-            - "groundedness": 1 minus contradiction rate (higher = more grounded) (RAG)
             Compose by passing several names, e.g. ["jury", "f1"] runs both
             and stores both scores in the eval log. Pure deterministic runs
             (no "jury") skip judge LLM calls entirely — fast and free.
 
-            RAG scorers (faithfulness, answer_relevancy, contextual_*,
-            groundedness) REQUIRE a retrieval_context column on every
-            sample. Save the dataset with retrieval_context first, then
-            pass e.g. scorers=["faithfulness", "answer_relevancy",
-            "contextual_precision", "contextual_recall"]. Each RAG
-            metric runs one LLM-judge call per sample — opt into the
-            specific ones you need rather than all six by default.
+            The five RAG scorers (faithfulness, answer_relevancy,
+            contextual_precision, contextual_recall, contextual_relevancy)
+            are faithful ports of DeepEval's RAG-triad metrics and REQUIRE
+            a retrieval_context column on every sample. Save the dataset
+            with retrieval_context first, then pass e.g.
+            scorers=["faithfulness", "answer_relevancy",
+            "contextual_precision", "contextual_recall"]. Each RAG metric
+            makes multiple LLM-judge calls per sample (extract → verdict),
+            so opt into the specific ones you need. For answer correctness
+            against the golden answer, use the jury with a "correctness"
+            criterion rather than a RAG scorer.
 
     Returns:
         JSON with the auto-generated configName and summary. Pass that configName
@@ -669,7 +672,7 @@ async def create_agent_eval_config(
             "jury", "f1", "exact", "includes", "match", plus the RAG
             family — "faithfulness", "answer_relevancy",
             "contextual_precision", "contextual_recall",
-            "contextual_relevancy", "groundedness". RAG scorers require
+            "contextual_relevancy". RAG scorers require
             a retrieval_context column on every sample. Compose for both
             deterministic and rubric signal on the same agent run.
             See create_eval_config for full details.

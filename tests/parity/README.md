@@ -60,62 +60,61 @@ test with stronger judges (Sonnet, Opus).
 
 ## Results
 
-### After the verbatim DeepEval port (2026-05-27)
+### Sonnet 4.6 judge — the representative run (2026-05-27)
 
-Once the 5 scorers were rewritten as faithful QAG ports (multi-stage
-extract→verdict, verbatim DeepEval v4.0.4 prompts, contextual_relevancy
-switched to per-chunk), Claude Haiku 4.5 judge:
+This is the run that matters: **Sonnet 4.6 is the product's default
+judge** (`judge_config.JUDGE_MODELS["claude"]`), and the RAG QAG metrics
+are single-judge (no voting), so judge quality is decisive.
 
 ```
 ======================================================================
 metric                     spearman    eval-mcp mean   deepeval mean
 ----------------------------------------------------------------------
-faithfulness                 +0.982 ✓          0.817           0.783
-answer_relevancy             +0.988 ✓          0.667           0.650
-contextual_precision         +0.364 ✗          0.833           0.883
-contextual_recall            +0.000 ✗          1.000           0.900
-contextual_relevancy         +0.897 ✓          0.753           0.708
+faithfulness                 +1.000 ✓          0.783           0.783
+answer_relevancy             +1.000 ✓          0.733           0.733
+contextual_precision         +1.000 ✓          0.883           0.883
+contextual_recall            +0.667 ~          0.900           0.800
+contextual_relevancy         +0.875 ✓          0.720           0.678
 ======================================================================
 ```
 
-**The port fixed contextual_relevancy** — it went from 0.423 (pre-port,
-aggregate single call) to 0.897 once switched to DeepEval's per-chunk
-structure. That was the real win.
+**On a capable judge, the port matches DeepEval almost exactly** — three
+metrics at perfect 1.000 rank agreement. The only soft spot is
+contextual_recall (0.667), driven by a single borderline sentence-
+attribution call (`missing_chunk_for_golden`: we credit "~1519" as
+attributable, DeepEval doesn't because the date isn't in the chunk).
+That's a genuine edge case, not a judge artifact — and we leave it,
+because the prompt is verbatim DeepEval; tuning it would diverge from
+the reference.
 
-**The two ✗ metrics are mostly a measurement artifact, not a defect:**
+### Haiku 4.5 judge — DON'T use for RAG scorers
 
-- **contextual_recall 0.000** is degenerate, not "total disagreement."
-  eval-mcp scored **1.0 on all 10 samples**, so the series is constant
-  and Spearman is mathematically undefined (reported 0). Per-sample, we
-  **agree with DeepEval on 9 of 10**; the only real disagreement is
-  `missing_chunk_for_golden` (we credit the "~1519" sentence as
-  attributable, DeepEval doesn't because the date isn't in the chunk —
-  we're slightly lenient on sentence granularity).
-- **contextual_precision 0.364** agrees on 8 of 10, with two
-  single-sample, single-run verdict disagreements (`noisy_chunks`,
-  `missing_chunk_for_golden`) on borderline "is this noisy chunk useful"
-  calls.
+The same suite on Haiku 4.5 looked alarming: contextual_precision 0.364,
+contextual_recall 0.000. **Those were the judge, not our code.** Example:
+on `noisy_chunks`, Haiku wrongly marked the answer-containing chunk as
+irrelevant (precision 0.0); Sonnet gets it right (1.0, matching DeepEval).
 
-**Why we're NOT chasing the two ✗ metrics with code:** the scorers now
-use DeepEval's prompts verbatim. Hand-tuning them to close these last
-gaps would mean *diverging* from DeepEval — defeating the point of the
-port. The low Spearman is driven by (a) dataset saturation — too many
-clean 1.0 cases leave no variance for rank correlation — and (b) normal
-single-judge run-to-run variance on 2-3 borderline samples. The correct
-fix is a **larger, less-saturated parity dataset** (push to 30-50
-samples with more mid-range cases), not prompt edits. Tracked as a
-follow-up; not blocking, since the structural port is done and 3/5
-metrics are cleanly aligned with the other 2 explained.
+Lesson baked into the default: **single-judge QAG metrics need a strong
+judge.** Haiku is too weak — its verdicts on borderline relevance/
+attribution calls are unreliable. The RAG scorers pick up whatever judge
+the jury is configured with, which defaults to Sonnet 4.6. Don't drop
+the RAG judge to Haiku to save cost — the metric quality collapses.
+
+| metric | Haiku 4.5 | Sonnet 4.6 |
+|---|---|---|
+| faithfulness | 0.982 | **1.000** |
+| answer_relevancy | 0.988 | **1.000** |
+| contextual_precision | 0.364 ✗ | **1.000** |
+| contextual_recall | 0.000 ✗ | 0.667 |
+| contextual_relevancy | 0.897 | 0.875 |
 
 ### Pre-port baseline (for reference)
 
-Before the port (our own paraphrased single-call prompts, 6 metrics
-including the since-removed `groundedness`): faithfulness +0.968,
-answer_relevancy +1.000, contextual_precision +1.000,
-contextual_recall +0.667, contextual_relevancy **+0.423**,
-groundedness +0.986. The port traded a couple of artificially-high
-saturated correlations for a correct contextual_relevancy and verbatim
-DeepEval alignment.
+Before the verbatim port (our paraphrased single-call prompts, 6 metrics
+including the since-removed `groundedness`, Haiku judge): contextual_
+relevancy was **0.423** — the metric was structurally wrong (single
+aggregate call vs DeepEval's per-chunk). The port fixed that, and moving
+to Sonnet 4.6 cleaned up the rest.
 
 ## Interpreting output
 

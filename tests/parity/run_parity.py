@@ -231,9 +231,11 @@ def _judge_model_ids() -> tuple[str, str]:
     Inspect AI prefixes Bedrock models with ``bedrock/`` while DeepEval
     expects the raw model_id. ``BEDROCK_MODEL_ID`` is the raw form.
     """
-    raw = os.environ.get(
-        "BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0"
-    )
+    # Default to Sonnet 4.6 — the product's default judge
+    # (judge_config.JUDGE_MODELS["claude"]). RAG QAG metrics are
+    # single-judge (no voting), so judge quality matters; Haiku is too
+    # weak for reliable verdicts. Override via BEDROCK_MODEL_ID.
+    raw = os.environ.get("BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6")
     return (f"bedrock/{raw}", raw)
 
 

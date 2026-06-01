@@ -212,6 +212,40 @@ def extract_pdf_pages(pdf_bytes: bytes, start_page: int, end_page: int) -> bytes
     return output.getvalue()
 
 
+def pdf_to_text(pdf_bytes: bytes, skip_pages: int = 0) -> str:
+    """Extract plain text from a PDF, skipping the first ``skip_pages``.
+
+    ``skip_pages`` is used to drop a chunk's leading context-overlap pages so
+    only the *content* pages contribute. Best-effort: PDF text extraction is
+    lossy for tables/figures/multi-column layouts, which is acceptable for the
+    synthetic ``retrieval_context`` it feeds (faithfulness/answer_relevancy
+    judge against this text, not a pixel-perfect rendering).
+
+    Returns page texts joined by blank lines; empty string if nothing extracts.
+    """
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    parts: List[str] = []
+    for page in reader.pages[skip_pages:]:
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            text = ""
+        if text.strip():
+            parts.append(text.strip())
+    return "\n\n".join(parts)
+
+
+def pdf_chunk_to_text(chunk: PDFChunk) -> str:
+    """Plain text of a PDF chunk's *content* pages (excludes leading overlap).
+
+    Used to synthesise ``retrieval_context`` for RAG-style QA datasets: the
+    chunk a QA pair was generated from IS that pair's retrieved context.
+    """
+    return pdf_to_text(chunk.pdf_bytes, skip_pages=chunk.context_page_count)
+
+
 def chunk_pdf(pdf_bytes: bytes) -> List[PDFChunk]:
     """Chunk PDF into smaller PDFs with overlap for context continuity.
 

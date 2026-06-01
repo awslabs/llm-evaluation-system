@@ -73,7 +73,12 @@ from eval_mcp.core.user_storage import (
     get_user_log_dir,
     save_optimization_to_db,
 )
-from eval_mcp.tools.create_config import create_inspect_task_file
+from eval_mcp.tools.create_config import (
+    create_inspect_task_file,
+    has_rag_scorer,
+    RAG_SCORERS,
+    _validate_scorers,
+)
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 from eval_mcp.tools.run_eval import (
     _running_evaluations,
@@ -219,6 +224,22 @@ def _format_failures_for_optimizer(failures: List[Dict[str, Any]]) -> str:
                     note = note_entry.get("note", "")
                     if note:
                         lines.append(f"        [{judge}] {note}")
+        # Non-jury scorers (RAG faithfulness/answer_relevancy, built-in f1/…)
+        # carry no criteria; surface their per-scorer score + reason instead so
+        # the optimizer still sees WHY a sample scored low, not just that it did.
+        breakdown = f.get("scorer_breakdown", {})
+        low_scorers = [
+            (name, d) for name, d in breakdown.items()
+            if name != "jury_scorer" and d.get("score", 1.0) < 1.0
+        ]
+        if low_scorers:
+            lines.append("  Low scorers:")
+            for name, d in low_scorers:
+                label = name.replace("_scorer", "")
+                lines.append(f"    - {label}: {d.get('score', 0.0):.2f}")
+                reason = (d.get("explanation") or "").strip()
+                if reason:
+                    lines.append(f"        {reason[:300]}")
         lines.append("")
     return "\n".join(lines)
 
@@ -274,10 +295,14 @@ def _write_temp_dataset(user_dir: Path, fragment: str, samples: List[Dict[str, s
     temp_dir = user_dir / "temp"
     temp_dir.mkdir(parents=True, exist_ok=True)
     out_path = temp_dir / f"{fragment}.json"
-    inspect_samples = [
-        {"question": s["question"], "golden_answer": s["golden_answer"]}
-        for s in samples
-    ]
+    inspect_samples = []
+    for s in samples:
+        row = {"question": s["question"], "golden_answer": s["golden_answer"]}
+        # Carry retrieval_context through so RAG scorers can run on optimizer
+        # iterations (create_inspect_task_file reads vars.retrieval_context).
+        if s.get("retrieval_context"):
+            row["retrieval_context"] = s["retrieval_context"]
+        inspect_samples.append(row)
     out_path.write_text(json.dumps(inspect_samples, indent=2))
     return out_path
 
@@ -290,9 +315,14 @@ def _write_inspect_config(
     judge_config: JudgeConfig,
     prompts: Optional[List[str]],
     description: str,
+    scorers: Optional[List[str]] = None,
 ) -> Path:
     """Generate task file + config JSON via ``create_inspect_task_file``
-    and write both to ``<user_dir>/configs/``. Returns the .py path."""
+    and write both to ``<user_dir>/configs/``. Returns the .py path.
+
+    ``scorers`` defaults (in create_inspect_task_file) to ``["jury"]``; pass a
+    RAG/built-in set to optimise against those instead of (or alongside) the
+    jury."""
     config_dir = user_dir / "configs"
     config_dir.mkdir(parents=True, exist_ok=True)
 
@@ -304,6 +334,7 @@ def _write_inspect_config(
         judge_config=judge_config,
         description=description,
         prompts=prompts,
+        scorers=scorers,
     )
     py_path = config_dir / f"{config_name}.py"
     py_path.write_text(task_code)
@@ -424,34 +455,60 @@ async def _spawn_inspect_eval(
         logger.debug("inspect eval stderr (rc=0) for %s: %s", config_name, stderr)
 
 
-def _extract_rows_from_log(log: Any) -> List[Dict[str, Any]]:
-    """Pull per-sample rows out of an Inspect eval log. Each row carries
-    the question, golden, model answer, jury score, and the
-    ``criteria_results`` metadata where improvement notes live.
+def _coerce_score_value(value: Any) -> Optional[float]:
+    """Coerce an Inspect Score.value to float; None if not numeric.
 
-    The optimizer always writes its temp configs with the default
-    ``scorers=["jury"]``, but read defensively: prefer the ``jury_scorer``
-    entry by name in case other scorers were composed in. Built-in
-    scorers (``f1``/``exact``/...) carry no ``criteria_results`` metadata,
-    so they're useless to the optimizer; we fall back to the first
-    available scorer only so a malformed log doesn't crash."""
+    Jury and RAG/built-in scorers all return numeric 0..1 values, so this
+    covers every scorer the optimizer drives. Categorical "C"/"I" fall back
+    to 1.0/0.0; anything else is dropped from the mean."""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        if value == "C":
+            return 1.0
+        if value == "I":
+            return 0.0
+        return None
+
+
+def _extract_rows_from_log(log: Any) -> List[Dict[str, Any]]:
+    """Pull per-sample rows out of an Inspect eval log. Each row carries the
+    question, golden, model answer, the headline ``sample_score``, jury
+    ``criteria_results`` (when present), and a per-scorer breakdown.
+
+    The optimizer can now drive any scorer set (jury, RAG, built-in, or a
+    mix). The headline ``sample_score`` is the MEAN across every scorer on the
+    sample — the same objective the viewer headline uses — so the loop
+    optimises the combined signal, not just whichever scorer came first.
+    ``criteria_results`` (jury) and ``scorer_breakdown`` (RAG/built-in reasons)
+    both feed the failure context shown to the optimizer LLM."""
     rows: List[Dict[str, Any]] = []
     for sample in (log.samples or []):
-        score_obj = None
-        if sample.scores:
-            score_obj = sample.scores.get("jury_scorer") or next(
-                iter(sample.scores.values()), None
-            )
-
-        sample_score = 0.0
+        scores = sample.scores or {}
+        scorer_breakdown: Dict[str, Dict[str, Any]] = {}
+        numeric_values: List[float] = []
         criteria_results: List[Dict[str, Any]] = []
-        if score_obj is not None:
-            try:
-                sample_score = float(score_obj.value) if score_obj.value is not None else 0.0
-            except (TypeError, ValueError):
-                sample_score = 0.0
+
+        for name, score_obj in scores.items():
+            val = _coerce_score_value(getattr(score_obj, "value", None))
+            if val is not None:
+                scorer_breakdown[name] = {
+                    "score": val,
+                    "explanation": getattr(score_obj, "explanation", "") or "",
+                }
+                numeric_values.append(val)
             meta = getattr(score_obj, "metadata", None) or {}
-            criteria_results = meta.get("criteria_results", []) or []
+            if name == "jury_scorer":
+                criteria_results = meta.get("criteria_results", []) or []
+
+        # Headline objective = mean across all scorers (matches the viewer).
+        sample_score = (
+            sum(numeric_values) / len(numeric_values) if numeric_values else 0.0
+        )
 
         answer = ""
         if sample.output and sample.output.completion:
@@ -463,6 +520,7 @@ def _extract_rows_from_log(log: Any) -> List[Dict[str, Any]]:
             "answer": answer,
             "sample_score": sample_score,
             "criteria_results": criteria_results,
+            "scorer_breakdown": scorer_breakdown,
         })
     return rows
 
@@ -482,6 +540,7 @@ async def _run_inspect_iteration(
     prompt_template: str,
     providers: List[str],
     judge_config: JudgeConfig,
+    scorers: Optional[List[str]] = None,
 ) -> Tuple[Optional[str], List[Dict[str, Any]]]:
     """Single optimizer iteration as a real Inspect AI eval. Returns
     ``(run_id, rows)`` where ``rows`` is per-sample data ready for failure
@@ -496,6 +555,7 @@ async def _run_inspect_iteration(
         judge_config=judge_config,
         prompts=[prompt_template],
         description=f"Optimizer iteration: {config_name}",
+        scorers=scorers,
     )
 
     before = await _snapshot_log_set(log_dir)
@@ -522,6 +582,7 @@ async def _run_inspect_test_ranking(
     prompts_by_iter: List[Tuple[int, str]],
     providers: List[str],
     judge_config: JudgeConfig,
+    scorers: Optional[List[str]] = None,
 ) -> Tuple[Optional[str], Dict[int, float]]:
     """Run every prompt in history against the test split in a single
     Inspect job. ``prompts_by_iter`` preserves iteration order so we can
@@ -542,6 +603,7 @@ async def _run_inspect_test_ranking(
         judge_config=judge_config,
         prompts=prompts_in_order,
         description=f"Optimizer test-time ranking: {optimization_id}",
+        scorers=scorers,
     )
 
     before = await _snapshot_log_set(log_dir)
@@ -638,10 +700,16 @@ async def optimize_prompt_loop(
     max_iter: int = DEFAULT_MAX_ITERATIONS,
     sample_size: int = DEFAULT_SAMPLE_SIZE,
     test_holdout: float = DEFAULT_TEST_HOLDOUT,
+    scorers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Run the optimization loop. Each iteration is a real Inspect AI
     eval; iteration ``eval_run_id`` is stored in history so the UI can
-    deep-link to it. Returns the full record ready for persistence."""
+    deep-link to it. Returns the full record ready for persistence.
+
+    ``scorers`` selects what each iteration scores against (default
+    ``["jury"]``). The optimisation objective is the mean across the selected
+    scorers, so passing e.g. ``["jury", "faithfulness"]`` or
+    ``["faithfulness", "answer_relevancy"]`` optimises that combined signal."""
 
     train, test = _split_train_test(qa_pairs, holdout=test_holdout)
     if not train:
@@ -687,6 +755,7 @@ async def optimize_prompt_loop(
             prompt_template=initial_prompt,
             providers=providers,
             judge_config=judge_config,
+            scorers=scorers,
         )
         last_rows = iter_0_rows
         initial_train_rate = _pass_rate(iter_0_rows)
@@ -741,6 +810,7 @@ async def optimize_prompt_loop(
                 prompt_template=candidate,
                 providers=providers,
                 judge_config=judge_config,
+                scorers=scorers,
             )
             cand_rate = _pass_rate(cand_rows)
 
@@ -778,6 +848,7 @@ async def optimize_prompt_loop(
                 prompts_by_iter=[(h["iter"], h["prompt"]) for h in history],
                 providers=providers,
                 judge_config=judge_config,
+                scorers=scorers,
             )
         except Exception as e:
             logger.warning("Test-time ranking failed: %s. Falling back to train scores.", e)
@@ -822,12 +893,23 @@ async def handle_optimize_prompt(
     def _err(msg: str) -> List[TextContent]:
         return [TextContent(type="text", text=json.dumps({"success": False, "error": msg}))]
 
+    # Scorer set to optimise against. Defaults to ["jury"] — unchanged from
+    # before. Any registered scorer (RAG, built-in) or a mix is allowed; the
+    # objective is the mean across them.
+    try:
+        scorers = _validate_scorers(args.get("scorers") or ["jury"])
+    except Exception as e:
+        return _err(str(e))
+    uses_jury = "jury" in scorers
+    uses_rag = has_rag_scorer(scorers)
+
     if not user_id:
         return _err("user_id is required")
     if not dataset_name:
         return _err("dataset is required — use list_datasets to see what's available")
-    if not judge_name:
-        return _err("judge is required — use list_judges to see what's available")
+    # The jury scorer needs a judge (criteria); RAG/built-in scorers don't.
+    if uses_jury and not judge_name:
+        return _err("judge is required when optimising the jury scorer — use list_judges")
     if not providers:
         return _err("providers is required — at least one model under test")
     if "{question}" not in initial_prompt:
@@ -836,27 +918,49 @@ async def handle_optimize_prompt(
     dataset = get_dataset_by_name(user_id, dataset_name)
     if not dataset:
         return _err(f"Dataset '{dataset_name}' not found")
-    judge = get_judge_by_name(user_id, judge_name)
-    if not judge:
-        return _err(f"Judge '{judge_name}' not found")
 
-    criteria = (judge.get("config") or {}).get("criteria") or []
-    if not criteria:
-        return _err(f"Judge '{judge_name}' has no criteria")
-
-    # Build the JudgeConfig the same way create_eval_config does, so the
-    # jury_scorer template renders with identical judges + criteria as a
-    # normal eval would.
+    # Build a JudgeConfig the same way create_eval_config does so the
+    # jury_scorer template renders identical judges + criteria. When no jury
+    # is selected the judge is optional and the config is unused.
     judge_models_arg = args.get("judge_models")
     custom_judges = {m: m for m in judge_models_arg} if judge_models_arg else None
-    judge_config = JudgeConfig(criteria=criteria, judges=custom_judges)
+    criteria: List[Dict[str, Any]] = []
+    if judge_name:
+        judge = get_judge_by_name(user_id, judge_name)
+        if not judge:
+            return _err(f"Judge '{judge_name}' not found")
+        criteria = (judge.get("config") or {}).get("criteria") or []
+        if uses_jury and not criteria:
+            return _err(f"Judge '{judge_name}' has no criteria")
+    judge_config = (
+        JudgeConfig(criteria=criteria, judges=custom_judges)
+        if criteria else JudgeConfig(judges=custom_judges)
+    )
 
-    qa_pairs = [
-        {"question": t["vars"]["question"], "golden_answer": t["vars"]["golden_answer"]}
-        for t in dataset.get("tests", [])
-    ]
+    qa_pairs = []
+    missing_rc = 0
+    for t in dataset.get("tests", []):
+        v = t.get("vars", t)
+        pair = {
+            "question": v.get("question", ""),
+            "golden_answer": v.get("golden_answer", ""),
+        }
+        rc = v.get("retrieval_context")
+        if rc:
+            pair["retrieval_context"] = rc
+        elif uses_rag:
+            missing_rc += 1
+        qa_pairs.append(pair)
     if len(qa_pairs) < 2:
         return _err("Dataset needs at least 2 QA pairs for train/test split")
+    if uses_rag and missing_rc:
+        return _err(
+            f"Dataset '{dataset_name}' has {missing_rc} sample(s) without "
+            f"retrieval_context, required by the RAG scorers "
+            f"{sorted(set(scorers) & RAG_SCORERS)}. Generate it with "
+            f"generate_qa_pairs(attachSourceContext=True) or upload your "
+            f"retriever's chunks via save_dataset."
+        )
 
     optimization_id = f"opt_{int(time.time() * 1000)}"
     started_at = int(time.time() * 1000)
@@ -872,6 +976,7 @@ async def handle_optimize_prompt(
         max_iter=max_iter,
         sample_size=sample_size,
         test_holdout=test_holdout,
+        scorers=scorers,
     )
 
     record = {
@@ -880,6 +985,7 @@ async def handle_optimize_prompt(
         "dataset": dataset_name,
         "judge": judge_name,
         "providers": providers,
+        "scorers": scorers,
         "max_iterations": max_iter,
         "sample_size": sample_size,
         "test_holdout": test_holdout,

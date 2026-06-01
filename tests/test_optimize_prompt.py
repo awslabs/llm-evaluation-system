@@ -394,7 +394,7 @@ def test_loop_iterates_then_converges(judge_config, qa_pairs):
     rows_iter1 = _mock_rows(1.0)
 
     async def fake_run(user_id, user_dir, log_dir, config_name, samples,
-                       prompt_template, providers, judge_config):
+                       prompt_template, providers, judge_config, scorers=None):
         if prompt_template == "{question} now better":
             return f"run_{config_name}", rows_iter1
         return f"run_{config_name}", rows_iter0

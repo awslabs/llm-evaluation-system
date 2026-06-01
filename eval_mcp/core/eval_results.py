@@ -28,6 +28,16 @@ from eval_mcp.core.user_storage import (
 logger = logging.getLogger(__name__)
 
 
+def _mean_scores(scores_by_scorer: dict[str, float]) -> float:
+    """Mean across all scorers — the headline for a multi-scorer run with no
+    jury. Every scorer contributes equally (RAG faithfulness+answer_relevancy,
+    built-in f1+exact, …) so no single scorer silently stands in for the run.
+    """
+    if not scores_by_scorer:
+        return 0.0
+    return sum(scores_by_scorer.values()) / len(scores_by_scorer)
+
+
 # Provider systems whose spans represent on-the-wire LLM calls. When a span
 # tagged with one of these is present for a given model, treat its tokens as
 # canonical and discard any framework-layer tokens for the same model.
@@ -385,12 +395,15 @@ def _build_detail_from_logs(
                         all_criteria.extend(stage.get("criteriaResults", []))
                     score_data["criteriaResults"] = all_criteria
                 else:
-                    # Multi-scorer composition (e.g. jury + f1): prefer
-                    # jury_scorer for the primary score + criteria breakdown
-                    # the UI is designed around. Other scorers are captured
-                    # in scoresByScorer so the frontend can surface them
-                    # alongside without losing data.
-                    primary_name = "jury_scorer" if "jury_scorer" in scorers else next(iter(scorers))
+                    # Multi-scorer composition. With a jury, jury_scorer is the
+                    # canonical headline (its holistic rubric is what the UI is
+                    # designed around) and the rest ride alongside in
+                    # scoresByScorer. WITHOUT a jury, no single scorer is
+                    # "primary" — the headline is the MEAN across all scorers so
+                    # it reflects every signal the run produced (RAG
+                    # faithfulness+answer_relevancy, built-in f1+exact, …),
+                    # not just whichever scorer happened to come first.
+                    has_jury = "jury_scorer" in scorers
                     scores_by_scorer: dict[str, float] = {}
                     for scorer_name, score in scorers.items():
                         metadata = score.get("metadata", {})
@@ -414,7 +427,7 @@ def _build_detail_from_logs(
                                     1.0 if raw_value == "C" else 0.0,
                                 )
                         scores_by_scorer[scorer_name] = sample_score
-                        if scorer_name == primary_name:
+                        if has_jury and scorer_name == "jury_scorer":
                             score_data["score"] = sample_score
                             score_data["passed"] = sample_score > 0.5
                             score_data["explanation"] = score.get("explanation", "")
@@ -422,6 +435,17 @@ def _build_detail_from_logs(
                             score_data["criteriaResults"] = criteria_results
                             for cr in criteria_results:
                                 criteria_set.add(cr["name"])
+                    if not has_jury and scores_by_scorer:
+                        # Average every scorer for the headline. Single-scorer
+                        # runs are unchanged (mean of one == itself), and that
+                        # lone scorer keeps its explanation; a true multi-scorer
+                        # headline has no single explanation (the per-scorer
+                        # detail lives in scoresByScorer).
+                        score_data["score"] = _mean_scores(scores_by_scorer)
+                        score_data["passed"] = score_data["score"] > 0.5
+                        if len(scorers) == 1:
+                            only_score = next(iter(scorers.values()))
+                            score_data["explanation"] = only_score.get("explanation", "")
                     # Always include scoresByScorer when we have any
                     # entry — the frontend uses it not just for the
                     # multi-scorer chip row but also to label

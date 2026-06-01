@@ -24,7 +24,10 @@ def _aws_creds_available() -> bool:
     """
     try:
         import boto3
-        session = boto3.Session()
+        # Default the region like the other Bedrock-gated guards, so a box
+        # with creds but no AWS_REGION env (e.g. an EC2 instance profile)
+        # runs this instead of spuriously skipping on an unresolved region.
+        session = boto3.Session(region_name=os.environ.get("AWS_REGION", "us-west-2"))
         creds = session.get_credentials()
         return creds is not None and session.region_name is not None
     except Exception:

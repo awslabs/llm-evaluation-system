@@ -923,12 +923,13 @@ async def get_evaluation_details(
 @mcp.tool(annotations=CREATE_REMOTE)
 async def optimize_prompt(
     dataset: DatasetName,
-    judge: JudgeName,
+    judge: JudgeName = None,
     initial_prompt: str = "{question}",
     providers: ProvidersList = None,
     max_iterations: int = 3,
     sample_size: int = 10,
     test_holdout: float = 0.4,
+    scorers: list = None,
     user_id: str = None,
 ) -> str:
     """
@@ -937,17 +938,25 @@ async def optimize_prompt(
 
     Splits the dataset into train (60%) / test (40%). Each iteration:
       1. Score the current prompt on a random train sample.
-      2. Show the optimizer LLM the failures + per-criterion improvement
-         notes from the judges.
+      2. Show the optimizer LLM the failures + per-scorer improvement
+         notes (jury criteria, or RAG/built-in scorer reasons).
       3. The optimizer proposes a new prompt — edits, not rewrites, when
          the current prompt is long and structured.
       4. Repeat up to `max_iterations` or until train converges.
     Finally evaluates every attempted prompt on the held-out test set;
-    winner is the highest test pass rate. Ties broken by earlier iter.
+    winner is the highest test score. Ties broken by earlier iter.
+
+    Works with any scorer, not just the jury. When `scorers` names more than
+    one, the objective is the MEAN across them — e.g. `["jury", "faithfulness"]`
+    optimises rubric quality and groundedness together. RAG scorers require the
+    dataset to carry a `retrieval_context` column (see generate_qa_pairs's
+    attachSourceContext, or save_dataset).
 
     Args:
         dataset: Dataset name from list_datasets.
-        judge: Judge name from list_judges (provides the criteria).
+        judge: Judge name from list_judges (provides the jury criteria).
+            Required only when `scorers` includes "jury" (the default);
+            optional for pure RAG/built-in scorer runs.
         initial_prompt: Starting prompt template. MUST contain `{question}`.
             Defaults to `{question}` (pass-through, no wrapping).
         providers: Provider model IDs. Stored for reference; v1 scores
@@ -955,6 +964,9 @@ async def optimize_prompt(
         max_iterations: Hard ceiling on refinement passes (default 3).
         sample_size: Train samples scored per iteration (default 10).
         test_holdout: Fraction of dataset held out for test scoring (default 0.4).
+        scorers: Scorer names to optimise against (default ["jury"]). Any mix of
+            "jury", RAG ("faithfulness", "answer_relevancy", "contextual_*"),
+            and built-ins ("f1", "exact", ...). Objective = mean across them.
 
     Returns:
         JSON: optimization_id, winner_iter, winner_test_score, winner_prompt,
@@ -970,6 +982,7 @@ async def optimize_prompt(
         "max_iterations": max_iterations,
         "sample_size": sample_size,
         "test_holdout": test_holdout,
+        "scorers": scorers,
     }
     result = await handle_optimize_prompt(bedrock, args)
     return result[0].text

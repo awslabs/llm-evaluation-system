@@ -266,25 +266,36 @@ async def save_dataset(
     persists it. Prefer `file_path` — the tool reads from disk (cheap).
     Pass `file_content` only if the data isn't on the local filesystem.
 
-    For score-only mode (evaluate pre-generated outputs WITHOUT calling a
-    candidate model), also pass an actual_output column. When every
-    sample in the saved dataset has actual_output populated,
-    create_eval_config switches into score-only mode automatically:
-    no candidate model is invoked, and scorers grade the static answers
-    against golden_answer.
+    Two optional columns unlock specialised modes:
+
+    - ``retrieval_context`` (RAG mode) — a list of retrieved chunks
+      per sample, in retriever rank order (chunk 1 = most relevant).
+      JSON/JSONL datasets carry it as a native array; CSV cells must
+      be a JSON-encoded list like ``["chunk1", "chunk2"]`` (or chunks
+      joined with ``|||``). Required by the faithfulness /
+      answer_relevancy / contextual_* scorers.
+    - ``actual_output`` (score-only mode) — a pre-generated answer
+      per sample. When every sample has actual_output populated,
+      create_eval_config switches into score-only mode automatically:
+      no candidate model is invoked, and scorers grade the static
+      answers against ``golden_answer`` (and the retrieved chunks if
+      ``retrieval_context`` is also present — that's the pure DeepEval
+      workflow).
 
     Args:
         column_mapping: dict mapping canonical names to source column names.
             Required: ``"question"`` and ``"golden_answer"``.
-            Optional: ``"actual_output"`` — opt into score-only mode.
+            Optional: ``"retrieval_context"`` (enables RAG scorers) and
+            ``"actual_output"`` (opts into score-only mode). The two
+            are independent and may be combined on the same dataset.
         file_path: Absolute path to the dataset file (recommended).
         file_content: Raw file content as a string (fallback).
         filename: Optional display name (inferred from file_path when omitted).
 
     Returns:
-        JSON with success status, generated dataset name, rows saved,
-        and (when actual_output was mapped) the count of rows that
-        ended up with a populated actual_output.
+        JSON with success status, generated dataset name, and rows saved.
+        Includes ``retrieval_context_rows`` when retrieval_context was
+        mapped, and ``actual_output_rows`` when actual_output was mapped.
     """
     args = {
         "file_path": file_path,
@@ -563,7 +574,14 @@ async def create_eval_config(
         providers: List of target models to evaluate (used for jury judges routing).
             For agent evals, the agent calls Bedrock directly. Optional in
             score-only mode (the dataset already carries actual_output).
-        prompts: Single prompt string OR list of prompts for comparison. Use {question} or {prompt} as placeholder.
+        prompts: Single prompt string OR list of prompts for comparison.
+            Use {question} or {prompt} as the placeholder for the
+            sample's input. For RAG evals you may ALSO include
+            {context} — the retrieved chunks will be substituted there
+            so you keep full control of where they land in your
+            production prompt. If {context} is absent in a RAG eval,
+            the chunks are wrapped around your prompt with a generic
+            "Answer using ONLY the provided context" template.
         description: Optional description of the evaluation
         judge_models: Optional list of model IDs to use as judges
         agent_path: Path to a Python agent file to evaluate. The agent must have a callable entry function.
@@ -574,9 +592,26 @@ async def create_eval_config(
             - "exact": Inspect's normalized exact-match
             - "includes": Inspect's substring containment check
             - "match": Inspect's location-aware string match (end/begin/any/exact)
+            - "faithfulness": fraction of answer claims that agree with retrieved chunks (RAG)
+            - "answer_relevancy": fraction of answer statements that address the question (RAG)
+            - "contextual_precision": precision-at-k of retrieved chunks vs golden answer (RAG)
+            - "contextual_recall": fraction of golden-answer sentences backed by retrieved chunks (RAG)
+            - "contextual_relevancy": fraction of chunk statements relevant to the question (RAG)
             Compose by passing several names, e.g. ["jury", "f1"] runs both
             and stores both scores in the eval log. Pure deterministic runs
             (no "jury") skip judge LLM calls entirely — fast and free.
+
+            The five RAG scorers (faithfulness, answer_relevancy,
+            contextual_precision, contextual_recall, contextual_relevancy)
+            are faithful ports of DeepEval's RAG-triad metrics and REQUIRE
+            a retrieval_context column on every sample. Save the dataset
+            with retrieval_context first, then pass e.g.
+            scorers=["faithfulness", "answer_relevancy",
+            "contextual_precision", "contextual_recall"]. Each RAG metric
+            makes multiple LLM-judge calls per sample (extract → verdict),
+            so opt into the specific ones you need. For answer correctness
+            against the golden answer, use the jury with a "correctness"
+            criterion rather than a RAG scorer.
 
     Returns:
         JSON with the auto-generated configName and summary. Pass that configName
@@ -634,7 +669,11 @@ async def create_agent_eval_config(
         description: Optional description of the evaluation
         judge_models: Optional list of model IDs to use as judges
         scorers: Optional list of scorers. Default: ["jury"]. Accepted names:
-            "jury", "f1", "exact", "includes", "match". Compose for both
+            "jury", "f1", "exact", "includes", "match", plus the RAG
+            family — "faithfulness", "answer_relevancy",
+            "contextual_precision", "contextual_recall",
+            "contextual_relevancy". RAG scorers require
+            a retrieval_context column on every sample. Compose for both
             deterministic and rubric signal on the same agent run.
             See create_eval_config for full details.
 

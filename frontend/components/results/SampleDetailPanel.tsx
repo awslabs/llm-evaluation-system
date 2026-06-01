@@ -219,10 +219,61 @@ export default function SampleDetailPanel({
         )}
 
         <ExpandableSection title="Question" content={sample.input} />
+        {sample.retrievalContext && sample.retrievalContext.length > 0 && (
+          <RetrievedContextSection chunks={sample.retrievalContext} />
+        )}
         <ExpandableSection title="Expected answer" content={sample.target} />
         <ExpandableSection title="Model response" content={result.output} />
       </div>
     </aside>
+  );
+}
+
+function RetrievedContextSection({ chunks }: { chunks: string[] }) {
+  const [expanded, setExpanded] = useState<Record<number, boolean>>({});
+  return (
+    <div>
+      <p className="eyebrow mb-2">
+        Retrieved context{" "}
+        <span className="ml-1 font-mono text-[10px] text-bone-mute">
+          ({chunks.length} chunk{chunks.length === 1 ? "" : "s"}, retriever rank)
+        </span>
+      </p>
+      <ol className="space-y-2">
+        {chunks.map((chunk, i) => {
+          const isLong = chunk.length > 240;
+          const isOpen = expanded[i] || !isLong;
+          const visible = isOpen
+            ? chunk
+            : chunk.slice(0, chunk.lastIndexOf(" ", 240)) + "…";
+          return (
+            <li
+              key={i}
+              className="border-l border-rule bg-ink-raised/40 px-3 py-2"
+            >
+              <div className="flex items-baseline gap-2">
+                <span className="flex-shrink-0 font-mono text-[10px] uppercase tracking-eyebrow text-ember">
+                  chunk {i + 1}
+                </span>
+                <span className="whitespace-pre-wrap text-[13px] leading-relaxed text-bone">
+                  {visible}
+                </span>
+              </div>
+              {isLong && (
+                <button
+                  onClick={() =>
+                    setExpanded((s) => ({ ...s, [i]: !s[i] }))
+                  }
+                  className="mt-1.5 font-mono text-[10px] uppercase tracking-eyebrow text-ember hover:text-ember-deep"
+                >
+                  {isOpen ? "Show less ▴" : "Show more ▾"}
+                </button>
+              )}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 

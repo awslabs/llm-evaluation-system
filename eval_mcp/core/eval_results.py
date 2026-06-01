@@ -160,6 +160,14 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
                         "target": s.target[0] if isinstance(s.target, list) else str(s.target) if s.target else "",
                         "output": s.output.completion if s.output else "",
                     }
+                    # Surface retrieval_context from the loaded Sample.metadata
+                    # so RAG runs can display the chunks the candidate model
+                    # was given. Other metadata fields are not surfaced here —
+                    # add to this allowlist if a new use case needs them.
+                    if hasattr(s, "metadata") and s.metadata:
+                        rc = s.metadata.get("retrieval_context")
+                        if rc:
+                            sample["retrieval_context"] = rc
                     if s.scores:
                         sample["scores"] = {}
                         for scorer_name, score in s.scores.items():
@@ -328,12 +336,19 @@ def _build_detail_from_logs(
         for sample in log.get("samples", []):
             sid = sample["id"]
             if sid not in samples_by_id:
-                samples_by_id[sid] = {
+                entry: dict = {
                     "id": sid,
                     "input": sample["input"],
                     "target": sample["target"],
                     "results": {},
                 }
+                # RAG runs carry retrieval_context per sample; we hoist it
+                # to the top of the samples_by_id entry so the frontend
+                # doesn't need to dig into a particular model's result.
+                rc = sample.get("retrieval_context")
+                if rc:
+                    entry["retrievalContext"] = rc
+                samples_by_id[sid] = entry
 
             score_data: dict = {"passed": False, "score": 0.0, "output": sample.get("output", "")}
             if sample.get("scores"):

@@ -23,6 +23,8 @@ from eval_mcp.core.document_chunking import (
     chunk_pdf,
     format_chunk_prompt_text,
     format_chunk_prompt_pdf,
+    pdf_to_text,
+    pdf_chunk_to_text,
     MAX_CONTEXT_TOKENS,
 )
 
@@ -31,6 +33,24 @@ MAX_QA_PER_CHUNK = 20
 
 # Structured logger for QA generation
 logger = get_logger("mcp_tools.synthetic.qa")
+
+
+def _attach_context(
+    pairs: List[Dict[str, Any]], context_text: str
+) -> List[Dict[str, Any]]:
+    """Stamp each QA pair with synthetic ``retrieval_context = [context_text]``.
+
+    Synthetic-RAG mode: the chunk a pair was generated from IS that pair's
+    retrieved context, so the RAG scorers (faithfulness, answer_relevancy) can
+    run end-to-end without a real retriever. No-op when ``context_text`` is
+    empty (an image, or a PDF page with no extractable text) — the pair simply
+    carries no ``retrieval_context`` and RAG scoring will skip/flag it.
+    """
+    if not context_text or not context_text.strip():
+        return pairs
+    for pair in pairs:
+        pair["retrieval_context"] = [context_text]
+    return pairs
 
 
 # Tool schema for structured QA output - forces reliable JSON generation
@@ -521,6 +541,7 @@ async def generate_qa_pairs_from_document(
     num_pairs: int,
     prompt: Optional[str] = None,
     instructions: Optional[str] = None,
+    attach_source_context: bool = False,
 ) -> List[Dict[str, Any]]:
     """Generate QA pairs from a single document using multimodal input.
 
@@ -535,9 +556,14 @@ async def generate_qa_pairs_from_document(
         num_pairs: Number of QA pairs to generate (up to MAX_QA_PER_CHUNK per chunk)
         prompt: Optional context about the AI system/use case
         instructions: Optional additional instructions
+        attach_source_context: Synthetic-RAG mode. When True, each pair carries
+            ``retrieval_context`` set to the source chunk it was generated from,
+            so RAG scorers (faithfulness, answer_relevancy) can run without a
+            real retriever. Images yield no text and are left without context.
 
     Returns:
-        List of QA pair dicts with 'question' and 'golden_answer' keys
+        List of QA pair dicts with 'question' and 'golden_answer' keys (plus
+        'retrieval_context' when ``attach_source_context`` is set)
     """
     # Load document content
     content_bytes, media_type = get_document_content(user_id, doc_path)
@@ -550,12 +576,14 @@ async def generate_qa_pairs_from_document(
         if media_type == "application/pdf":
             # PDF: Chunk by pages
             return await _generate_qa_from_pdf_chunks(
-                bedrock, user_id, doc_path, content_bytes, num_pairs, prompt, instructions
+                bedrock, user_id, doc_path, content_bytes, num_pairs, prompt,
+                instructions, attach_source_context=attach_source_context,
             )
         else:
             # Text-based: Chunk by tokens
             return await _generate_qa_from_text_chunks(
-                bedrock, user_id, doc_path, content_bytes, num_pairs, prompt, instructions
+                bedrock, user_id, doc_path, content_bytes, num_pairs, prompt,
+                instructions, attach_source_context=attach_source_context,
             )
 
     # Document is small enough - process as single unit
@@ -584,10 +612,23 @@ async def generate_qa_pairs_from_document(
         text_content = content_bytes.decode("utf-8", errors="replace")
         doc_content = f"<document filename=\"{doc_path}\">\n{text_content}\n</document>"
 
-    return await _generate_qa_from_content(
+    qa_pairs = await _generate_qa_from_content(
         bedrock, user_id, doc_path, doc_content, media_type,
         min(num_pairs, MAX_QA_PER_CHUNK), prompt, instructions
     )
+
+    if attach_source_context:
+        # Whole (small) document is the source context for every pair. PDFs
+        # are extracted to text; images have none and are left uncontextualised.
+        if media_type == "application/pdf":
+            source_text = pdf_to_text(content_bytes)
+        elif media_type.startswith("image/"):
+            source_text = ""
+        else:
+            source_text = content_bytes.decode("utf-8", errors="replace")
+        _attach_context(qa_pairs, source_text)
+
+    return qa_pairs
 
 
 async def _generate_qa_from_text_chunks(
@@ -598,6 +639,7 @@ async def _generate_qa_from_text_chunks(
     num_pairs: int,
     prompt: Optional[str] = None,
     instructions: Optional[str] = None,
+    attach_source_context: bool = False,
 ) -> List[Dict[str, Any]]:
     """Generate QA pairs from a large text document by chunking.
 
@@ -633,6 +675,8 @@ async def _generate_qa_from_text_chunks(
             pairs_for_this_chunk, prompt, instructions,
             chunk_info=f"This is chunk {i + 1} of {len(chunks)} from the document."
         )
+        if attach_source_context:
+            _attach_context(chunk_qa, chunk.content)
         log_event(logger, "info", "chunk_processed",
                   user_id=user_id, document=doc_path,
                   chunk=i + 1, total_chunks=len(chunks),
@@ -667,6 +711,7 @@ async def _generate_qa_from_pdf_chunks(
     num_pairs: int,
     prompt: Optional[str] = None,
     instructions: Optional[str] = None,
+    attach_source_context: bool = False,
 ) -> List[Dict[str, Any]]:
     """Generate QA pairs from a large PDF by processing page ranges.
 
@@ -712,6 +757,8 @@ async def _generate_qa_from_pdf_chunks(
             pairs_for_this_chunk, prompt, instructions,
             chunk_info=page_instructions
         )
+        if attach_source_context:
+            _attach_context(chunk_qa, pdf_chunk_to_text(chunk))
         log_event(logger, "info", "pdf_chunk_processed",
                   user_id=user_id, document=doc_path,
                   chunk=i + 1, total_chunks=len(chunks),
@@ -758,6 +805,7 @@ async def generate_qa_pairs_from_documents(
     num_samples: int,
     prompt: Optional[str] = None,
     instructions: Optional[str] = None,
+    attach_source_context: bool = False,
 ) -> List[Dict[str, Any]]:
     """Generate QA pairs from multiple documents in parallel.
 
@@ -792,7 +840,8 @@ async def generate_qa_pairs_from_documents(
         """
         tasks = [
             generate_qa_pairs_from_document(
-                bedrock, user_id, p, n, prompt, instructions
+                bedrock, user_id, p, n, prompt, instructions,
+                attach_source_context=attach_source_context,
             )
             for p, n in zip(paths, allocs) if n > 0
         ]
@@ -868,6 +917,7 @@ async def handle_generate_qa_pairs(bedrock: BedrockClient, args: Dict[str, Any])
     instructions = args.get("instructions")
     num_samples = args.get("numSamples", 10)
     documents = args.get("documents", [])  # List of document paths
+    attach_source_context = bool(args.get("attachSourceContext", False))
     user_id = args.get("user_id")
 
     # Validate user_id
@@ -934,7 +984,8 @@ async def handle_generate_qa_pairs(bedrock: BedrockClient, args: Dict[str, Any])
                       document_count=len(documents), num_samples=num_samples)
 
             all_qa_pairs = await generate_qa_pairs_from_documents(
-                bedrock, user_id, documents, num_samples, prompt, instructions
+                bedrock, user_id, documents, num_samples, prompt, instructions,
+                attach_source_context=attach_source_context,
             )
 
             summary = {
@@ -942,6 +993,7 @@ async def handle_generate_qa_pairs(bedrock: BedrockClient, args: Dict[str, Any])
                 "requested": num_samples,
                 "mode": "document",
                 "documents": documents,
+                "syntheticRag": attach_source_context,
             }
 
         else:
@@ -1016,12 +1068,16 @@ async def handle_generate_qa_pairs(bedrock: BedrockClient, args: Dict[str, Any])
         test_cases = []
         for qa in all_qa_pairs:
             if "question" in qa and "golden_answer" in qa:
-                test_cases.append({
-                    "vars": {
-                        "question": qa["question"],
-                        "golden_answer": qa["golden_answer"],
-                    },
-                })
+                qa_vars = {
+                    "question": qa["question"],
+                    "golden_answer": qa["golden_answer"],
+                }
+                # Synthetic-RAG: carry the source chunk through as
+                # retrieval_context so create_eval_config's FieldSpec picks it
+                # up (it reads vars.retrieval_context). Only present when set.
+                if qa.get("retrieval_context"):
+                    qa_vars["retrieval_context"] = qa["retrieval_context"]
+                test_cases.append({"vars": qa_vars})
 
         # Generate dataset name with actual count
         dataset_name = f"{safe_name}_{len(test_cases)}"
@@ -1030,7 +1086,8 @@ async def handle_generate_qa_pairs(bedrock: BedrockClient, args: Dict[str, Any])
         if wrapper_path:
             source = {"kind": "synthetic", "mode": "agent", "agent": wrapper_path}
         elif use_documents:
-            source = {"kind": "synthetic", "mode": "document", "documents": documents}
+            source = {"kind": "synthetic", "mode": "document", "documents": documents,
+                      "synthetic_rag": attach_source_context}
         else:
             source = {"kind": "synthetic", "mode": "persona", "prompt": prompt}
 

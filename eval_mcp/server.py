@@ -414,6 +414,7 @@ async def generate_qa_pairs(
     instructions: str = None,
     numSamples: NumSamples = 10,
     numPersonas: NumPersonas = 5,
+    attachSourceContext: bool = False,
 ) -> str:
     """
     Generate question-answer pairs with golden answers for LLM-as-judge evaluation.
@@ -429,6 +430,15 @@ async def generate_qa_pairs(
         instructions: Additional instructions for QA generation
         numSamples: Number of QA pairs to generate (default: 10)
         numPersonas: Number of personas for synthetic generation (default: 5, persona mode only)
+        attachSourceContext: Synthetic-RAG mode (document mode only). When True, each
+            QA pair gets a 'retrieval_context' column set to the source chunk it was
+            generated from — enough to run the RAG scorers 'faithfulness' and
+            'answer_relevancy' in create_eval_config WITHOUT a real retriever. The
+            source chunk IS the retrieved context, so the retriever-side scorers
+            (contextual_precision/recall/relevancy) are NOT meaningful here — don't
+            select them. For a true RAG eval, instead upload your retriever's actual
+            chunks via save_dataset's retrieval_context column. Ignored in persona/
+            agent mode (no source document). Default False.
 
     Returns:
         JSON with dataset name and summary. Use with generate_judge and create_eval_config.
@@ -440,6 +450,7 @@ async def generate_qa_pairs(
         "instructions": instructions,
         "numSamples": numSamples,
         "numPersonas": numPersonas,
+        "attachSourceContext": attachSourceContext,
     }
     result = await handle_generate_qa_pairs(bedrock, args)
     return result[0].text

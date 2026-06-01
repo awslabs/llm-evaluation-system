@@ -68,6 +68,8 @@ Available Tools:
 - generate_qa_pairs: Create test dataset with questions and golden answers
   * Persona mode: generate_qa_pairs(prompt="topic description", numSamples=10)
   * Document mode: generate_qa_pairs(documents=["path/to/doc.pdf"], numSamples=10)
+  * Synthetic-RAG mode: generate_qa_pairs(documents=[...], attachSourceContext=True)
+    adds a retrieval_context column so RAG scorers can run (see RAG EVALUATION below)
   * Large documents are automatically chunked - can generate many QA pairs (20 per chunk)
   * When user uploads documents, use the provided document paths with this tool
   * When user asks to use existing documents, first call list_documents to get paths
@@ -135,6 +137,38 @@ User: "Create QA pairs from my uploaded documents" or "Use my existing docs"
 1. list_documents() → get list of available document paths
 2. generate_qa_pairs(documents=[...paths from step 1...], numSamples=10) → get dataset name
 Then continue with generate_judge(dataset=...), create_eval_config(dataset=..., judge=...), etc.
+
+RAG EVALUATION:
+RAG scorers (faithfulness, answer_relevancy, contextual_precision, contextual_recall,
+contextual_relevancy) score answers against a retrieval_context column - the chunks a
+retriever pulled per question. A dataset needs that column before any RAG scorer can run.
+There are two honest ways to get it; pick based on what the user has:
+
+1. The user has a real retriever (their RAG pipeline):
+   They must upload their retriever's actual output - rows of
+   {question, golden_answer, retrieval_context: [chunk1, chunk2, ...]} - via save_dataset.
+   This is the only path that meaningfully scores RETRIEVAL quality
+   (contextual_precision/recall/relevancy).
+
+2. The user only has documents, no retriever (e.g. "run a RAG eval on this PDF"):
+   Use synthetic-RAG mode: generate_qa_pairs(documents=[...], attachSourceContext=True).
+   Each pair's retrieval_context is set to the source chunk it was generated from.
+   This validly scores the GENERATOR (faithfulness, answer_relevancy) but NOT the
+   retriever - the source chunk IS the context, so contextual_* would be trivially
+   perfect. Select ONLY faithfulness and answer_relevancy for synthetic datasets.
+
+NEVER claim you can produce retrieval_context from a document without attachSourceContext -
+plain document/persona mode produces only question + golden_answer, and a RAG scorer on
+such a dataset will fail fast asking for the missing column. Don't promise it, then loop.
+
+Example - "run a RAG eval on this PDF" (user has no retriever):
+User: [Uploaded 1 document. Document paths for generate_qa_pairs: ["paper.pdf"]]
+1. generate_qa_pairs(documents=["paper.pdf"], numSamples=5, attachSourceContext=True)
+   → dataset with retrieval_context attached
+2. create_eval_config(dataset=..., providers=[...], scorers=["faithfulness", "answer_relevancy"])
+3. run_evaluation(configName=...) → viewerUrl
+Tell the user this scored answer faithfulness/relevancy against the source passages, and
+that scoring retrieval quality would require uploading their own retriever's chunks.
 """
 
     async def _load_tool_descriptions(self) -> None:

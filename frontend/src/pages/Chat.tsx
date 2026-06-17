@@ -8,7 +8,7 @@ import Header from "@/components/Header";
 
 export default function ChatPage() {
   const { user, isLoading } = useAuth();
-  const { loadChat, createNewChat, chatSessions, currentSessionId, reconnectIfRunning } =
+  const { loadChat, createNewChat, chatSessions, currentSessionId, isLoading: chatStreaming, reconnectIfRunning } =
     useChat();
   const [searchParams, setSearchParams] = useSearchParams();
   const sessionParam = searchParams.get("session");
@@ -63,21 +63,23 @@ export default function ChatPage() {
     reconnectIfRunning,
   ]);
 
-  // Reflect the active session into the URL once it has real content, so a
-  // refresh restores it (previously a fresh chat had no ?session= and a reload
-  // dropped the whole conversation). Only fires for a session that exists in
-  // the list AND has messages — never the empty new-chat stub — so it can't
-  // race the "+ New chat" clear.
+  // Reflect the active session into the URL as soon as it has real content OR
+  // a response is actively streaming. The streaming case is critical: if the
+  // user refreshes mid-answer on a fresh chat, the URL must already carry
+  // ?session=X so the mount-time reconnect can reattach to the live stream
+  // (otherwise the in-progress answer is lost). Guarded so it never fires for
+  // the empty new-chat stub, so it can't race the "+ New chat" clear.
   useEffect(() => {
     if (!currentSessionId || sessionParam === currentSessionId) return;
     const s = chatSessions.find(
       (x: ChatSession) => x.id === currentSessionId,
     );
-    if (s && s.messages.length > 0) {
+    const hasContent = !!s && s.messages.length > 0;
+    if (hasContent || chatStreaming) {
       setSearchParams({ session: currentSessionId }, { replace: true });
       autoLoadedRef.current = currentSessionId;
     }
-  }, [currentSessionId, chatSessions, sessionParam, setSearchParams]);
+  }, [currentSessionId, chatSessions, sessionParam, chatStreaming, setSearchParams]);
 
   if (isLoading) {
     return (

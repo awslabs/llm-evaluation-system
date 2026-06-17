@@ -35,6 +35,7 @@ services:
       - ../backend:/app/backend
       - ../eval_mcp:/app/eval_mcp
       - ../local:/app/local
+      - ../frontend/dist:/app/frontend/dist:ro
       - userdata:/data/users
     environment:
       PYTHONPATH: /app
@@ -52,6 +53,10 @@ services:
       EVAL_MCP_URL: http://127.0.0.1:8002/mcp
       USER_STORAGE_BASE: /data/users
       APP_URL: http://127.0.0.1:4001
+      # The backend serves the built SPA single-origin (same as EKS). Locally
+      # this points at the live frontend/dist mount; in EKS the image bakes it
+      # into backend/static.
+      FRONTEND_DIST: /app/frontend/dist
       # External provider keys (optional — set in .env.keys)
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -91,17 +96,16 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
 
-  # No frontend container. The SPA is a static Vite build (frontend/dist),
-  # served directly by nginx below — mirroring the AWS end-state where the
-  # backend/edge serves static assets and there is no Node frontend pod.
-  # Rebuild the bundle with `npm run build` (or `make dev` runs it for you).
+  # No frontend container. nginx here is ONLY a thin edge proxy — it stands in
+  # for the EKS edge (CloudFront → ALB → oauth2-proxy) and forwards everything
+  # to the backend, which serves both /api and the static SPA single-origin.
+  # This mirrors EKS exactly: the backend is the one origin for app + API.
   nginx:
     image: nginx:alpine
     ports:
       - "4001:4001"
     volumes:
       - ./nginx-compose.conf:/etc/nginx/nginx.conf:ro
-      - ../frontend/dist:/usr/share/nginx/html:ro
     depends_on:
       backend:
         condition: service_healthy

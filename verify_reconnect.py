@@ -42,12 +42,24 @@ with sync_playwright() as p:
         nb.first.click()
         page.wait_for_timeout(800)
 
-    # --- Fix A: fresh chat gets ?session= after first message ---
-    page.locator("textarea").first.fill("Reply with the single word OKAY.")
+    # --- Fix D: fresh chat syncs ?session= DURING streaming (not just after
+    # completion). This is the "refresh mid-answer on a brand-new chat loses
+    # the response" bug: without an early URL sync there's nothing for the
+    # mount-time reconnect to latch onto. Assert the param appears while the
+    # answer is still streaming. ---
+    page.locator("textarea").first.fill(
+        "Write a long 400-word essay about the ocean. Take your time.")
     page.locator("button", has_text="Send").first.click()
-    expect(page.locator("button", has_text="Send")).to_be_visible(timeout=40000)
-    page.wait_for_timeout(1200)
-    check("A. fresh chat gets ?session= in URL", "session=" in page.url, f"url={page.url}")
+    expect(page.locator("button", has_text="Stop")).to_be_visible(timeout=15000)
+    page.wait_for_timeout(1500)  # mid-answer, still streaming
+    check("D. fresh chat syncs ?session= during streaming",
+          "session=" in page.url, f"url={page.url}")
+    # let it finish before the next check
+    expect(page.locator("button", has_text="Send")).to_be_visible(timeout=60000)
+    page.wait_for_timeout(500)
+
+    # --- Fix A: fresh chat retains ?session= after first message ---
+    check("A. fresh chat has ?session= in URL", "session=" in page.url, f"url={page.url}")
 
     # --- Fix B: refresh mid-(long)-stream reattaches live ---
     page.locator("textarea").first.fill(
@@ -82,7 +94,8 @@ with sync_playwright() as p:
     check("B. status probe fired on mount", len(status_calls) > 0)
     check("B. reconnect POST fired", len(reconnect_posts) > 0)
     check("B. reattached to live stream (Stop visible)", reattached)
-    check("B. conversation restored after refresh", "OKAY" in page.inner_text("body"))
+    check("B. conversation restored after refresh",
+          "astronomy" in page.inner_text("body").lower())
 
     # --- Fix C: can cancel the reattached stream cleanly (no orphan) ---
     if page.locator("button", has_text="Stop").count():

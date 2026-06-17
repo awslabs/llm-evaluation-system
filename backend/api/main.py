@@ -1864,6 +1864,54 @@ _dist_dir = resolve_dist_directory()
 app.mount("/inspect", _InspectStaticFiles(directory=_dist_dir.as_posix(), html=True), name="inspect-viewer")
 
 
+# ============== Frontend SPA (single origin) ==============
+#
+# Serve the built Vite/React SPA from the backend itself — the same
+# single-origin model used both locally (FastAPI behind the nginx edge proxy)
+# and in EKS (FastAPI behind CloudFront/ALB/oauth2-proxy). There is no separate
+# Node frontend server. The bundle location is configurable so it works in
+# both places:
+#   - EKS: the Docker build copies frontend/dist into backend/static.
+#   - local: FRONTEND_DIST points at the live frontend/dist on disk.
+# Registered LAST so every /api/* and /inspect/* route above takes precedence;
+# the catch-all returns index.html for client-routed paths (deep links, hard
+# refreshes), mirroring eval_mcp/viewer.py.
+from pathlib import Path as _Path
+from fastapi.staticfiles import StaticFiles as _StaticFiles
+from fastapi.responses import FileResponse as _FileResponse
+
+_frontend_dist = _Path(
+    os.environ.get("FRONTEND_DIST", str(_Path(__file__).resolve().parents[1] / "static"))
+)
+_frontend_index = _frontend_dist / "index.html"
+
+if _frontend_index.is_file():
+    _assets_dir = _frontend_dist / "assets"
+    if _assets_dir.is_dir():
+        app.mount("/assets", _StaticFiles(directory=str(_assets_dir)), name="spa-assets")
+
+    @app.get("/{full_path:path}")
+    async def _spa_fallback(full_path: str):
+        # Never let an unknown /api or /inspect path resolve to the SPA shell —
+        # surface a real 404 instead of returning HTML.
+        if full_path.startswith(("api/", "inspect/")):
+            raise HTTPException(status_code=404, detail="Not found")
+        candidate = _frontend_dist / full_path
+        if (
+            full_path
+            and candidate.is_file()
+            and _frontend_dist.resolve() in candidate.resolve().parents
+        ):
+            return _FileResponse(candidate)
+        return _FileResponse(_frontend_index)
+else:
+    logger.warning(
+        "Frontend bundle not found at %s — SPA will not be served. "
+        "Run `npm run build` (EKS bakes it into the image; locally set FRONTEND_DIST).",
+        _frontend_dist,
+    )
+
+
 if __name__ == "__main__":
     import uvicorn
 

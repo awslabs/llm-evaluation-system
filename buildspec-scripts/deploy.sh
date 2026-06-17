@@ -109,6 +109,9 @@ DATA_BUCKET_ARN="$(terraform output -raw data_bucket_arn)"
 SPA_BUCKET="$(terraform output -raw spa_bucket)"
 SPA_BUCKET_ARN="$(terraform output -raw spa_bucket_arn)"
 SPA_BUCKET_REGIONAL_DOMAIN="$(terraform output -raw spa_bucket_regional_domain_name)"
+COGNITO_USER_POOL_ID="$(terraform output -raw cognito_user_pool_id)"
+COGNITO_USER_POOL_ARN="$(terraform output -raw cognito_user_pool_arn)"
+COGNITO_USER_POOL_DOMAIN="$(terraform output -raw cognito_user_pool_domain)"
 
 echo ""
 echo "  Data layer deployed."
@@ -142,6 +145,9 @@ PLATFORM_VARS=(
   -var="spa_bucket=$SPA_BUCKET"
   -var="spa_bucket_arn=$SPA_BUCKET_ARN"
   -var="spa_bucket_regional_domain_name=$SPA_BUCKET_REGIONAL_DOMAIN"
+  -var="cognito_user_pool_id=$COGNITO_USER_POOL_ID"
+  -var="cognito_user_pool_arn=$COGNITO_USER_POOL_ARN"
+  -var="cognito_user_pool_domain=$COGNITO_USER_POOL_DOMAIN"
 )
 
 # Pass caller's IAM role ARN so they get EKS admin access too

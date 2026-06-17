@@ -129,6 +129,9 @@ DATA_BUCKET_ARN="$(terraform output -raw data_bucket_arn 2>/dev/null || terrafor
 SPA_BUCKET="$(terraform output -raw spa_bucket 2>/dev/null || echo unknown)"
 SPA_BUCKET_ARN="$(terraform output -raw spa_bucket_arn 2>/dev/null || echo unknown)"
 SPA_BUCKET_REGIONAL_DOMAIN="$(terraform output -raw spa_bucket_regional_domain_name 2>/dev/null || echo unknown)"
+COGNITO_USER_POOL_ID="$(terraform output -raw cognito_user_pool_id 2>/dev/null || echo unknown)"
+COGNITO_USER_POOL_ARN="$(terraform output -raw cognito_user_pool_arn 2>/dev/null || echo unknown)"
+COGNITO_USER_POOL_DOMAIN="$(terraform output -raw cognito_user_pool_domain 2>/dev/null || echo unknown)"
 
 cd "$PLATFORM_DIR"
 terraform init -upgrade "${TF_BACKEND_ARGS[@]}"
@@ -148,7 +151,10 @@ tf_with_retry destroy -auto-approve \
   -var="data_bucket_arn=$DATA_BUCKET_ARN" \
   -var="spa_bucket=$SPA_BUCKET" \
   -var="spa_bucket_arn=$SPA_BUCKET_ARN" \
-  -var="spa_bucket_regional_domain_name=$SPA_BUCKET_REGIONAL_DOMAIN"
+  -var="spa_bucket_regional_domain_name=$SPA_BUCKET_REGIONAL_DOMAIN" \
+  -var="cognito_user_pool_id=$COGNITO_USER_POOL_ID" \
+  -var="cognito_user_pool_arn=$COGNITO_USER_POOL_ARN" \
+  -var="cognito_user_pool_domain=$COGNITO_USER_POOL_DOMAIN"
 
 echo "  Platform layer destroyed."
 fi

@@ -1,33 +1,18 @@
 #------------------------------------------------------------------------------
-# Cognito User Pool
+# Cognito — per-deployment OAuth client config
+#
+# The USER POOL + hosted-UI DOMAIN now live in the DATA layer (durable identity
+# store; see infra/data/cognito.tf) and are passed in as vars so a platform
+# teardown no longer destroys user accounts. This file owns only the per-
+# deployment pieces: the user-pool CLIENT (its callback/logout URLs reference
+# the CloudFront distribution, which is platform-owned), the client secret,
+# the oauth2-proxy secrets, the hosted-UI CSS, and the optional OIDC IdP. None
+# of these hold user data and all are cheap to recreate per deploy.
 #
 # Default: Native Cognito auth (admin-created users, email/password)
 # Optional: External OIDC IdP (Okta, Azure AD, Amazon Federate, etc.)
 #           enabled via enable_oidc_idp = true
 #------------------------------------------------------------------------------
-
-resource "aws_cognito_user_pool" "main" {
-  name = local.name
-
-  # Admin-only signup — no self-registration regardless of auth mode
-  admin_create_user_config {
-    allow_admin_create_user_only = true
-  }
-
-  mfa_configuration = "OFF"
-
-  account_recovery_setting {
-    recovery_mechanism {
-      name     = "admin_only"
-      priority = 1
-    }
-  }
-}
-
-resource "aws_cognito_user_pool_domain" "main" {
-  domain       = "${local.name}-${local.region_suffix}-${local.account_id}"
-  user_pool_id = aws_cognito_user_pool.main.id
-}
 
 #------------------------------------------------------------------------------
 # External OIDC Identity Provider (optional)
@@ -36,7 +21,7 @@ resource "aws_cognito_user_pool_domain" "main" {
 resource "aws_cognito_identity_provider" "oidc" {
   count = var.enable_oidc_idp ? 1 : 0
 
-  user_pool_id  = aws_cognito_user_pool.main.id
+  user_pool_id  = var.cognito_user_pool_id
   provider_name = var.oidc_provider_name
   provider_type = "OIDC"
 
@@ -62,7 +47,7 @@ resource "aws_cognito_identity_provider" "oidc" {
 
 resource "aws_cognito_user_pool_client" "main" {
   name         = local.name
-  user_pool_id = aws_cognito_user_pool.main.id
+  user_pool_id = var.cognito_user_pool_id
 
   generate_secret                      = true
   allowed_oauth_flows                  = ["code"]
@@ -149,7 +134,7 @@ resource "aws_secretsmanager_secret_version" "oauth2_proxy" {
 #------------------------------------------------------------------------------
 
 resource "aws_cognito_user_pool_ui_customization" "main" {
-  user_pool_id = aws_cognito_user_pool.main.id
+  user_pool_id = var.cognito_user_pool_id
   client_id    = aws_cognito_user_pool_client.main.id
 
   css = <<-CSS

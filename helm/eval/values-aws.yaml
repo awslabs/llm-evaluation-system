@@ -52,7 +52,12 @@ oauth2-proxy:
       cookie_expire = "12h"
       cookie_refresh = "0"
       session_cookie_minimal = true
-      cookie_csrf_per_request = true
+      # false is the oauth2-proxy default. per-request CSRF cookies only help
+      # concurrent/parallel logins, but make the OAuth callback brittle: a
+      # refreshed/replayed/stale-tab callback can't find its state-specific
+      # CSRF cookie and gets a 403 ("CSRF cookie not found"). A single stable
+      # CSRF cookie removes that intermittent login 403 for our single-tab flow.
+      cookie_csrf_per_request = false
       set_xauthrequest = true
       pass_access_token = false
       pass_authorization_header = false

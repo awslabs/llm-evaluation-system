@@ -15,7 +15,7 @@ output "cloudfront_distribution_id" {
 
 output "cognito_idp_response_url" {
   description = "OIDC IdP response URL — configure this as the redirect URI in your identity provider"
-  value       = var.enable_oidc_idp ? "https://${aws_cognito_user_pool_domain.main.domain}.auth.${var.region}.amazoncognito.com/oauth2/idpresponse" : null
+  value       = var.enable_oidc_idp ? "https://${var.cognito_user_pool_domain}.auth.${var.region}.amazoncognito.com/oauth2/idpresponse" : null
 }
 
 output "ecr_repository" {
@@ -25,7 +25,7 @@ output "ecr_repository" {
 
 output "cognito_user_pool_id" {
   description = "Cognito User Pool ID"
-  value       = aws_cognito_user_pool.main.id
+  value       = var.cognito_user_pool_id
 }
 
 output "eks_cluster_name" {

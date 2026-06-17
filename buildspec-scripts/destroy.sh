@@ -126,6 +126,9 @@ DOCUMENTS_BUCKET="$(terraform output -raw documents_bucket 2>/dev/null || echo u
 DOCUMENTS_BUCKET_ARN="$(terraform output -raw documents_bucket_arn 2>/dev/null || echo unknown)"
 DATA_BUCKET="$(terraform output -raw data_bucket 2>/dev/null || terraform output -raw backup_bucket 2>/dev/null || echo unknown)"
 DATA_BUCKET_ARN="$(terraform output -raw data_bucket_arn 2>/dev/null || terraform output -raw backup_bucket_arn 2>/dev/null || echo unknown)"
+SPA_BUCKET="$(terraform output -raw spa_bucket 2>/dev/null || echo unknown)"
+SPA_BUCKET_ARN="$(terraform output -raw spa_bucket_arn 2>/dev/null || echo unknown)"
+SPA_BUCKET_REGIONAL_DOMAIN="$(terraform output -raw spa_bucket_regional_domain_name 2>/dev/null || echo unknown)"
 
 cd "$PLATFORM_DIR"
 terraform init -upgrade "${TF_BACKEND_ARGS[@]}"
@@ -142,7 +145,10 @@ tf_with_retry destroy -auto-approve \
   -var="documents_bucket=$DOCUMENTS_BUCKET" \
   -var="documents_bucket_arn=$DOCUMENTS_BUCKET_ARN" \
   -var="data_bucket=$DATA_BUCKET" \
-  -var="data_bucket_arn=$DATA_BUCKET_ARN"
+  -var="data_bucket_arn=$DATA_BUCKET_ARN" \
+  -var="spa_bucket=$SPA_BUCKET" \
+  -var="spa_bucket_arn=$SPA_BUCKET_ARN" \
+  -var="spa_bucket_regional_domain_name=$SPA_BUCKET_REGIONAL_DOMAIN"
 
 echo "  Platform layer destroyed."
 fi

@@ -33,7 +33,7 @@ resource "kubernetes_config_map" "app_config" {
     OIDC_CLIENT_ID       = aws_cognito_user_pool_client.main.id
 
     # Storage — S3 is primary store for all persistent data
-    S3_BUCKET     = var.documents_bucket
+    S3_BUCKET   = var.documents_bucket
     DATA_BUCKET = var.data_bucket
 
     # AWS
@@ -325,23 +325,6 @@ resource "kubectl_manifest" "tgb_backend" {
         name: backend
         port: 8080
       targetGroupARN: ${module.alb.target_groups["backend"].arn}
-      targetType: ip
-  YAML
-  depends_on = [kubernetes_namespace.app, helm_release.alb_controller, module.eks]
-}
-
-resource "kubectl_manifest" "tgb_frontend" {
-  yaml_body  = <<-YAML
-    apiVersion: elbv2.k8s.aws/v1beta1
-    kind: TargetGroupBinding
-    metadata:
-      name: frontend-tgb
-      namespace: eval-managed
-    spec:
-      serviceRef:
-        name: frontend
-        port: 3000
-      targetGroupARN: ${module.alb.target_groups["frontend"].arn}
       targetType: ip
   YAML
   depends_on = [kubernetes_namespace.app, helm_release.alb_controller, module.eks]

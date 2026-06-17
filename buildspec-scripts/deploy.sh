@@ -106,6 +106,9 @@ DOCUMENTS_BUCKET="$(terraform output -raw documents_bucket)"
 DOCUMENTS_BUCKET_ARN="$(terraform output -raw documents_bucket_arn)"
 DATA_BUCKET="$(terraform output -raw data_bucket)"
 DATA_BUCKET_ARN="$(terraform output -raw data_bucket_arn)"
+SPA_BUCKET="$(terraform output -raw spa_bucket)"
+SPA_BUCKET_ARN="$(terraform output -raw spa_bucket_arn)"
+SPA_BUCKET_REGIONAL_DOMAIN="$(terraform output -raw spa_bucket_regional_domain_name)"
 
 echo ""
 echo "  Data layer deployed."
@@ -136,6 +139,9 @@ PLATFORM_VARS=(
   -var="documents_bucket_arn=$DOCUMENTS_BUCKET_ARN"
   -var="data_bucket=$DATA_BUCKET"
   -var="data_bucket_arn=$DATA_BUCKET_ARN"
+  -var="spa_bucket=$SPA_BUCKET"
+  -var="spa_bucket_arn=$SPA_BUCKET_ARN"
+  -var="spa_bucket_regional_domain_name=$SPA_BUCKET_REGIONAL_DOMAIN"
 )
 
 # Pass caller's IAM role ARN so they get EKS admin access too
@@ -199,14 +205,43 @@ aws ecr get-login-password --region "$AWS_REGION" | docker login --username AWS 
 echo "  Building backend image..."
 docker build --platform linux/arm64 -f "$SRC/docker/backend.Dockerfile" -t "$REPOSITORY_URI:backend-latest" "$SRC"
 
-echo "  Building frontend image..."
-docker build --platform linux/arm64 -f "$SRC/docker/frontend.Dockerfile" -t "$REPOSITORY_URI:frontend-latest" "$SRC"
-
-echo "  Pushing images to ECR..."
+echo "  Pushing image to ECR..."
 docker push "$REPOSITORY_URI:backend-latest"
-docker push "$REPOSITORY_URI:frontend-latest"
 
-echo "  Images pushed."
+echo "  Image pushed."
+
+#------------------------------------------------------------------------------
+# Phase 6b: Build and publish the static SPA to S3 (served via CloudFront OAC)
+#------------------------------------------------------------------------------
+
+echo ""
+echo "=== Phase 6b: Building and publishing the SPA bundle ==="
+
+DIST_ID="$(cd "$PLATFORM_DIR" && terraform output -raw cloudfront_distribution_id)"
+
+cd "$SRC/frontend"
+npm ci
+# VITE_SHOW_CHAT is the only build-time flag the SPA reads; everything else
+# (Cognito domain/client/app URL, logout) is resolved server-side by the
+# backend, so no secrets or env are baked into the bundle.
+VITE_SHOW_CHAT=true npm run build
+
+echo "  Syncing bundle to s3://$SPA_BUCKET ..."
+# Hashed assets are content-addressed → cache immutably. index.html must NOT
+# be cached so new asset hashes are picked up immediately. --delete purges
+# stale assets from prior deploys.
+aws s3 sync dist "s3://$SPA_BUCKET/" --delete \
+  --cache-control "public,max-age=31536000,immutable" \
+  --exclude index.html
+aws s3 cp dist/index.html "s3://$SPA_BUCKET/index.html" \
+  --cache-control "no-cache"
+
+echo "  Invalidating CloudFront ($DIST_ID) for the shell..."
+aws cloudfront create-invalidation --distribution-id "$DIST_ID" --paths "/index.html" "/" > /dev/null
+
+echo "  SPA published."
+
+cd "$SRC"
 
 #------------------------------------------------------------------------------
 # Phase 7: Helm deploy
@@ -227,10 +262,10 @@ helm upgrade --install eval ./helm/eval \
 
 echo "  Helm deploy complete."
 
-# Force pods to pull the latest images
-echo "  Restarting deployments to pick up new images..."
-kubectl rollout restart deployment backend frontend -n eval-managed
-kubectl rollout status deployment backend frontend -n eval-managed --timeout=30m
+# Force pods to pull the latest image (mutable *-latest tag)
+echo "  Restarting backend deployment to pick up the new image..."
+kubectl rollout restart deployment backend -n eval-managed
+kubectl rollout status deployment backend -n eval-managed --timeout=30m
 
 #------------------------------------------------------------------------------
 # Phase 8: Write outputs to SSM Parameter Store

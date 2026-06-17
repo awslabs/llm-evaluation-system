@@ -18,7 +18,6 @@ aws:
 # Image Configuration (ECR: constructed from aws.accountId + aws.region + projectName)
 image:
   backendTag: "latest"
-  frontendTag: "latest"
   pullPolicy: Always
 
 # Backend Configuration
@@ -31,22 +30,6 @@ backend:
     limits:
       memory: "1Gi"
       cpu: "1000m"
-  autoscaling:
-    minReplicas: 2
-    maxReplicas: 10
-    targetCPUUtilization: 70
-    targetMemoryUtilization: 80
-
-# Frontend Configuration
-frontend:
-  replicas: 1
-  resources:
-    requests:
-      memory: "256Mi"
-      cpu: "100m"
-    limits:
-      memory: "512Mi"
-      cpu: "500m"
   autoscaling:
     minReplicas: 2
     maxReplicas: 10

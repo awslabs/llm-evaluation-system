@@ -128,3 +128,18 @@ variable "data_bucket_arn" {
   description = "S3 data bucket ARN"
   type        = string
 }
+
+variable "spa_bucket" {
+  description = "S3 SPA bucket name (static Vite frontend bundle) from data layer"
+  type        = string
+}
+
+variable "spa_bucket_arn" {
+  description = "S3 SPA bucket ARN from data layer"
+  type        = string
+}
+
+variable "spa_bucket_regional_domain_name" {
+  description = "S3 SPA bucket regional domain name (CloudFront S3 origin) from data layer"
+  type        = string
+}

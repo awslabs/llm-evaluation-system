@@ -79,3 +79,18 @@ output "data_bucket_arn" {
   description = "S3 data bucket ARN"
   value       = module.data_bucket.s3_bucket_arn
 }
+
+output "spa_bucket" {
+  description = "S3 SPA bucket name (static Vite frontend bundle)"
+  value       = module.spa_bucket.s3_bucket_id
+}
+
+output "spa_bucket_arn" {
+  description = "S3 SPA bucket ARN"
+  value       = module.spa_bucket.s3_bucket_arn
+}
+
+output "spa_bucket_regional_domain_name" {
+  description = "S3 SPA bucket regional domain name (CloudFront S3 origin)"
+  value       = module.spa_bucket.s3_bucket_bucket_regional_domain_name
+}

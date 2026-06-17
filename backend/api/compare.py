@@ -13,6 +13,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
 
+from backend.core.inspect_viewer import _is_within_dir
 from eval_mcp.core.eval_results import precompute_eval_results
 from eval_mcp.core.user_storage import get_user_log_dir, load_eval_detail, load_eval_groups
 
@@ -75,8 +76,12 @@ async def get_sample_detail(
     from eval_mcp.core.eval_results import _read_full_logs
     from eval_mcp.core.user_storage import get_user_log_dir
 
-    log_dir = get_user_log_dir(user_id)
-    if not log_file.startswith(log_dir) and f"/users/{user_id}/" not in log_file:
+    # Real path-boundary check (normalized, separator-anchored) against the
+    # caller's own log dir. The previous `startswith OR "/users/{uid}/" in path`
+    # was a substring test and bypassable (a path merely CONTAINING the segment
+    # passed). get_user_log_dir already includes the user_id, so this confines
+    # reads to {.../users/{user_id}/logs}.
+    if not _is_within_dir(log_file, get_user_log_dir(user_id)):
         raise HTTPException(status_code=403, detail="Access denied")
 
     full_logs = await _read_full_logs([log_file])

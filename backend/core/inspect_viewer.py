@@ -4,6 +4,7 @@ This is the ONLY file that imports from inspect_ai._view internals.
 When upgrading Inspect AI, check this file first for compatibility.
 """
 
+import posixpath
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -19,35 +20,106 @@ from inspect_ai._view.fastapi_server import (
 from inspect_ai._view._dist import resolve_dist_directory
 
 
+def _normalize_key(path: str) -> str:
+    """Reduce any log path to a comparable, traversal-collapsed key.
+
+    Strips a `file://`/`s3://`/`gs://`-style scheme down to its path/key, then
+    collapses `..`/`.` segments with posixpath.normpath. This MUST run before
+    any boundary comparison — otherwise `/a/b/../../victim/x` or a scheme
+    prefix would slip past a naive startswith/substring check.
+    """
+    if not path:
+        return ""
+    # Strip scheme: "file:///data/users/u/x" -> "/data/users/u/x";
+    # "s3://bucket/users/u/x" -> "bucket/users/u/x". Both sides of every
+    # comparison are normalized the same way, so the s3 leading-slash
+    # difference is consistent and safe.
+    if "://" in path:
+        path = path.split("://", 1)[1]
+    return posixpath.normpath(path)
+
+
+def _is_within_dir(path: str, scope_dir: str) -> bool:
+    """True iff normalized `path` is `scope_dir` itself or strictly under it.
+
+    The boundary primitive: both sides are normalized (scheme stripped, `..`
+    collapsed) and the match is on a path-SEPARATOR boundary, so neither a bare
+    substring (`/users/x/` appearing mid-path) nor a sibling prefix
+    (`{scope}-evil`) nor a `..` traversal can pass. Empty inputs are denied.
+    """
+    norm = _normalize_key(path)
+    scope = _normalize_key(scope_dir).rstrip("/")
+    if not norm or not scope:
+        return False
+    return norm == scope or (norm + "/").startswith(scope + "/")
+
+
+def _is_within_user_scope(path: str, user_id: str, log_root: str) -> bool:
+    """True iff `path` is inside the caller's per-user subtree under log_root.
+
+    The single chokepoint for the Inspect viewer, where `log_root` is the
+    shared base (e.g. `/data/users`) and each tenant owns `{log_root}/{user_id}`.
+    Missing/empty user_id is always denied.
+    """
+    if not user_id:
+        return False
+    root = _normalize_key(log_root).rstrip("/")
+    return _is_within_dir(path, f"{root}/{user_id}")
+
+
 class UserAccessPolicy:
     """Multi-tenant access policy. Scopes log access to the authenticated user."""
 
+    def __init__(self, log_root: str):
+        # Normalize once (strip scheme, collapse) so the bare equality check in
+        # can_list compares like-for-like with normalized request dirs.
+        self._log_root = _normalize_key(log_root).rstrip("/")
+
     async def can_read(self, request: Request, file: str) -> bool:
-        user_id = _get_user_id(request)
-        if not user_id:
-            return False
-        return f"/{user_id}/" in file or file.startswith(f"{user_id}/")
+        return _is_within_user_scope(file, _get_user_id(request), self._log_root)
 
     async def can_delete(self, request: Request, file: str) -> bool:
         return await self.can_read(request, file)
 
+    async def can_write(self, request: Request, file: str) -> bool:
+        return await self.can_read(request, file)
+
     async def can_list(self, request: Request, dir: str) -> bool:
-        return True
+        user_id = _get_user_id(request)
+        if not user_id:
+            return False
+        # Allow the user's own subtree, OR the shared root itself — the root is
+        # the viewer's default listing target, and the mapping policy rewrites
+        # it down to THIS user's logs dir (see map()), so listing the root can
+        # never enumerate another tenant. Any OTHER explicit dir (another
+        # user's subtree, /tmp, …) is denied here.
+        if _is_within_user_scope(dir, user_id, self._log_root):
+            return True
+        return _normalize_key(dir) == self._log_root
 
 
 class UserFileMappingPolicy:
     """Maps file paths to per-user directories within the log root."""
 
     def __init__(self, log_root: str):
-        self._log_root = log_root.rstrip("/")
+        self._log_root = _normalize_key(log_root).rstrip("/")
 
     async def map(self, request: Request, file: str) -> str:
         user_id = _get_user_id(request)
         if not user_id:
             return file
-        if file.startswith(self._log_root):
+        user_logs = f"{self._log_root}/{user_id}/logs"
+        # Already inside this user's subtree → pass through unchanged.
+        if _is_within_user_scope(file, user_id, self._log_root):
             return file
-        return f"{self._log_root}/{user_id}/logs/{file}"
+        # The shared root (the default listing target) or any other absolute
+        # path under the root that is NOT this user's → force into the user's
+        # own logs dir. A caller-supplied path can never escape the per-user
+        # prefix this way.
+        if _is_within_dir(file, self._log_root):
+            return user_logs
+        # A relative filename → resolve under the user's logs dir.
+        return f"{user_logs}/{file}"
 
     async def unmap(self, request: Request, file: str) -> str:
         user_id = _get_user_id(request)
@@ -76,14 +148,16 @@ def create_viewer_app(
         fs_options: Options for filesystem access (e.g., S3 credentials).
         multi_tenant: If True, enable per-user access policies.
     """
-    access_policy = UserAccessPolicy() if multi_tenant else None
-    mapping_policy = UserFileMappingPolicy(log_dir) if multi_tenant else None
-
     # Resolve log_dir to full path (same as view_server() does)
     fs = filesystem(log_dir)
     if not fs.exists(log_dir):
         fs.mkdir(log_dir, True)
     resolved_dir = fs.info(log_dir).name
+
+    # Scope policies against the RESOLVED root so boundary checks compare
+    # like-for-like with the absolute paths the viewer hands them.
+    access_policy = UserAccessPolicy(resolved_dir) if multi_tenant else None
+    mapping_policy = UserFileMappingPolicy(resolved_dir) if multi_tenant else None
 
     api = view_server_app(
         default_dir=resolved_dir,

@@ -1856,7 +1856,10 @@ _resolved_log_dir = _fs.info(_log_dir).name
 # The Inspect SPA hardcodes API calls to /api/* at root. Mount viewer API
 # at /api alongside our backend routes (no conflicts: viewer uses /api/logs,
 # /api/log-dir etc; our backend uses /api/chat, /api/auth, /api/sessions).
-_viewer_api = create_viewer_app(log_dir=_resolved_log_dir)
+# multi_tenant=True is REQUIRED: it installs the per-user access/mapping
+# policies so one tenant cannot read/list/delete another's eval logs via the
+# viewer's /api/log* routes. Without it those routes have zero scoping.
+_viewer_api = create_viewer_app(log_dir=_resolved_log_dir, multi_tenant=True)
 app.mount("/api", _viewer_api)
 
 # Serve the Inspect SPA static files at /inspect/

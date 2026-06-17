@@ -66,7 +66,7 @@ Run with `.venv/bin/pytest tests/`. Useful for pinning down specific regressions
 
 ### 4. Rebuild the viewer frontend
 
-The viewer is a pre-built Next.js export served by the Python viewer app. When you change `frontend/` source:
+The viewer is a pre-built Vite/React SPA served by the Python viewer app. When you change `frontend/` source:
 
 ```bash
 cd frontend
@@ -146,13 +146,13 @@ MCP listens at `http://localhost:8002/mcp`.
 
 ## Full web app locally (Docker Compose)
 
-If you're changing the EKS web app (FastAPI + Next.js chat) and want hot reload for all services:
+If you're changing the EKS web app (FastAPI + Vite/React chat):
 
 ```bash
-AWS_PROFILE=my-profile make dev    # from repo root
+AWS_PROFILE=my-profile make dev    # from repo root: builds the SPA, then docker compose
 ```
 
-Opens http://localhost:4001. Each service hot-reloads independently; see [`local/README.md`](../local/README.md) for commands (`make logs`, `make restart s=backend`, etc.) and the architecture diagram.
+Opens http://localhost:4001. `make dev` builds the static SPA into `frontend/dist`, which nginx serves single-origin (no Node frontend container — the same shape EKS targets) and proxies `/api` to the backend. The backend hot-reloads on Python edits; for frontend edits rerun `make dev-spa` and refresh. See [`local/README.md`](../local/README.md) for commands (`make logs`, `make restart s=backend`, etc.) and the architecture diagram.
 
 ## Architecture
 
@@ -167,7 +167,7 @@ troubleshooting) rather than what the system is.
 The repo hosts two deployable things that share some code:
 
 - **`eval_mcp/`** — the MCP package published to PyPI as `llm-evaluation-system`. This is what the README's Install section wires up. Self-contained; no database or web app.
-- **`backend/` + `frontend/`** — the full EKS web app (FastAPI + Next.js chat UI + Cognito auth). `./deploy.sh` is its entry point.
+- **`backend/` + `frontend/`** — the full EKS web app (FastAPI + Vite/React chat UI + Cognito auth). `./deploy.sh` is its entry point.
 
 ```
 llm-evaluation-system/
@@ -179,11 +179,11 @@ llm-evaluation-system/
 │   ├── bedrock_capture.py        # OTel-based Bedrock call capture for agent evals
 │   ├── s3_sync.py                # Optional team-sharing via S3
 │   ├── viewer.py                 # Local results viewer (FastAPI)
-│   └── viewer_static/            # Pre-built Next.js static export (rebuilt via `npm run build:viewer`)
+│   └── viewer_static/            # Pre-built Vite/React SPA bundle (rebuilt via `npm run build:viewer`)
 ├── backend/                      # EKS web app (not used by the MCP)
 │   ├── api/                      # FastAPI routes (chat, compare, auth)
 │   └── core/                     # Chat agent, database, mcp_client
-├── frontend/                     # Next.js source for both the web app AND the viewer static export
+├── frontend/                     # Vite/React SPA source for both the web app AND the viewer static export
 ├── docker/                       # Dockerfiles (web app + MCP serve mode)
 ├── helm/                         # EKS Helm chart + external-secrets config
 ├── infra/

@@ -2,33 +2,39 @@
   "name": "eval-frontend",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "dev": "next dev",
-    "build": "BUILD_MODE=standalone next build",
-    "build:viewer": "BUILD_MODE=export next build && rm -rf ../eval_mcp/viewer_static && cp -r out ../eval_mcp/viewer_static",
-    "start": "next start",
+    "dev": "vite",
+    "build": "vite build",
+    "build:viewer": "vite build && rm -rf ../eval_mcp/viewer_static && cp -r dist ../eval_mcp/viewer_static",
+    "preview": "vite preview",
     "lint": "eslint ."
   },
   "dependencies": {
-    "axios": "^1.16.0",
     "date-fns": "^4.1.0",
-    "next": "^16.2.6",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.1.1",
     "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.4",
     "@tailwindcss/typography": "^0.5.19",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.1",
     "@types/react-dom": "^19.0.2",
+    "@vitejs/plugin-react": "^4.3.4",
     "autoprefixer": "^10.4.20",
     "eslint": "^9.39.4",
-    "eslint-config-next": "^16.2.6",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "eslint-plugin-react-refresh": "^0.4.16",
+    "globals": "^15.14.0",
     "postcss": "^8.5.14",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.1",
+    "vite": "^6.0.7"
   },
   "overrides": {
     "minimatch@<10": "npm:minimatch@10.2.3",

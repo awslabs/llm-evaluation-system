@@ -7,9 +7,9 @@ This is the canonical agent-facing doc for the repo — Claude Code reads it dir
 Two deployables that share some code:
 
 - **`eval_mcp/`** — the MCP package published to PyPI as `llm-evaluation-system` (entry point `eval-mcp`). Self-contained, no database, no web app. This is what 99% of users install.
-- **`backend/` + `frontend/`** — the optional EKS web app (FastAPI chat + Next.js UI + Cognito auth). `./deploy.sh` is its entry point; `make dev` runs it locally via Docker Compose.
+- **`backend/` + `frontend/`** — the optional EKS web app (FastAPI chat + Vite/React UI + Cognito auth). `./deploy.sh` is its entry point; `make dev` runs it locally via Docker Compose.
 
-The same `frontend/` source builds two artifacts: the Next.js app for the web deployment (`next build`), and a static export bundled into `eval_mcp/viewer_static/` for the MCP's local results viewer (`npm run build:viewer`). Changing frontend code therefore affects the PyPI wheel — the viewer static is package data per `pyproject.toml`.
+`frontend/` is a single Vite + React SPA (client-side routing via react-router). `vite build` produces a static bundle served two ways: bundled into `eval_mcp/viewer_static/` for the MCP's local results viewer (`npm run build:viewer`), and served by FastAPI/nginx single-origin for the EKS web deployment. Changing frontend code therefore affects the PyPI wheel — the viewer static is package data per `pyproject.toml`.
 
 ## Key files
 
@@ -54,24 +54,25 @@ Pytest is **only useful for narrow deterministic logic** (parsing, validation, r
 ```bash
 cd frontend
 npm install                  # first time only
-npm run build:viewer         # rebuild + copy to eval_mcp/viewer_static/
-npm run dev                  # standalone Next dev server on :3000
-npm run lint                 # next lint
+npm run build:viewer         # vite build + copy to eval_mcp/viewer_static/
+npm run dev                  # Vite dev server on :5173 (proxies /api → backend)
+npm run lint                 # eslint
 ```
 
-`build:viewer` runs `BUILD_MODE=export next build` and replaces `eval_mcp/viewer_static/`. Run it whenever you change frontend source if you want the local MCP viewer to reflect it.
+`build:viewer` runs `vite build` and replaces `eval_mcp/viewer_static/` with the static bundle (`index.html` + `assets/`). Run it whenever you change frontend source if you want the local MCP viewer to reflect it. The Vite dev server proxies `/api` and `/inspect` to a backend (set `BACKEND_URL`, default `http://localhost:8000`); point it at `eval-mcp view` (:4001) for viewer work or the full backend (:8000) for chat.
 
 ### Local full-stack (web app)
 
 ```bash
-AWS_PROFILE=my-profile make dev          # docker compose, all services, hot reload
+AWS_PROFILE=my-profile make dev          # build SPA + docker compose (backend hot-reloads)
+make dev-spa                              # rebuild just the SPA bundle (nginx picks it up on refresh)
 make logs s=backend                       # tail one service
 make restart s=backend                    # restart one with fresh creds
 make stop                                 # docker compose down
 make clean                                # also wipe volumes
 ```
 
-Open http://127.0.0.1:4001. See [local/README.md](local/README.md).
+`make dev` builds the static SPA into `frontend/dist`, which nginx serves single-origin (no Node frontend container — same shape as the EKS deployment); the backend hot-reloads on Python edits. For frontend edits, rerun `make dev-spa` and refresh. Open http://127.0.0.1:4001. See [local/README.md](local/README.md).
 
 ### Release
 
@@ -127,5 +128,5 @@ Claude Code and other agentic tools auto-summarize prior conversation turns when
 
 These [marketplace skills](https://code.claude.com/docs/en/skills) from the official Anthropic marketplace pair well with this repo's workflows. They're user-installed (not bundled here), so the recommendation only fires for sessions where the user has them available — but if you do, lean on them rather than reinventing the wheel.
 
-- **`webapp-testing`** — after any change the viewer renders, including: UI/routing edits under `frontend/` (web app on `:3000` or the bundled viewer on `:4001`), and backend edits that change the JSON shape the viewer consumes (e.g. `eval_mcp/core/eval_results.py`, `eval_mcp/viewer.py`, `list_evaluations`). Spins up Playwright and actually clicks through pages. A label or column-header change in a Python file is still a UI change — verify it in the browser, don't just inspect the JSON.
+- **`webapp-testing`** — after any change the viewer renders, including: UI/routing edits under `frontend/` (full web app on `:4001` via `make dev`, Vite dev server on `:5173`, or the bundled viewer on `:4001`), and backend edits that change the JSON shape the viewer consumes (e.g. `eval_mcp/core/eval_results.py`, `eval_mcp/viewer.py`, `list_evaluations`). Spins up Playwright and actually clicks through pages. A label or column-header change in a Python file is still a UI change — verify it in the browser, don't just inspect the JSON.
 - **`frontend-design`** — when adding or restyling components in `frontend/`. Same source builds both the web app and the static viewer export, so component quality lands in both deliverables.

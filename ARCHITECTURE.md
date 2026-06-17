@@ -100,7 +100,7 @@ flowchart TB
 
 **Team sharing.** `eval-mcp init <bucket>` writes the bucket to local config; from then on every write fires `replicate_async` into a thread pool, and every list/read calls `auto_pull` (debounced by TTL) so local state mirrors S3. Account-ID suffix is auto-resolved so teammates type the same short name. Bucket region is auto-detected via `head_bucket` even on cross-region 301 redirects.
 
-**Viewer.** `eval-mcp view` boots a FastAPI app that serves the pre-built Next.js export from `eval_mcp/viewer_static/`. The static bundle is package data per `pyproject.toml`, so rebuilding the frontend (`npm run build:viewer`) affects the published wheel.
+**Viewer.** `eval-mcp view` boots a FastAPI app that serves the pre-built Vite/React SPA from `eval_mcp/viewer_static/` (mounts `/assets`, with an `index.html` SPA fallback for client-routed paths). The static bundle is package data per `pyproject.toml`, so rebuilding the frontend (`npm run build:viewer`) affects the published wheel.
 
 **Installers.** `eval_mcp/installers/` has one module per IDE. The dispatcher in `cli.py:install` auto-detects which IDEs are present, asks which to register, and writes the right config in each (JSON merge for Claude Code / Cursor / VS Code / Kiro, TOML round-trip for Codex via `tomlkit` so user comments survive).
 
@@ -116,7 +116,7 @@ flowchart TB
     Edge["AWS edge<br/>(CloudFront + WAF +<br/>oauth2-proxy + Cognito)"]
 
     subgraph Pods["EKS pods (stateless)"]
-        Frontend["Frontend Pod<br/>(Next.js)"]
+        Frontend["Frontend Pod<br/>(static SPA — see note)"]
         subgraph BackendPod["Backend Pod"]
             BE["backend<br/>(FastAPI)"]
             MCP["eval-mcp sidecar"]
@@ -139,6 +139,8 @@ flowchart TB
 
 The `Edge` box collapses several AWS services (CloudFront, WAF, an internal ALB, oauth2-proxy on EKS, Cognito as the IdP) into one logical boundary — they exist, but they're not architecturally interesting beyond "authenticated HTTPS gateway." Same for the two physical S3 buckets and three Bedrock regions, which collapse into single tiles. The depth lives in the prose below.
 
+> **Note — frontend serving (migration in progress).** The frontend is now a static Vite/React SPA (no Node runtime). Locally it's served single-origin by nginx/FastAPI (`make dev`), which is the target EKS shape. The EKS manifests below (the dedicated frontend pod/Deployment, the `/_next/*` ALB rule, CloudFront `/_next/static/*` behavior) still reflect the previous Next.js deployment and are pending the EKS-serving rework: delete the frontend pod and have the backend/edge serve the static bundle, repointing `/_next/*` → `/assets/*`. This was deferred intentionally — it needs a real deploy to verify.
+
 **Two Terraform layers, independent state.**
 
 - `infra/data/` — VPC (2 AZs, public/private/intra subnets, NAT, S3 VPC endpoint), RDS Postgres (db.t3.micro, 20→100GB, IAM auth), two S3 buckets (documents + data). Survives `./destroy.sh`.
@@ -157,7 +159,7 @@ Layers connect via `-var=` flags (not `terraform_remote_state`) so platform stat
 | Path                  | Service         | Auth                |
 |-----------------------|-----------------|---------------------|
 | `/`, `/_next/*`       | frontend        | public              |
-| `/api/auth/*`         | frontend        | public (NextAuth)   |
+| `/api/auth/*`         | backend         | oauth2-proxy        |
 | `/api/*`              | backend         | oauth2-proxy        |
 | `/viewer/*`           | backend         | oauth2-proxy        |
 | `/health`             | backend         | public              |

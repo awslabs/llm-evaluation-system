@@ -20,7 +20,8 @@ Open **http://127.0.0.1:4001** when ready (~2 minutes first build, ~30 seconds a
 
 | Command | Description |
 |---------|-------------|
-| `make dev` | Start all services with hot reload |
+| `make dev` | Build the SPA, then start all services |
+| `make dev-spa` | Rebuild just the SPA bundle (nginx serves it; refresh to see changes) |
 | `make stop` | Stop all services |
 | `make logs` | Tail all logs |
 | `make logs s=backend` | Tail one service's logs |
@@ -36,22 +37,24 @@ Open **http://127.0.0.1:4001** when ready (~2 minutes first build, ~30 seconds a
 │  nginx (:4001) ← your browser                               │
 │    ├── /api/* → backend                                      │
 │    ├── /inspect/* → backend (Inspect AI viewer)              │
-│    └── /* → frontend                                         │
+│    └── /* → static SPA bundle (frontend/dist, mounted)       │
 │                                                              │
 │  backend  (:8080)        ─┐ shared network (127.0.0.1)       │
 │  eval-mcp (:8002)        ─┘ like a K8s pod sidecar            │
 │                                                              │
-│  frontend (:3000)          separate network                  │
 │  postgres (:5432)          separate network                  │
 └──────────────────────────────────────────────────────────────┘
 ```
 
-## Hot Reload
+The frontend is a static Vite/React SPA — there is no Node frontend
+container. `make dev` runs `vite build` into `frontend/dist`, which nginx
+serves single-origin (the same shape the EKS deployment targets).
 
-Each service reloads independently:
-- Edit `backend/api/` or `backend/core/` → only backend restarts
-- Edit `eval_mcp/` → only eval-mcp restarts
-- Edit `frontend/` → only frontend reloads
+## Reloading
+
+- Edit `backend/api/` or `backend/core/` → backend hot-reloads automatically
+- Edit `eval_mcp/` → eval-mcp hot-reloads automatically
+- Edit `frontend/` → run `make dev-spa` to rebuild the bundle, then refresh
 - No cascade crashes
 
 ## Credential Refresh

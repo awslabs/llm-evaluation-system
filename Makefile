@@ -2,7 +2,7 @@
 
 COMPOSE := docker compose -f local/compose.yaml
 
-dev:             ## Start all services with hot reload
+dev:             ## Build the SPA + start all services
 	@eval $$(aws configure export-credentials --format env 2>/dev/null) && \
 	export AWS_REGION=$${AWS_REGION:-$$(aws configure get region 2>/dev/null)} && \
 	if [ -z "$$AWS_ACCESS_KEY_ID" ]; then \
@@ -10,7 +10,12 @@ dev:             ## Start all services with hot reload
 	fi && \
 	export AWS_DEFAULT_REGION=$$AWS_REGION && \
 	if [ -f .env.keys ]; then set -a; . ./.env.keys; set +a; fi && \
+	echo "Building frontend bundle (nginx serves frontend/dist)..." && \
+	(cd frontend && npm run build) && \
 	$(COMPOSE) up --build
+
+dev-spa:         ## Rebuild just the SPA bundle (nginx picks it up; no restart needed)
+	@cd frontend && npm run build
 
 keys:            ## Configure external provider API keys (optional)
 	@echo "# External LLM provider API keys (optional)" > .env.keys.tmp

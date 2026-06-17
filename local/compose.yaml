@@ -91,36 +91,21 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
 
-  frontend:
-    build:
-      context: ..
-      dockerfile: local/Dockerfile.frontend
-    volumes:
-      - ../frontend:/app
-      - frontend-nm:/app/node_modules
-    environment:
-      BACKEND_URL: http://backend:8080
-      NEXT_TELEMETRY_DISABLED: "1"
-      WATCHPACK_POLLING: "true"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
+  # No frontend container. The SPA is a static Vite build (frontend/dist),
+  # served directly by nginx below — mirroring the AWS end-state where the
+  # backend/edge serves static assets and there is no Node frontend pod.
+  # Rebuild the bundle with `npm run build` (or `make dev` runs it for you).
   nginx:
     image: nginx:alpine
     ports:
       - "4001:4001"
     volumes:
       - ./nginx-compose.conf:/etc/nginx/nginx.conf:ro
+      - ../frontend/dist:/usr/share/nginx/html:ro
     depends_on:
       backend:
-        condition: service_healthy
-      frontend:
         condition: service_healthy
 
 volumes:
   pgdata:
   userdata:
-  frontend-nm:

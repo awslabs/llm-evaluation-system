@@ -1,26 +1,28 @@
-import nextCoreWebVitals from "eslint-config-next/core-web-vitals";
-import nextTypescript from "eslint-config-next/typescript";
+import js from "@eslint/js";
+import globals from "globals";
+import reactHooks from "eslint-plugin-react-hooks";
+import reactRefresh from "eslint-plugin-react-refresh";
+import tseslint from "typescript-eslint";
 
-const config = [
+export default tseslint.config(
+  { ignores: ["dist", "node_modules"] },
   {
-    ignores: [
-      ".next/**",
-      "out/**",
-      "node_modules/**",
-      "next-env.d.ts",
-    ],
-  },
-  ...nextCoreWebVitals,
-  ...nextTypescript,
-  {
-    // React Compiler rules included by eslint-config-next 16 flag patterns
-    // the team would otherwise have to refactor across many files. Surface
-    // them as warnings so the lint script exits clean; tackle case by case.
+    extends: [js.configs.recommended, ...tseslint.configs.recommended],
+    files: ["src/**/*.{ts,tsx}"],
+    languageOptions: {
+      ecmaVersion: 2022,
+      globals: globals.browser,
+    },
+    plugins: {
+      "react-hooks": reactHooks,
+      "react-refresh": reactRefresh,
+    },
     rules: {
-      "react-hooks/set-state-in-effect": "warn",
-      "react-hooks/preserve-manual-memoization": "warn",
+      ...reactHooks.configs.recommended.rules,
+      "react-refresh/only-export-components": [
+        "warn",
+        { allowConstantExport: true },
+      ],
     },
   },
-];
-
-export default config;
+);

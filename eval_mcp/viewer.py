@@ -264,28 +264,46 @@ def create_viewer_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Optimization not found")
         return record
 
-    # Serve static files
+    # Serve the static SPA (Vite build → single index.html + hashed /assets).
+    #
+    # All API routes are registered above and take precedence. Everything else
+    # falls through to the SPA catch-all below, which returns index.html so the
+    # client-side router (react-router) resolves the path — including on a hard
+    # refresh or a deep link like /results?group=x. This is the same
+    # single-origin contract the AWS backend will serve.
     if STATIC_DIR.exists():
-        @app.get("/results")
-        async def results_page():
-            return FileResponse(STATIC_DIR / "results.html")
+        index_file = STATIC_DIR / "index.html"
 
-        @app.get("/data")
-        async def data_page():
-            # The Next static export emits one .html per route.
-            return FileResponse(STATIC_DIR / "data.html")
+        if (STATIC_DIR / "assets").exists():
+            app.mount(
+                "/assets",
+                StaticFiles(directory=STATIC_DIR / "assets"),
+                name="assets",
+            )
 
-        @app.get("/optimizations")
-        async def optimizations_page():
-            return FileResponse(STATIC_DIR / "optimizations.html")
-
-        @app.get("/")
-        async def index():
-            return FileResponse(STATIC_DIR / "results.html")
-
-        app.mount("/_next", StaticFiles(directory=STATIC_DIR / "_next"), name="static")
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            # Never let an unknown /api/* path fall through to the SPA — surface
+            # it as a real 404 instead of silently returning HTML.
+            if full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="Not found")
+            # Serve a real static file if one exists at the root (e.g.
+            # favicon.ico, vite.svg); otherwise hand back the SPA shell.
+            candidate = STATIC_DIR / full_path
+            if full_path and candidate.is_file() and _is_within(candidate, STATIC_DIR):
+                return FileResponse(candidate)
+            return FileResponse(index_file)
 
     return app
+
+
+def _is_within(path: Path, base: Path) -> bool:
+    """True if `path` resolves to a location inside `base` (no traversal)."""
+    try:
+        path.resolve().relative_to(base.resolve())
+        return True
+    except ValueError:
+        return False
 
 
 def start_viewer(port: int = 4001):

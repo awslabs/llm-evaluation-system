@@ -12,7 +12,6 @@ aws:
 # ECR images (repository constructed from aws.accountId + aws.region + projectName)
 image:
   backendTag: "backend-latest"
-  frontendTag: "frontend-latest"
   pullPolicy: Always
 
 # Stateless backend — all persistent data in S3
@@ -29,14 +28,6 @@ backend:
   autoscaling:
     minReplicas: 2
     maxReplicas: 6
-    targetCPUUtilization: 70
-    targetMemoryUtilization: 80
-
-frontend:
-  replicas: 2
-  autoscaling:
-    minReplicas: 2
-    maxReplicas: 10
     targetCPUUtilization: 70
     targetMemoryUtilization: 80
 
@@ -61,16 +52,27 @@ oauth2-proxy:
       cookie_expire = "12h"
       cookie_refresh = "0"
       session_cookie_minimal = true
-      cookie_csrf_per_request = true
+      # false is the oauth2-proxy default. per-request CSRF cookies only help
+      # concurrent/parallel logins, but make the OAuth callback brittle: a
+      # refreshed/replayed/stale-tab callback can't find its state-specific
+      # CSRF cookie and gets a 403 ("CSRF cookie not found"). A single stable
+      # CSRF cookie removes that intermittent login 403 for our single-tab flow.
+      cookie_csrf_per_request = false
       set_xauthrequest = true
       pass_access_token = false
       pass_authorization_header = false
       silence_ping_logging = true
       reverse_proxy = true
       upstream_timeout = "120s"
-      api_routes = ["/api/"]
+      # /api and /inspect are XHR/non-interactive → return 401 (not a login
+      # redirect) when unauthenticated, matching the SPA's fetch flow.
+      api_routes = ["/api/", "/inspect/"]
       skip_auth_routes = ["^/health$", "^/ping$"]
-      upstreams = ["http://backend:8080/api/", "http://frontend:3000/"]
+      # Single backend origin. The Next.js frontend pod is gone (SPA is served
+      # by CloudFront→S3), so there is no longer a "/" frontend upstream. This
+      # also fixes the prior mis-route where /inspect fell through to the dead
+      # frontend upstream instead of the backend mount.
+      upstreams = ["http://backend:8080/"]
 
   extraEnv:
     - name: OAUTH2_PROXY_OIDC_ISSUER_URL

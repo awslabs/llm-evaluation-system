@@ -63,7 +63,7 @@ code --add-mcp '{"name":"eval","command":"uvx","args":["--from","llm-evaluation-
 
 </details>
 
-Using a coding agent to install? Point it at [INSTALL.md](INSTALL.md) — it just runs `eval-mcp install --yes` and asks about optional S3 team sharing.
+Using a coding agent to install? Point it at [INSTALL.md](eval_mcp/INSTALL.md) — it just runs `eval-mcp install --yes` and asks about optional S3 team sharing.
 
 ### Upgrading
 

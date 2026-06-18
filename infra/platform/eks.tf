@@ -247,14 +247,33 @@ resource "null_resource" "karpenter_node_cleanup" {
   provisioner "local-exec" {
     when    = destroy
     command = <<-EOT
+      # Terminate Karpenter-launched nodes on EVERY iteration, not just once.
+      # The Karpenter controller may still be running during teardown and will
+      # relaunch replacement nodes for any it sees go away — so a terminate-
+      # once approach leaves the replacements orphaned, holding ENIs that block
+      # the EKS security groups from deleting and hanging terraform destroy
+      # indefinitely. Re-terminating each pass kills replacements until the
+      # controller itself is torn down and stops launching, then the loop
+      # converges. Match BOTH the discovery and nodepool tags (the discovery
+      # tag is the primary signal; nodepool is a belt-and-suspenders fallback
+      # in case a node is missing the discovery tag).
+      stable=0
       for i in $(seq 1 30); do
         IDS=$(aws ec2 describe-instances \
-          --filters "Name=tag:karpenter.sh/discovery,Values=${self.triggers.cluster_name}" \
-                    "Name=instance-state-name,Values=running,shutting-down,stopping" \
+          --filters "Name=tag-key,Values=karpenter.sh/nodepool" \
+                    "Name=instance-state-name,Values=pending,running,stopping,stopped" \
           --region ${self.triggers.region} \
           --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)
-        [ -z "$IDS" ] && echo "All Karpenter nodes terminated." && exit 0
-        if [ "$i" -eq 1 ]; then
+        if [ -z "$IDS" ]; then
+          stable=$((stable + 1))
+          # Require two consecutive empty passes so a node Karpenter is mid-
+          # launch (not yet visible) can't slip through after we exit.
+          if [ "$stable" -ge 2 ]; then
+            echo "All Karpenter nodes terminated."
+            exit 0
+          fi
+        else
+          stable=0
           echo "Terminating Karpenter nodes: $IDS"
           aws ec2 terminate-instances --instance-ids $IDS --region ${self.triggers.region} >/dev/null 2>&1 || true
         fi

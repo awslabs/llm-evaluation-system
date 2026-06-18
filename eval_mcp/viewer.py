@@ -264,28 +264,67 @@ def create_viewer_app() -> FastAPI:
             raise HTTPException(status_code=404, detail="Optimization not found")
         return record
 
-    # Serve static files
+    # Serve the static SPA (Vite build → single index.html + hashed /assets).
+    #
+    # All API routes are registered above and take precedence. Everything else
+    # falls through to the SPA catch-all below, which returns index.html so the
+    # client-side router (react-router) resolves the path — including on a hard
+    # refresh or a deep link like /results?group=x. This is the same
+    # single-origin contract the AWS backend will serve.
     if STATIC_DIR.exists():
-        @app.get("/results")
-        async def results_page():
-            return FileResponse(STATIC_DIR / "results.html")
+        index_file = STATIC_DIR / "index.html"
 
-        @app.get("/data")
-        async def data_page():
-            # The Next static export emits one .html per route.
-            return FileResponse(STATIC_DIR / "data.html")
+        if (STATIC_DIR / "assets").exists():
+            app.mount(
+                "/assets",
+                StaticFiles(directory=STATIC_DIR / "assets"),
+                name="assets",
+            )
 
-        @app.get("/optimizations")
-        async def optimizations_page():
-            return FileResponse(STATIC_DIR / "optimizations.html")
-
-        @app.get("/")
-        async def index():
-            return FileResponse(STATIC_DIR / "results.html")
-
-        app.mount("/_next", StaticFiles(directory=STATIC_DIR / "_next"), name="static")
+        @app.get("/{full_path:path}")
+        async def spa_fallback(full_path: str):
+            # Never let an unknown /api/* path fall through to the SPA — surface
+            # it as a real 404 instead of silently returning HTML.
+            if full_path.startswith("api/"):
+                raise HTTPException(status_code=404, detail="Not found")
+            # Resolve the request to a concrete static file ONLY via a strict
+            # allowlist of safe path components, computed before any filesystem
+            # access. Reject anything that could traverse out of STATIC_DIR
+            # (absolute paths, "..", empty/dot segments, NUL). Everything else
+            # falls back to the SPA shell. This keeps the user-controlled value
+            # from ever reaching a filesystem call along an unsafe path.
+            safe = _safe_static_file(full_path, STATIC_DIR)
+            if safe is not None:
+                return FileResponse(safe)
+            return FileResponse(index_file)
 
     return app
+
+
+def _safe_static_file(full_path: str, base: Path) -> Path | None:
+    """Map a request path to a file inside `base`, or None if unsafe/missing.
+
+    Defense-in-depth against path traversal: validate the raw, user-controlled
+    segments BEFORE building or touching any filesystem path. A segment is only
+    allowed if it is a plain name (no separators handled here — FastAPI splits
+    on "/"), is not empty, "." or "..", and contains no NUL. After joining, the
+    fully-resolved path must still sit inside the resolved base. Returns the
+    file path only when all checks pass and it is a regular file.
+    """
+    if not full_path or "\x00" in full_path:
+        return None
+    parts = full_path.split("/")
+    for seg in parts:
+        if seg in ("", ".", "..") or seg.startswith("/"):
+            return None
+    base_resolved = base.resolve()
+    candidate = base_resolved.joinpath(*parts).resolve()
+    # Final boundary check — candidate must be within base after resolution.
+    if base_resolved != candidate and base_resolved not in candidate.parents:
+        return None
+    if candidate.is_file():
+        return candidate
+    return None
 
 
 def start_viewer(port: int = 4001):

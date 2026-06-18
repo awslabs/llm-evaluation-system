@@ -1856,12 +1856,28 @@ _resolved_log_dir = _fs.info(_log_dir).name
 # The Inspect SPA hardcodes API calls to /api/* at root. Mount viewer API
 # at /api alongside our backend routes (no conflicts: viewer uses /api/logs,
 # /api/log-dir etc; our backend uses /api/chat, /api/auth, /api/sessions).
-_viewer_api = create_viewer_app(log_dir=_resolved_log_dir)
+# multi_tenant=True is REQUIRED: it installs the per-user access/mapping
+# policies so one tenant cannot read/list/delete another's eval logs via the
+# viewer's /api/log* routes. Without it those routes have zero scoping.
+_viewer_api = create_viewer_app(log_dir=_resolved_log_dir, multi_tenant=True)
 app.mount("/api", _viewer_api)
 
 # Serve the Inspect SPA static files at /inspect/
 _dist_dir = resolve_dist_directory()
 app.mount("/inspect", _InspectStaticFiles(directory=_dist_dir.as_posix(), html=True), name="inspect-viewer")
+
+
+# NOTE: This credentialed backend deliberately serves ONLY its API (and the
+# Inspect viewer mounts above). It does NOT serve the React SPA. In the EKS
+# deployment the static bundle is served by S3 (private bucket via CloudFront
+# OAC), and only /api/*, /inspect/*, /oauth2/* and /health are routed to this
+# pod through oauth2-proxy. Keeping the SPA out of the credentialed process is
+# defense-in-depth: even if edge routing ever leaked, this pod exposes no
+# public static catch-all adjacent to its S3/Bedrock/RDS credentials. Locally,
+# nginx (standing in for CloudFront+S3) serves frontend/dist and proxies the
+# gated paths here — the same split. The standalone MCP results viewer
+# (eval_mcp/viewer.py) is a separate, local-only, credential-free process and
+# serves its own bundle there.
 
 
 if __name__ == "__main__":

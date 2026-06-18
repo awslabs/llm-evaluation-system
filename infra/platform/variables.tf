@@ -128,3 +128,33 @@ variable "data_bucket_arn" {
   description = "S3 data bucket ARN"
   type        = string
 }
+
+variable "spa_bucket" {
+  description = "S3 SPA bucket name (static Vite frontend bundle) from data layer"
+  type        = string
+}
+
+variable "spa_bucket_arn" {
+  description = "S3 SPA bucket ARN from data layer"
+  type        = string
+}
+
+variable "spa_bucket_regional_domain_name" {
+  description = "S3 SPA bucket regional domain name (CloudFront S3 origin) from data layer"
+  type        = string
+}
+
+variable "cognito_user_pool_id" {
+  description = "Cognito user pool ID from data layer (durable identity store)"
+  type        = string
+}
+
+variable "cognito_user_pool_arn" {
+  description = "Cognito user pool ARN from data layer"
+  type        = string
+}
+
+variable "cognito_user_pool_domain" {
+  description = "Cognito hosted-UI domain prefix from data layer"
+  type        = string
+}

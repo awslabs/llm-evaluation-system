@@ -8,9 +8,14 @@ output "app_url" {
   value       = "https://${aws_cloudfront_distribution.main.domain_name}"
 }
 
+output "cloudfront_distribution_id" {
+  description = "CloudFront distribution ID (for SPA cache invalidation on deploy)"
+  value       = aws_cloudfront_distribution.main.id
+}
+
 output "cognito_idp_response_url" {
   description = "OIDC IdP response URL — configure this as the redirect URI in your identity provider"
-  value       = var.enable_oidc_idp ? "https://${aws_cognito_user_pool_domain.main.domain}.auth.${var.region}.amazoncognito.com/oauth2/idpresponse" : null
+  value       = var.enable_oidc_idp ? "https://${var.cognito_user_pool_domain}.auth.${var.region}.amazoncognito.com/oauth2/idpresponse" : null
 }
 
 output "ecr_repository" {
@@ -20,7 +25,7 @@ output "ecr_repository" {
 
 output "cognito_user_pool_id" {
   description = "Cognito User Pool ID"
-  value       = aws_cognito_user_pool.main.id
+  value       = var.cognito_user_pool_id
 }
 
 output "eks_cluster_name" {

@@ -79,3 +79,37 @@ output "data_bucket_arn" {
   description = "S3 data bucket ARN"
   value       = module.data_bucket.s3_bucket_arn
 }
+
+output "spa_bucket" {
+  description = "S3 SPA bucket name (static Vite frontend bundle)"
+  value       = module.spa_bucket.s3_bucket_id
+}
+
+output "spa_bucket_arn" {
+  description = "S3 SPA bucket ARN"
+  value       = module.spa_bucket.s3_bucket_arn
+}
+
+output "spa_bucket_regional_domain_name" {
+  description = "S3 SPA bucket regional domain name (CloudFront S3 origin)"
+  value       = module.spa_bucket.s3_bucket_bucket_regional_domain_name
+}
+
+#------------------------------------------------------------------------------
+# Cognito (durable identity store — consumed by the platform layer)
+#------------------------------------------------------------------------------
+
+output "cognito_user_pool_id" {
+  description = "Cognito user pool ID"
+  value       = aws_cognito_user_pool.main.id
+}
+
+output "cognito_user_pool_arn" {
+  description = "Cognito user pool ARN"
+  value       = aws_cognito_user_pool.main.arn
+}
+
+output "cognito_user_pool_domain" {
+  description = "Cognito hosted-UI domain prefix"
+  value       = aws_cognito_user_pool_domain.main.domain
+}

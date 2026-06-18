@@ -133,6 +133,64 @@ data "aws_cloudfront_origin_request_policy" "all_viewer" {
   name = "Managed-AllViewer"
 }
 
+#------------------------------------------------------------------------------
+# Origin Access Control (OAC) for the private SPA S3 bucket
+#
+# OAC is the current AWS-recommended mechanism (OAI is legacy). signing_behavior
+# "always" makes every CloudFront->S3 request SigV4-signed over HTTPS, so the
+# bucket can stay fully private (all public access blocked) and is readable
+# ONLY by this distribution (enforced by the bucket policy's AWS:SourceArn
+# condition in spa_bucket_policy.tf).
+#------------------------------------------------------------------------------
+
+resource "aws_cloudfront_origin_access_control" "spa" {
+  name                              = "${local.name}-spa"
+  description                       = "OAC for the static SPA bucket"
+  origin_access_control_origin_type = "s3"
+  signing_behavior                  = "always"
+  signing_protocol                  = "sigv4"
+}
+
+#------------------------------------------------------------------------------
+# SPA client-side-routing fallback (CloudFront Function, viewer-request)
+#
+# Mirrors the local nginx `try_files $uri /index.html`. Deep links like
+# /history have no object in S3, so rewrite extension-less, non-gated paths to
+# /index.html and let react-router resolve them. The gated prefixes
+# (/api,/inspect,/oauth2,/health) are separate ALB behaviors and never reach
+# this function (it's attached to the default S3 behavior only); the explicit
+# guard below is defense-in-depth so a path can NEVER be rewritten away from
+# the ALB origin onto the public S3 bucket. /assets and any path with a file
+# extension pass through untouched so real S3 objects are served as-is.
+#------------------------------------------------------------------------------
+
+resource "aws_cloudfront_function" "spa_router" {
+  name    = "${local.name}-spa-router"
+  runtime = "cloudfront-js-2.0"
+  comment = "SPA deep-link fallback to /index.html"
+  publish = true
+  code    = <<-EOT
+    function handler(event) {
+      var request = event.request;
+      var uri = request.uri;
+      // Never touch gated/backend paths (defensive — these are separate
+      // ALB behaviors and shouldn't reach this function).
+      if (uri.startsWith('/api') || uri.startsWith('/inspect') ||
+          uri.startsWith('/oauth2') || uri === '/health') {
+        return request;
+      }
+      // Real static assets (hashed bundle) and any path with a file
+      // extension are served from S3 as-is.
+      if (uri.startsWith('/assets/') || uri.split('/').pop().indexOf('.') !== -1) {
+        return request;
+      }
+      // SPA route (/, /chat, /history, …) -> serve the app shell.
+      request.uri = '/index.html';
+      return request;
+    }
+  EOT
+}
+
 resource "aws_cloudfront_distribution" "main" {
   enabled         = true
   http_version    = "http2and3"
@@ -140,6 +198,7 @@ resource "aws_cloudfront_distribution" "main" {
   price_class     = "PriceClass_100"
   web_acl_id      = aws_wafv2_web_acl.main.arn
 
+  # Dynamic / authenticated origin: the internal ALB (-> oauth2-proxy -> backend).
   origin {
     domain_name = module.alb.dns_name
     origin_id   = "alb"
@@ -150,7 +209,49 @@ resource "aws_cloudfront_distribution" "main" {
     }
   }
 
+  # Static origin: the private SPA bucket, read via OAC only.
+  origin {
+    domain_name              = var.spa_bucket_regional_domain_name
+    origin_id                = "spa-s3"
+    origin_access_control_id = aws_cloudfront_origin_access_control.spa.id
+  }
+
+  # DEFAULT behavior -> S3 (the public SPA shell). Mirrors the local nginx
+  # model where static is the catch-all and gated paths are explicitly
+  # proxied. The SPA-router function provides client-side-routing fallback.
+  # S3 holds no credentials or tenant data, so a routing mistake here can only
+  # ever serve the public shell / a 404 — never leak data.
   default_cache_behavior {
+    target_origin_id       = "spa-s3"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+    cache_policy_id        = data.aws_cloudfront_cache_policy.optimized.id
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.spa_router.arn
+    }
+  }
+
+  # Hashed, content-addressed assets -> S3, cached hard.
+  ordered_cache_behavior {
+    path_pattern           = "/assets/*"
+    target_origin_id       = "spa-s3"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD"]
+    cached_methods         = ["GET", "HEAD"]
+    compress               = true
+    cache_policy_id        = data.aws_cloudfront_cache_policy.optimized.id
+  }
+
+  # ---- Gated / dynamic paths -> ALB -> oauth2-proxy -> backend (fail-safe). ----
+  # Each must be an explicit behavior so it is NEVER served from the public S3
+  # default. Caching disabled + all methods + all-viewer so auth headers,
+  # cookies, and POST/SSE pass through to oauth2-proxy intact.
+  ordered_cache_behavior {
+    path_pattern             = "/api/*"
     target_origin_id         = "alb"
     viewer_protocol_policy   = "redirect-to-https"
     allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
@@ -161,23 +262,36 @@ resource "aws_cloudfront_distribution" "main" {
   }
 
   ordered_cache_behavior {
-    path_pattern           = "/_next/static/*"
-    target_origin_id       = "alb"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD"]
-    cached_methods         = ["GET", "HEAD"]
-    compress               = true
-    cache_policy_id        = data.aws_cloudfront_cache_policy.optimized.id
+    path_pattern             = "/inspect/*"
+    target_origin_id         = "alb"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = true
+    cache_policy_id          = data.aws_cloudfront_cache_policy.disabled.id
+    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
   }
 
   ordered_cache_behavior {
-    path_pattern           = "/static/*"
-    target_origin_id       = "alb"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["GET", "HEAD"]
-    cached_methods         = ["GET", "HEAD"]
-    compress               = true
-    cache_policy_id        = data.aws_cloudfront_cache_policy.optimized.id
+    path_pattern             = "/oauth2/*"
+    target_origin_id         = "alb"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = true
+    cache_policy_id          = data.aws_cloudfront_cache_policy.disabled.id
+    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
+  }
+
+  ordered_cache_behavior {
+    path_pattern             = "/health"
+    target_origin_id         = "alb"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["GET", "HEAD"]
+    cached_methods           = ["GET", "HEAD"]
+    compress                 = true
+    cache_policy_id          = data.aws_cloudfront_cache_policy.disabled.id
+    origin_request_policy_id = data.aws_cloudfront_origin_request_policy.all_viewer.id
   }
 
   restrictions {

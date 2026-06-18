@@ -51,15 +51,14 @@ module "alb" {
       forward  = { target_group_key = "oauth2proxy" }
 
       rules = {
-        # Health check bypass (no auth needed)
+        # Health check bypass (no auth needed). The backend /health handler
+        # ignores the user header, so this is inert — it's the ONLY rule that
+        # forwards to the backend TG directly. Everything else goes through
+        # oauth2-proxy (the default forward), which is what makes the backend's
+        # X-Forwarded-User trust safe. The SPA + its assets are served by
+        # CloudFront -> S3 and never reach the ALB.
         health = { priority = 1, conditions = [{ path_pattern = { values = ["/health"] } }], actions = [{ type = "forward", target_group_key = "backend" }] }
-        # Landing page - direct to frontend (public sign-in page, industry standard pattern)
-        landing = { priority = 2, conditions = [{ path_pattern = { values = ["/"] } }], actions = [{ type = "forward", target_group_key = "frontend" }] }
-        # Next.js static assets - direct to frontend (public JS/CSS bundles)
-        nextjs = { priority = 3, conditions = [{ path_pattern = { values = ["/_next/*"] } }], actions = [{ type = "forward", target_group_key = "frontend" }] }
-        # Favicon - direct to frontend
-        favicon = { priority = 4, conditions = [{ path_pattern = { values = ["/favicon.ico"] } }], actions = [{ type = "forward", target_group_key = "frontend" }] }
-        # Everything else through oauth2-proxy (protected routes: /chat, /api/*, /viewer/*)
+        # Everything else through oauth2-proxy (protected routes: /, /chat, /api/*, /inspect/*, /oauth2/*)
       }
     }
   }
@@ -80,15 +79,6 @@ module "alb" {
       target_type       = "ip"
       create_attachment = false
       health_check      = { path = "/health", interval = 15 }
-      stickiness        = { enabled = true, type = "lb_cookie", cookie_duration = 3600 }
-    }
-    frontend = {
-      name              = "${local.name}-frontend"
-      protocol          = "HTTP"
-      port              = 3000
-      target_type       = "ip"
-      create_attachment = false
-      health_check      = { path = "/api/health", interval = 15 }
       stickiness        = { enabled = true, type = "lb_cookie", cookie_duration = 3600 }
     }
   }

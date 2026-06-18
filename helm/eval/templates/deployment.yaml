@@ -3,11 +3,6 @@
 {{ .Values.aws.accountId }}.dkr.ecr.{{ .Values.aws.region }}.amazonaws.com/{{ .Values.projectName }}/app:{{ .Values.image.backendTag }}
 {{- end -}}
 
-{{- define "eval.frontendImage" -}}
-{{- if not .Values.projectName }}{{ fail "projectName is required" }}{{- end -}}
-{{ .Values.aws.accountId }}.dkr.ecr.{{ .Values.aws.region }}.amazonaws.com/{{ .Values.projectName }}/app:{{ .Values.image.frontendTag }}
-{{- end -}}
-
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -123,82 +118,3 @@ spec:
       volumes:
         - name: ephemeral-data
           emptyDir: {}
----
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: frontend
-  namespace: {{ .Values.namespace }}
-  labels:
-    app: frontend
-spec:
-  replicas: {{ .Values.frontend.replicas }}
-  selector:
-    matchLabels:
-      app: frontend
-  template:
-    metadata:
-      labels:
-        app: frontend
-    spec:
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 1001
-        runAsGroup: 1001
-        fsGroup: 1001
-      containers:
-        - name: frontend
-          image: {{ include "eval.frontendImage" . }}
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: false
-            capabilities:
-              drop:
-                - ALL
-          ports:
-            - containerPort: 3000
-              name: http
-          envFrom:
-            - configMapRef:
-                name: app-config
-            - secretRef:
-                name: oidc-credentials
-          env:
-            - name: NEXT_PUBLIC_API_URL
-              value: ""
-            - name: APP_URL
-              value: "https://$(CLOUDFRONT_DOMAIN)"
-            - name: BACKEND_URL
-              value: "http://backend:8080"
-            - name: OIDC_PROVIDER_NAME
-              value: "SSO"
-            - name: NEXT_PUBLIC_COGNITO_DOMAIN
-              valueFrom:
-                configMapKeyRef:
-                  name: app-config
-                  key: COGNITO_DOMAIN
-            - name: NEXT_PUBLIC_COGNITO_CLIENT_ID
-              valueFrom:
-                configMapKeyRef:
-                  name: app-config
-                  key: COGNITO_CLIENT_ID
-            - name: NEXT_PUBLIC_APP_URL
-              value: "https://$(CLOUDFRONT_DOMAIN)"
-          resources:
-            {{- toYaml .Values.frontend.resources | nindent 12 }}
-          livenessProbe:
-            httpGet:
-              path: /api/health
-              port: 3000
-            initialDelaySeconds: 30
-            periodSeconds: 10
-            timeoutSeconds: 5
-            failureThreshold: 3
-          readinessProbe:
-            httpGet:
-              path: /api/health
-              port: 3000
-            initialDelaySeconds: 5
-            periodSeconds: 5
-            timeoutSeconds: 5

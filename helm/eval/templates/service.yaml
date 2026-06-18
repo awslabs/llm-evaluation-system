@@ -11,17 +11,3 @@ spec:
       targetPort: 8080
       name: http
   type: ClusterIP
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: frontend
-  namespace: {{ .Values.namespace }}
-spec:
-  selector:
-    app: frontend
-  ports:
-    - port: 3000
-      targetPort: 3000
-      name: http
-  type: ClusterIP

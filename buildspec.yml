@@ -18,20 +18,16 @@ phases:
 
   build:
     commands:
-      - echo Building Docker images for ARM64...
-      # Backend (FastAPI + MCP servers + Inspect AI)
+      - echo Building Docker image for ARM64...
+      # Backend (FastAPI + MCP servers + Inspect AI). The frontend is a static
+      # Vite SPA published to S3 (see buildspec-scripts/deploy.sh), not an image.
       - docker build --platform linux/arm64 -f docker/backend.Dockerfile -t $REPOSITORY_URI:backend-$IMAGE_TAG .
-      # Frontend (Next.js)
-      - docker build --platform linux/arm64 -f docker/frontend.Dockerfile -t $REPOSITORY_URI:frontend-$IMAGE_TAG .
 
   post_build:
     commands:
-      - echo Pushing Docker images to ECR...
+      - echo Pushing Docker image to ECR...
       - docker push $REPOSITORY_URI:backend-$IMAGE_TAG
-      - docker push $REPOSITORY_URI:frontend-$IMAGE_TAG
       # Also tag and push as latest for simpler deployments
       - docker tag $REPOSITORY_URI:backend-$IMAGE_TAG $REPOSITORY_URI:backend-latest
-      - docker tag $REPOSITORY_URI:frontend-$IMAGE_TAG $REPOSITORY_URI:frontend-latest
       - docker push $REPOSITORY_URI:backend-latest
-      - docker push $REPOSITORY_URI:frontend-latest
       - echo "Build completed"

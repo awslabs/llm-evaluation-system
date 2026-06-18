@@ -100,7 +100,7 @@ flowchart TB
 
 **Team sharing.** `eval-mcp init <bucket>` writes the bucket to local config; from then on every write fires `replicate_async` into a thread pool, and every list/read calls `auto_pull` (debounced by TTL) so local state mirrors S3. Account-ID suffix is auto-resolved so teammates type the same short name. Bucket region is auto-detected via `head_bucket` even on cross-region 301 redirects.
 
-**Viewer.** `eval-mcp view` boots a FastAPI app that serves the pre-built Next.js export from `eval_mcp/viewer_static/`. The static bundle is package data per `pyproject.toml`, so rebuilding the frontend (`npm run build:viewer`) affects the published wheel.
+**Viewer.** `eval-mcp view` boots a FastAPI app that serves the pre-built Vite/React SPA from `eval_mcp/viewer_static/` (mounts `/assets`, with an `index.html` SPA fallback for client-routed paths). The static bundle is package data per `pyproject.toml`, so rebuilding the frontend (`npm run build:viewer`) affects the published wheel.
 
 **Installers.** `eval_mcp/installers/` has one module per IDE. The dispatcher in `cli.py:install` auto-detects which IDEs are present, asks which to register, and writes the right config in each (JSON merge for Claude Code / Cursor / VS Code / Kiro, TOML round-trip for Codex via `tomlkit` so user comments survive).
 
@@ -110,13 +110,18 @@ flowchart TB
 
 The optional multi-user web app — Cognito-auth'd chat UI for non-technical users. Two Terraform layers with independent state; `deploy.sh` orchestrates both.
 
+![AWS architecture: CloudFront splits to a private S3 SPA origin and an internal ALB → oauth2-proxy → backend pod in EKS, with Cognito, RDS, S3, and Bedrock](image.png)
+
+<sub>Diagram source: [`docs/architecture-diagram.html`](architecture-diagram.html) (official AWS icons; regenerate the PNG with the `aws-architecture` skill).</sub>
+
 ```mermaid
 flowchart TB
     User["User browser"]
-    Edge["AWS edge<br/>(CloudFront + WAF +<br/>oauth2-proxy + Cognito)"]
+    CF["CloudFront + WAF"]
+    SPA[("S3 SPA bucket<br/>static Vite bundle<br/>private, via OAC")]
+    Edge["ALB → oauth2-proxy → Cognito<br/>(gated paths only)"]
 
     subgraph Pods["EKS pods (stateless)"]
-        Frontend["Frontend Pod<br/>(Next.js)"]
         subgraph BackendPod["Backend Pod"]
             BE["backend<br/>(FastAPI)"]
             MCP["eval-mcp sidecar"]
@@ -124,27 +129,34 @@ flowchart TB
         end
     end
 
-    subgraph Durable["Durable state"]
+    subgraph Durable["Durable state (data layer — survives destroy)"]
         RDS[("RDS Postgres<br/>chat history")]
         S3[("S3 buckets<br/>configs, eval logs,<br/>user uploads")]
+        COG["Cognito user pool"]
     end
 
-    User -->|"HTTPS"| Edge
-    Edge --> Frontend
+    User -->|"HTTPS"| CF
+    CF -->|"/, /assets/*, deep links"| SPA
+    CF -->|"/api,/inspect,/oauth2,/health"| Edge
     Edge --> BackendPod
     BE --> RDS
     BE --> S3
     MCP --> S3
+    Edge -.->|"validates"| COG
 ```
 
-The `Edge` box collapses several AWS services (CloudFront, WAF, an internal ALB, oauth2-proxy on EKS, Cognito as the IdP) into one logical boundary — they exist, but they're not architecturally interesting beyond "authenticated HTTPS gateway." Same for the two physical S3 buckets and three Bedrock regions, which collapse into single tiles. The depth lives in the prose below.
+**Frontend serving — static SPA on S3, no frontend pod.** The frontend is a static Vite/React SPA (no Node runtime). CloudFront serves it from a **private S3 bucket via Origin Access Control (OAC)** — the bucket is fully private and readable only by this distribution. CloudFront splits traffic by path: `/`, `/assets/*`, and SPA deep links (`/chat`, `/history`, …) come from S3; the gated paths (`/api/*`, `/inspect/*`, `/oauth2/*`, `/health`) go to the ALB → oauth2-proxy → backend. A small **CloudFront Function** (viewer-request) rewrites extension-less, non-API paths to `/index.html` for client-side routing (it never touches the gated prefixes). The **default behavior is S3** (static is the catch-all), mirroring the local nginx model in `make dev`. There is no frontend pod — only `backend` + `oauth2-proxy` run in the cluster. The public-facing surface is a credential-free bucket, not a process; the credentialed backend is reachable only through oauth2-proxy. SPA deploy is `npm run build` → `aws s3 sync` → CloudFront invalidation (in `buildspec-scripts/deploy.sh`), not a Docker image.
+
+The `Edge` collapses several AWS services (CloudFront, WAF, an internal ALB, oauth2-proxy on EKS, Cognito as the IdP) into one logical boundary — they exist, but they're not architecturally interesting beyond "authenticated HTTPS gateway." Same for the physical S3 buckets and three Bedrock regions, which collapse into single tiles. The depth lives in the prose below.
 
 **Two Terraform layers, independent state.**
 
-- `infra/data/` — VPC (2 AZs, public/private/intra subnets, NAT, S3 VPC endpoint), RDS Postgres (db.t3.micro, 20→100GB, IAM auth), two S3 buckets (documents + data). Survives `./destroy.sh`.
-- `infra/platform/` — EKS 1.34 (2× t4g.medium managed node group), Karpenter for autoscaling, internal ALB, CloudFront + WAF, Cognito (with optional external OIDC IdP), CodeBuild + ECR, ESO + Pod Identity, multi-region Bedrock logging (`us-west-2`, `us-east-1`, `us-east-2`). Destroyed and recreated by deploy/destroy.
+- `infra/data/` — VPC (2 AZs, public/private/intra subnets, NAT, S3 VPC endpoint), RDS Postgres (db.t3.micro, 20→100GB, IAM auth), three S3 buckets (documents + data + the private SPA bucket), and the **Cognito user pool + hosted-UI domain**. Survives `./destroy.sh`. The Cognito *pool* lives here (not platform) because it holds user accounts — irreplaceable state like RDS rows — so a platform teardown preserves users (and the per-user data keyed by Cognito `sub`).
+- `infra/platform/` — EKS 1.34 (2× t4g.medium managed node group), Karpenter for autoscaling, internal ALB, CloudFront + WAF + the SPA OAC/origin/function/bucket-policy, the Cognito **client** + hosted-UI CSS + optional OIDC IdP (per-deployment, references CloudFront), CodeBuild + ECR, ESO + Pod Identity, multi-region Bedrock logging (`us-west-2`, `us-east-1`, `us-east-2`). Destroyed and recreated by deploy/destroy.
 
-Layers connect via `-var=` flags (not `terraform_remote_state`) so platform state never sees data-state secrets. `deploy.sh` reads ~13 data outputs and passes them in explicitly.
+Layers connect via `-var=` flags (not `terraform_remote_state`) so platform state never sees data-state secrets. `deploy.sh` reads the data outputs (VPC/RDS/buckets/Cognito pool) and passes them in explicitly.
+
+> **Applying the Cognito-in-data-layer change to a pre-existing stack** (one whose pool is still in the *platform* state) requires a one-time `terraform state mv` of `aws_cognito_user_pool.main` / `aws_cognito_user_pool_domain.main` from platform → data **before** `deploy.sh`, or terraform will destroy the live pool (wiping users). Fresh deploys are unaffected.
 
 **Why the ALB is internal.** Only CloudFront can reach it, via [VPC Origins](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html) over the AWS private network. The internet never sees the ALB directly — defense in depth on top of WAF.
 
@@ -152,16 +164,16 @@ Layers connect via `-var=` flags (not `terraform_remote_state`) so platform stat
 
 **MCP as a sidecar.** The backend Deployment runs two containers in one Pod: `backend` (FastAPI) and `eval-mcp` (HTTP transport on :8002, declared as a K8s 1.28+ native sidecar via `initContainers` with `restartPolicy: Always`). Backend reaches the MCP at `http://localhost:8002/mcp` (the `EVAL_MCP_URL` env var). They share the `/data` emptyDir, so anything the MCP writes is visible to the backend in the same pod.
 
-**Ingress routes** (per `infra/platform/alb.tf` + Helm values):
+**Routing** — CloudFront splits by path between the S3 origin and the ALB origin (per `infra/platform/cloudfront.tf`); the ALB then routes per `alb.tf` + Helm values:
 
-| Path                  | Service         | Auth                |
-|-----------------------|-----------------|---------------------|
-| `/`, `/_next/*`       | frontend        | public              |
-| `/api/auth/*`         | frontend        | public (NextAuth)   |
-| `/api/*`              | backend         | oauth2-proxy        |
-| `/viewer/*`           | backend         | oauth2-proxy        |
-| `/health`             | backend         | public              |
-| `/oauth2/*`           | oauth2-proxy    | public              |
-| everything else       | frontend        | oauth2-proxy        |
+| Path                       | Origin / Service          | Auth                |
+|----------------------------|---------------------------|---------------------|
+| `/`, `/assets/*`, deep links | S3 (CloudFront OAC)       | public (no data)    |
+| `/api/*`                   | ALB → oauth2-proxy → backend | oauth2-proxy     |
+| `/inspect/*`               | ALB → oauth2-proxy → backend | oauth2-proxy     |
+| `/oauth2/*`                | ALB → oauth2-proxy        | public              |
+| `/health`                  | ALB → backend             | public (inert)      |
+
+CloudFront's **default behavior is the S3 origin**; the gated paths above are explicit higher-priority behaviors → ALB. The only ALB rule pointing directly at the backend target group is `/health` (its handler ignores the identity header), so every authenticated request transits oauth2-proxy — which sets `X-Forwarded-User` from the validated Cognito session and strips any client-supplied copy. oauth2-proxy has a single backend upstream (`http://backend:8080/`).
 
 **Secrets.** Everything sensitive is in Secrets Manager; External Secrets Operator syncs it into K8s Secrets via Pod Identity. Database auth uses RDS IAM tokens — no static passwords anywhere.

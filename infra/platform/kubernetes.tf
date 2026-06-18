@@ -25,15 +25,16 @@ resource "kubernetes_config_map" "app_config" {
     POSTGRES_USER         = "backend" # IAM auth user (not master postgres user)
     POSTGRES_USE_IAM_AUTH = "true"    # Enable IAM token authentication
 
-    # Cognito / OIDC (NextAuth expects OIDC_* naming)
-    COGNITO_USER_POOL_ID = aws_cognito_user_pool.main.id
+    # Cognito / OIDC — pool id/domain come from the data layer (durable
+    # identity store); the client is platform-owned (per-deployment).
+    COGNITO_USER_POOL_ID = var.cognito_user_pool_id
     COGNITO_CLIENT_ID    = aws_cognito_user_pool_client.main.id
-    COGNITO_DOMAIN       = "${aws_cognito_user_pool_domain.main.domain}.auth.${var.region}.amazoncognito.com"
-    OIDC_ISSUER          = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.main.id}"
+    COGNITO_DOMAIN       = "${var.cognito_user_pool_domain}.auth.${var.region}.amazoncognito.com"
+    OIDC_ISSUER          = "https://cognito-idp.${var.region}.amazonaws.com/${var.cognito_user_pool_id}"
     OIDC_CLIENT_ID       = aws_cognito_user_pool_client.main.id
 
     # Storage — S3 is primary store for all persistent data
-    S3_BUCKET     = var.documents_bucket
+    S3_BUCKET   = var.documents_bucket
     DATA_BUCKET = var.data_bucket
 
     # AWS
@@ -325,23 +326,6 @@ resource "kubectl_manifest" "tgb_backend" {
         name: backend
         port: 8080
       targetGroupARN: ${module.alb.target_groups["backend"].arn}
-      targetType: ip
-  YAML
-  depends_on = [kubernetes_namespace.app, helm_release.alb_controller, module.eks]
-}
-
-resource "kubectl_manifest" "tgb_frontend" {
-  yaml_body  = <<-YAML
-    apiVersion: elbv2.k8s.aws/v1beta1
-    kind: TargetGroupBinding
-    metadata:
-      name: frontend-tgb
-      namespace: eval-managed
-    spec:
-      serviceRef:
-        name: frontend
-        port: 3000
-      targetGroupARN: ${module.alb.target_groups["frontend"].arn}
       targetType: ip
   YAML
   depends_on = [kubernetes_namespace.app, helm_release.alb_controller, module.eks]

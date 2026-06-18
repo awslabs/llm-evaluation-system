@@ -287,23 +287,44 @@ def create_viewer_app() -> FastAPI:
             # it as a real 404 instead of silently returning HTML.
             if full_path.startswith("api/"):
                 raise HTTPException(status_code=404, detail="Not found")
-            # Serve a real static file if one exists at the root (e.g.
-            # favicon.ico, vite.svg); otherwise hand back the SPA shell.
-            candidate = STATIC_DIR / full_path
-            if full_path and candidate.is_file() and _is_within(candidate, STATIC_DIR):
-                return FileResponse(candidate)
+            # Resolve the request to a concrete static file ONLY via a strict
+            # allowlist of safe path components, computed before any filesystem
+            # access. Reject anything that could traverse out of STATIC_DIR
+            # (absolute paths, "..", empty/dot segments, NUL). Everything else
+            # falls back to the SPA shell. This keeps the user-controlled value
+            # from ever reaching a filesystem call along an unsafe path.
+            safe = _safe_static_file(full_path, STATIC_DIR)
+            if safe is not None:
+                return FileResponse(safe)
             return FileResponse(index_file)
 
     return app
 
 
-def _is_within(path: Path, base: Path) -> bool:
-    """True if `path` resolves to a location inside `base` (no traversal)."""
-    try:
-        path.resolve().relative_to(base.resolve())
-        return True
-    except ValueError:
-        return False
+def _safe_static_file(full_path: str, base: Path) -> Path | None:
+    """Map a request path to a file inside `base`, or None if unsafe/missing.
+
+    Defense-in-depth against path traversal: validate the raw, user-controlled
+    segments BEFORE building or touching any filesystem path. A segment is only
+    allowed if it is a plain name (no separators handled here — FastAPI splits
+    on "/"), is not empty, "." or "..", and contains no NUL. After joining, the
+    fully-resolved path must still sit inside the resolved base. Returns the
+    file path only when all checks pass and it is a regular file.
+    """
+    if not full_path or "\x00" in full_path:
+        return None
+    parts = full_path.split("/")
+    for seg in parts:
+        if seg in ("", ".", "..") or seg.startswith("/"):
+            return None
+    base_resolved = base.resolve()
+    candidate = base_resolved.joinpath(*parts).resolve()
+    # Final boundary check — candidate must be within base after resolution.
+    if base_resolved != candidate and base_resolved not in candidate.parents:
+        return None
+    if candidate.is_file():
+        return candidate
+    return None
 
 
 def start_viewer(port: int = 4001):

@@ -110,6 +110,10 @@ flowchart TB
 
 The optional multi-user web app — Cognito-auth'd chat UI for non-technical users. Two Terraform layers with independent state; `deploy.sh` orchestrates both.
 
+![AWS architecture: CloudFront splits to a private S3 SPA origin and an internal ALB → oauth2-proxy → backend pod in EKS, with Cognito, RDS, S3, and Bedrock](image.png)
+
+<sub>Diagram source: [`docs/architecture-diagram.html`](architecture-diagram.html) (official AWS icons; regenerate the PNG with the `aws-architecture` skill).</sub>
+
 ```mermaid
 flowchart TB
     User["User browser"]

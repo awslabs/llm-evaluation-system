@@ -9,7 +9,7 @@ Two deployables that share some code:
 - **`eval_mcp/`** — the MCP package published to PyPI as `llm-evaluation-system` (entry point `eval-mcp`). Self-contained, no database, no web app. This is what 99% of users install.
 - **`backend/` + `frontend/`** — the optional EKS web app (FastAPI chat + Vite/React UI + Cognito auth). `./deploy.sh` is its entry point; `make dev` runs it locally via Docker Compose.
 
-`frontend/` is a single Vite + React SPA (client-side routing via react-router). `vite build` produces a static bundle served two ways: bundled into `eval_mcp/viewer_static/` for the MCP's local results viewer (`npm run build:viewer`), and served by FastAPI/nginx single-origin for the EKS web deployment. Changing frontend code therefore affects the PyPI wheel — the viewer static is package data per `pyproject.toml`.
+`frontend/` is a single Vite + React SPA (client-side routing via react-router). `vite build` produces a static bundle served two ways: bundled into `eval_mcp/viewer_static/` for the MCP's local results viewer (`npm run build:viewer`), and served from a **private S3 bucket via CloudFront OAC** for the EKS web deployment (no frontend pod — see [ARCHITECTURE.md](./ARCHITECTURE.md)). Locally, nginx serves the bundle and proxies the gated paths (`/api`, `/inspect`) to the backend, mirroring that CloudFront/S3 split. Changing frontend code therefore affects the PyPI wheel — the viewer static is package data per `pyproject.toml`.
 
 ## Key files
 
@@ -72,7 +72,7 @@ make stop                                 # docker compose down
 make clean                                # also wipe volumes
 ```
 
-`make dev` builds the static SPA into `frontend/dist`, which nginx serves single-origin (no Node frontend container — same shape as the EKS deployment); the backend hot-reloads on Python edits. For frontend edits, rerun `make dev-spa` and refresh. Open http://127.0.0.1:4001. See [local/README.md](local/README.md).
+`make dev` builds the static SPA into `frontend/dist`, which nginx serves directly while proxying the gated paths to the backend (no Node frontend container — nginx stands in for CloudFront+S3 serving static and the ALB/oauth2-proxy gating the API, mirroring the EKS split). The backend hot-reloads on Python edits. For frontend edits, rerun `make dev-spa` and refresh. Open http://127.0.0.1:4001. See [local/README.md](local/README.md).
 
 ### Release
 
@@ -95,10 +95,10 @@ Tool order in a typical session: `list_bedrock_models` → `generate_qa_pairs` �
 ### EKS web app flow (separate from MCP)
 
 `./deploy.sh` runs two Terraform layers with independent state:
-- `infra/data/` — VPC, RDS Postgres, S3 buckets. Persistent across redeploys.
-- `infra/platform/` — EKS, Karpenter, ALB, CloudFront, WAF, Cognito. Recreated by destroy/deploy.
+- `infra/data/` — VPC, RDS Postgres, S3 buckets (incl. the private SPA bucket), and the **Cognito user pool**. Persistent across redeploys (so `destroy.sh` preserves user accounts + data).
+- `infra/platform/` — EKS, Karpenter, ALB, CloudFront, WAF, the Cognito **client** + SPA OAC/origin/function. Recreated by destroy/deploy.
 
-Data-layer outputs flow into platform-layer via `-var=` flags (NOT `terraform_remote_state`, to avoid leaking secrets between states). Helm chart at `helm/eval/` deploys a stateless backend Pod (the backend FastAPI + `eval-mcp` as a K8s 1.28+ native sidecar over an emptyDir `/data`) and a frontend Pod; durable state lives in RDS + S3.
+Data-layer outputs flow into platform-layer via `-var=` flags (NOT `terraform_remote_state`, to avoid leaking secrets between states). Helm chart at `helm/eval/` deploys a single stateless backend Pod (the backend FastAPI + `eval-mcp` as a K8s 1.28+ native sidecar over an emptyDir `/data`) plus oauth2-proxy — **there is no frontend pod**; the SPA is served from S3 via CloudFront OAC. Durable state lives in RDS + S3 + the Cognito pool. SPA publish (`npm run build` → `aws s3 sync` → CloudFront invalidation) happens in `buildspec-scripts/deploy.sh`.
 
 `infra/eval-logs-bucket/` is a third, unrelated Terraform root — it's the optional S3 bucket for MCP team sharing, surfaced through `eval-mcp init`. Has its own provider block and account-ID-suffixed naming.
 

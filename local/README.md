@@ -48,7 +48,10 @@ Open **http://127.0.0.1:4001** when ready (~2 minutes first build, ~30 seconds a
 
 The frontend is a static Vite/React SPA — there is no Node frontend
 container. `make dev` runs `vite build` into `frontend/dist`, which nginx
-serves single-origin (the same shape the EKS deployment targets).
+serves directly while proxying the gated paths to the backend. This mirrors
+the EKS deployment, where CloudFront serves the SPA from a private S3 bucket
+(via OAC) and routes the gated paths (`/api`, `/inspect`, `/oauth2`) to the
+ALB → oauth2-proxy → backend. nginx here plays CloudFront's role.
 
 ## Reloading
 

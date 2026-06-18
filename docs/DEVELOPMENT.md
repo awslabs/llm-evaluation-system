@@ -152,7 +152,7 @@ If you're changing the EKS web app (FastAPI + Vite/React chat):
 AWS_PROFILE=my-profile make dev    # from repo root: builds the SPA, then docker compose
 ```
 
-Opens http://localhost:4001. `make dev` builds the static SPA into `frontend/dist`, which nginx serves single-origin (no Node frontend container — the same shape EKS targets) and proxies `/api` to the backend. The backend hot-reloads on Python edits; for frontend edits rerun `make dev-spa` and refresh. See [`local/README.md`](../local/README.md) for commands (`make logs`, `make restart s=backend`, etc.) and the architecture diagram.
+Opens http://localhost:4001. `make dev` builds the static SPA into `frontend/dist`, which nginx serves directly and proxies the gated paths (`/api`, `/inspect`) to the backend (no Node frontend container — nginx stands in for the EKS edge, where CloudFront serves the SPA from a private S3 bucket and routes the gated paths to the ALB/oauth2-proxy/backend). The backend hot-reloads on Python edits; for frontend edits rerun `make dev-spa` and refresh. See [`local/README.md`](../local/README.md) for commands (`make logs`, `make restart s=backend`, etc.) and the architecture diagram.
 
 ## Architecture
 
@@ -199,14 +199,14 @@ The EKS/web-app content below is the heavyweight deployment path. For the MCP, t
 
 ## How the Terraform layers connect
 
-Infrastructure is split into `infra/data/` (persistent: VPC, RDS, S3 — survives `./destroy.sh`) and `infra/platform/` (compute: EKS, ALB, CloudFront, Cognito — recreated by deploy/destroy). Resource breakdowns are in [ARCHITECTURE.md](../ARCHITECTURE.md#3-eks-deployment).
+Infrastructure is split into `infra/data/` (persistent: VPC, RDS, S3 buckets incl. the private SPA bucket, and the **Cognito user pool** — survives `./destroy.sh`) and `infra/platform/` (compute: EKS, ALB, CloudFront + SPA OAC/origin, the Cognito **client** — recreated by deploy/destroy). The Cognito *pool* is in the data layer so a platform teardown preserves user accounts; the *client* (which references CloudFront) is per-deployment. Resource breakdowns are in [ARCHITECTURE.md](../ARCHITECTURE.md#3-eks-deployment).
 
 `deploy.sh` reads data-layer outputs and passes them to the platform layer as `-var` flags rather than using `terraform_remote_state` (which would expose the entire data-state including secrets):
 
 ```bash
 # deploy.sh internally does:
 VPC_ID=$(cd infra/data && terraform output -raw vpc_id)
-# ... ~13 variables total
+# ... ~19 data-layer outputs total (VPC, RDS, S3 buckets, Cognito pool)
 cd infra/platform && terraform apply -var="vpc_id=$VPC_ID" ...
 ```
 
@@ -230,8 +230,8 @@ helm/eval/
 ├── values.yaml           # Shared defaults (multi-environment)
 ├── values-aws.yaml       # AWS EKS overrides
 └── templates/
-    ├── deployment.yaml   # Backend Pod (backend + eval-mcp sidecar) + Frontend
-    ├── service.yaml      # Backend, Frontend services
+    ├── deployment.yaml   # Backend Pod (backend + eval-mcp sidecar). No frontend pod — SPA is on S3/CloudFront.
+    ├── service.yaml      # Backend service
     ├── pvc.yaml          # Intentionally empty — backend is stateless (data in S3)
     ├── hpa.yaml          # Horizontal Pod Autoscaling
     ├── pdb.yaml          # Pod Disruption Budgets
@@ -268,7 +268,7 @@ Inherits `region` and `project_name`, plus:
 | `oidc_issuer_url` | `""` | OIDC issuer URL |
 | `vpc_id` | (required) | From data layer output |
 | `private_subnets` | (required) | From data layer output |
-| ... | | (13 data-layer variables total, passed by deploy.sh) |
+| ... | | (~19 data-layer outputs total — VPC, RDS, S3 buckets, Cognito pool — passed by deploy.sh) |
 
 ## Manual Deployment Steps
 
@@ -295,7 +295,7 @@ terraform init
 terraform apply \
   -var="vpc_id=$(cd ../data && terraform output -raw vpc_id)" \
   -var="private_subnets=$(cd ../data && terraform output -json private_subnets)" \
-  # ... (see deploy.sh for all 13 variables)
+  # ... (see deploy.sh for all ~19 data-layer outputs)
 ```
 
 ### 2. Configure kubectl
@@ -337,14 +337,18 @@ After code changes:
 
 ```bash
 # Upload and rebuild
-rm -f /tmp/source.zip && zip -r /tmp/source.zip . -x "*.git*" -x "*/node_modules/*" -x "*/.next/*" -x "*.terraform*"
+rm -f /tmp/source.zip && zip -r /tmp/source.zip . -x "*.git*" -x "*/node_modules/*" -x "*.terraform*"
 aws s3 cp /tmp/source.zip s3://$(cd infra/platform && terraform output -raw source_bucket)/source.zip
 aws codebuild start-build --project-name eval-managed-image-build
 
-# After build completes, restart pods to pull new images
+# After build completes, restart the backend to pull the new image
 kubectl rollout restart deployment/backend -n eval-managed
-kubectl rollout restart deployment/frontend -n eval-managed
 ```
+
+In practice just re-run `./deploy.sh` — it rebuilds the backend image, **republishes
+the SPA to S3** (`npm run build` → `aws s3 sync` → CloudFront invalidation), and
+rolls the backend. There is no frontend deployment to restart; frontend changes
+ship via the S3 sync, not a pod.
 
 ## Troubleshooting
 

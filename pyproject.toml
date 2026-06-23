@@ -18,7 +18,13 @@ classifiers = [
 dependencies = [
     # Core MCP + eval engine
     "mcp>=1.0.0",
-    "inspect-ai>=0.3.0",
+    # Floor (no upper cap) is intentional: we import several private inspect-ai
+    # modules (._view.common, .tool._tool_info, .log._samples, .event._model),
+    # so the floor guarantees those paths exist. The deployed image and local
+    # dev both install from uv.lock, so they stay byte-identical regardless of
+    # what a fresh PyPI resolve picks for wheel users. Bump via
+    # `uv lock --upgrade-package inspect-ai`.
+    "inspect-ai>=0.3.241",
     "boto3>=1.35.0",
     "click>=8.1.7",
     "rich>=13.7.0",

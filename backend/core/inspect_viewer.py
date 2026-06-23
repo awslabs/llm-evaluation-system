@@ -67,8 +67,67 @@ def _is_within_user_scope(path: str, user_id: str, log_root: str) -> bool:
     return _is_within_dir(path, f"{root}/{user_id}")
 
 
+def _owner_of(path: str, log_root: str) -> str | None:
+    """Extract the owning user id from a `{log_root}/{owner}/...` path.
+
+    Returns None for the bare root or a path outside the root. Used to decide
+    WHOSE subtree a shared read is targeting before consulting grants. Uses the
+    same scheme-stripping/`..`-collapsing normalization as the boundary check,
+    so it can't be fooled by a crafted prefix or traversal.
+    """
+    norm = _normalize_key(path)
+    root = _normalize_key(log_root).rstrip("/")
+    if not norm or not root:
+        return None
+    if norm == root:
+        return None
+    if not (norm + "/").startswith(root + "/"):
+        return None
+    rest = norm[len(root):].lstrip("/")
+    if not rest:
+        return None
+    return rest.split("/")[0]
+
+
+async def _run_id_of(file: str) -> str | None:
+    """Best-effort read of an eval log's run_id (== its sharing group_id).
+
+    Lets the viewer honor PER-GROUP grants on raw `.eval` paths. On any failure
+    we return None, which means only share-all/team/org grants will match — a
+    safe UNDER-grant, never an over-grant.
+    """
+    try:
+        from inspect_ai.log import read_eval_log_async
+        log = await read_eval_log_async(file, header_only=True)
+        return log.eval.run_id
+    except Exception:
+        return None
+
+
+async def _has_grant(caller_id: str, owner_id: str, group_id: str | None) -> bool:
+    """Consult the sharing resolver for a cross-user read. Lazy imports avoid a
+    circular dependency with backend.api.main (which imports this module) and
+    keep the eval_mcp package free of any DB dependency. Fails closed."""
+    if not caller_id or not owner_id:
+        return False
+    try:
+        from backend.api.main import db
+        if db is None:
+            return False
+        from backend.core import sharing
+        return await sharing.can_read(db, caller_id, owner_id, group_id)
+    except Exception:
+        return False
+
+
 class UserAccessPolicy:
-    """Multi-tenant access policy. Scopes log access to the authenticated user."""
+    """Multi-tenant access policy.
+
+    Reads (can_read/can_list) are scoped to the caller's own subtree OR any
+    owner the caller has a sharing grant from. Mutations (can_delete/can_write)
+    remain STRICTLY self-only — sharing is read-only, so a grantee can never
+    delete or edit the owner's logs via /api/log-delete or /api/log-edit.
+    """
 
     def __init__(self, log_root: str):
         # Normalize once (strip scheme, collapse) so the bare equality check in
@@ -76,26 +135,45 @@ class UserAccessPolicy:
         self._log_root = _normalize_key(log_root).rstrip("/")
 
     async def can_read(self, request: Request, file: str) -> bool:
-        return _is_within_user_scope(file, _get_user_id(request), self._log_root)
+        user_id = _get_user_id(request)
+        # Own subtree → allow (fast path, unchanged from the pre-sharing code).
+        if _is_within_user_scope(file, user_id, self._log_root):
+            return True
+        # Otherwise it must be inside some owner's subtree AND the caller must
+        # hold a grant on it. Resolve the run_id so per-group grants apply;
+        # share-all/team/org grants apply even when the run_id can't be read.
+        owner = _owner_of(file, self._log_root)
+        if not owner:
+            return False
+        run_id = await _run_id_of(file)
+        return await _has_grant(user_id, owner, run_id)
 
     async def can_delete(self, request: Request, file: str) -> bool:
-        return await self.can_read(request, file)
+        # Self-only — NOT delegated to can_read. Sharing is read-only.
+        return _is_within_user_scope(file, _get_user_id(request), self._log_root)
 
     async def can_write(self, request: Request, file: str) -> bool:
-        return await self.can_read(request, file)
+        # Self-only — NOT delegated to can_read. Sharing is read-only.
+        return _is_within_user_scope(file, _get_user_id(request), self._log_root)
 
     async def can_list(self, request: Request, dir: str) -> bool:
         user_id = _get_user_id(request)
         if not user_id:
             return False
-        # Allow the user's own subtree, OR the shared root itself — the root is
-        # the viewer's default listing target, and the mapping policy rewrites
-        # it down to THIS user's logs dir (see map()), so listing the root can
-        # never enumerate another tenant. Any OTHER explicit dir (another
-        # user's subtree, /tmp, …) is denied here.
+        # Own subtree, OR the shared root itself (the default listing target,
+        # which map() rewrites down to THIS user's logs dir so it can't
+        # enumerate another tenant).
         if _is_within_user_scope(dir, user_id, self._log_root):
             return True
-        return _normalize_key(dir) == self._log_root
+        if _normalize_key(dir) == self._log_root:
+            return True
+        # A granted owner's subtree may be listed. Directory listing has no
+        # run_id, so only owner-level grants (share-all / team / org) authorize
+        # it — a per-group-only grant won't open the whole dir.
+        owner = _owner_of(dir, self._log_root)
+        if not owner:
+            return False
+        return await _has_grant(user_id, owner, None)
 
 
 class UserFileMappingPolicy:
@@ -112,10 +190,20 @@ class UserFileMappingPolicy:
         # Already inside this user's subtree → pass through unchanged.
         if _is_within_user_scope(file, user_id, self._log_root):
             return file
+        # A path inside a granted owner's subtree must PASS THROUGH unchanged —
+        # otherwise can_read would authorize the shared read but map would
+        # silently rewrite it to the caller's own (empty) dir, breaking it.
+        # This is gated by the same grant check, so an ungranted foreign path
+        # still falls through to the rewrite below.
+        owner = _owner_of(file, self._log_root)
+        if owner and owner != user_id:
+            run_id = await _run_id_of(file)
+            if await _has_grant(user_id, owner, run_id):
+                return file
         # The shared root (the default listing target) or any other absolute
-        # path under the root that is NOT this user's → force into the user's
-        # own logs dir. A caller-supplied path can never escape the per-user
-        # prefix this way.
+        # path under the root that is NOT this user's and NOT granted → force
+        # into the user's own logs dir. A caller-supplied path can never escape
+        # the per-user prefix this way.
         if _is_within_dir(file, self._log_root):
             return user_logs
         # A relative filename → resolve under the user's logs dir.

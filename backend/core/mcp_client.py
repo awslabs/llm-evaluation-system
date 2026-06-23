@@ -241,18 +241,40 @@ class MultiMCPClient:
         """
         self.user_id = user_id
 
+    async def _shared_scopes(self) -> list:
+        """Evals shared with the current caller, as [{ownerId, groupId}] (a
+        groupId of None means all of that owner's evals). Resolved from grants
+        with the trusted caller identity. Lazy imports keep the eval_mcp
+        package DB-free and avoid a circular import with backend.api.main.
+        Fails closed (returns [])."""
+        try:
+            from backend.api.main import db
+            if db is None or not self.user_id:
+                return []
+            from backend.core import sharing
+            scopes = await sharing.list_shared_scopes(db, self.user_id)
+            return [
+                {"ownerId": s["ownerId"], "groupId": s["groupId"]}
+                for s in scopes
+            ]
+        except Exception as e:
+            self.logger.warning(f"shared-scope resolution failed: {e}")
+            return []
+
+    # Params the backend injects server-side and the model must never set.
+    _INJECTED_PARAMS = ("user_id", "shared_scopes", "owner_id")
+
     def _filter_user_id_from_schema(self, schema: Dict[str, Any]) -> Dict[str, Any]:
-        """Remove user_id from tool schema so agent doesn't see it."""
+        """Remove backend-injected params from a tool schema so the agent never
+        sees (or tries to set) them."""
         import copy
         filtered = copy.deepcopy(schema)
 
-        # Remove from properties
-        if "properties" in filtered and "user_id" in filtered["properties"]:
-            del filtered["properties"]["user_id"]
-
-        # Remove from required list
-        if "required" in filtered and "user_id" in filtered["required"]:
-            filtered["required"] = [r for r in filtered["required"] if r != "user_id"]
+        for param in self._INJECTED_PARAMS:
+            if "properties" in filtered and param in filtered["properties"]:
+                del filtered["properties"][param]
+            if "required" in filtered and param in filtered["required"]:
+                filtered["required"] = [r for r in filtered["required"] if r != param]
 
         return filtered
 
@@ -285,8 +307,10 @@ class MultiMCPClient:
                 for tool in result.tools:
                     input_schema = tool.inputSchema
 
-                    # Hide user_id from tools that auto-inject it
-                    if server_name in ("synthetic-eval", "dataset") and input_schema:
+                    # Hide backend-injected params from the model. (The unified
+                    # server registers as "eval"; the older split names are kept
+                    # for backward compat.)
+                    if server_name in ("eval", "synthetic-eval", "dataset") and input_schema:
                         input_schema = self._filter_user_id_from_schema(input_schema)
 
                     all_tools.append({
@@ -350,6 +374,22 @@ class MultiMCPClient:
         if self.user_id:
             arguments = arguments or {}
             arguments["user_id"] = self.user_id
+
+        # For read tools, also inject the evals SHARED with this caller, so
+        # shared results surface in chat. This is computed server-side from
+        # grants using the trusted caller identity (NEVER from the model), so
+        # the model cannot widen its own access. The eval_mcp tools stay
+        # DB-free — they just receive an authorized list of {ownerId, groupId}.
+        if self.user_id and tool_name in (
+            "list_evaluations", "get_evaluation_details", "generate_report",
+        ):
+            arguments = arguments or {}
+            arguments["shared_scopes"] = await self._shared_scopes()
+
+        # Strip any model-supplied owner_id — cross-user reads are authorized
+        # only via the injected shared_scopes, never a raw owner the model names.
+        if arguments and "owner_id" in arguments:
+            del arguments["owner_id"]
 
         # Log tool call
         self.logger.info(

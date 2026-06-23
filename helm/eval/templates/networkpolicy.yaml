@@ -1,0 +1,51 @@
+{{- if .Values.backend.networkPolicy.enabled }}
+# Backend ingress isolation (MUST-FIX for eval sharing — see
+# docs/EVAL_SHARING_DESIGN.md §7.1).
+#
+# The backend trusts the X-Forwarded-User header for identity. That is only
+# safe if the backend is unreachable EXCEPT through oauth2-proxy, which strips
+# any client-supplied copy of the header. Without this policy, ANY pod in the
+# cluster can `curl http://backend:8080/api/... -H "X-Forwarded-User: victim"`
+# and impersonate any user — the entire sharing authz model is forgeable.
+#
+# This policy denies all ingress to backend pods on :8080 except from:
+#   1. the oauth2-proxy pods (the authenticated edge), and
+#   2. the ALB/VPC CIDRs (for the /health target group, which the ALB hits
+#      directly — that handler is identity-free; see infra/platform/alb.tf).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backend-ingress
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: backend
+spec:
+  podSelector:
+    matchLabels:
+      app: backend
+  policyTypes:
+    - Ingress
+  ingress:
+    # (1) oauth2-proxy — the authenticated path for all /api and /inspect
+    # traffic. Matched by the subchart's standard label in this namespace.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: oauth2-proxy
+      ports:
+        - protocol: TCP
+          port: 8080
+    # (2) ALB direct path for /health (and any in-VPC source). Restricted to
+    # the VPC/node CIDRs so it is not internet-reachable. The /health handler
+    # ignores the identity header, so this is not an impersonation surface.
+    {{- if .Values.backend.networkPolicy.allowedHealthCheckCIDRs }}
+    - from:
+        {{- range .Values.backend.networkPolicy.allowedHealthCheckCIDRs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 8080
+    {{- end }}
+{{- end }}

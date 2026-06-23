@@ -82,14 +82,22 @@ interface SelectedCell {
   model: string;
 }
 
-export default function ComparisonView({ groupId }: { groupId: string }) {
+export default function ComparisonView({
+  groupId,
+  owner,
+}: {
+  groupId: string;
+  owner?: string | null;
+}) {
   const [data, setData] = useState<ComparisonData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedCell, setSelectedCell] = useState<SelectedCell | null>(null);
 
   useEffect(() => {
-    fetch(`/api/compare/detail?group_id=${encodeURIComponent(groupId)}`)
+    const qs = new URLSearchParams({ group_id: groupId });
+    if (owner) qs.set("owner", owner);
+    fetch(`/api/compare/detail?${qs.toString()}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Failed to load: ${res.status}`);
         return res.json();
@@ -102,7 +110,7 @@ export default function ComparisonView({ groupId }: { groupId: string }) {
         setError(err.message);
         setLoading(false);
       });
-  }, [groupId]);
+  }, [groupId, owner]);
 
   if (loading) {
     return (

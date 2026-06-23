@@ -47,6 +47,18 @@ async def handle_generate_report(args: Dict[str, Any]) -> List[TextContent]:
         if not detail:
             await precompute_eval_results(user_id)
             detail = load_eval_detail(user_id, group_id)
+        # Not the caller's own eval — try owners who shared this group. The
+        # report PDF is still written to the CALLER's own dir below (their
+        # artifact); we only read the shared owner's detail data.
+        if not detail:
+            shared_scopes = args.get("shared_scopes") or []
+            for s in shared_scopes:
+                owner = s.get("ownerId")
+                gid = s.get("groupId")
+                if owner and owner != user_id and (gid is None or gid == group_id):
+                    detail = load_eval_detail(owner, group_id)
+                    if detail:
+                        break
         if not detail:
             return [TextContent(type="text", text=json.dumps({
                 "success": False,

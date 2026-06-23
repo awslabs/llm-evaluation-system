@@ -9,11 +9,17 @@ interface EvalGroup {
   sampleCount: number;
   status: string;
   scores: Record<string, Record<string, number>>;
+  // Present on every row from /api/compare/groups. `owner` is the eval's
+  // owner id; `shared` is true when it was shared with the caller (not their
+  // own). The owner hint must travel back on /detail and /report so the
+  // backend resolver can authorize the cross-user read.
+  owner?: string;
+  shared?: boolean;
 }
 
 interface Props {
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, owner?: string) => void;
 }
 
 function relativeTime(iso: string): string {
@@ -168,9 +174,9 @@ export default function RunRail({ selectedId, onSelect }: Props) {
               const uniqueModels = [...new Set(group.models)];
               const title = group.configName || group.task || "Untitled run";
               return (
-                <li key={group.id}>
+                <li key={`${group.owner ?? ""}:${group.id}`}>
                   <button
-                    onClick={() => onSelect(group.id)}
+                    onClick={() => onSelect(group.id, group.owner)}
                     className={`group flex w-full flex-col gap-2 border-b border-rule-soft border-l-2 px-4 py-3.5 text-left transition-colors ${
                       active
                         ? "border-l-ember bg-ink-raised"
@@ -193,6 +199,14 @@ export default function RunRail({ selectedId, onSelect }: Props) {
                       >
                         {title}
                       </span>
+                      {group.shared && (
+                        <span
+                          title={`Shared by ${group.owner}`}
+                          className="shrink-0 rounded-sm border border-rule px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-bone-mute"
+                        >
+                          shared
+                        </span>
+                      )}
                       {typeof best === "number" && (
                         <span
                           className="font-sans text-lg tabular-nums"

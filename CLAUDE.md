@@ -49,6 +49,8 @@ Point Claude Code at your editable install by setting `command` in `~/.claude.js
 
 Pytest is **only useful for narrow deterministic logic** (parsing, validation, regex). End-to-end coverage requires running the MCP from Claude Code — mocks of Bedrock/subprocesses/user-dirs produce false greens. See `docs/DEVELOPMENT.md` section 2.
 
+**Testing the web app for real** — pytest greens don't prove the web app works; exercise it against the live `make dev` stack in layers: (1) `pytest` for pure logic; (2) `curl`/`urllib` against `:4001` for `/api/*` routes (the `verify_*.py` scripts are the template); (3) **chat/agent behavior → POST `/api/chat/message` with `{"stream":false}` and assert on the reply** — this is how you prove the model actually invokes an MCP tool, and it needs Bedrock creds (which `make dev` already exports, so it's never a blocker); (4) **browser UI → the `webapp-testing` skill (Playwright)**. Don't conflate (3) and (4): chat behavior is curl-the-chat-endpoint, the browser skill is for what renders. Full methodology + the two-identity trick in `docs/DEVELOPMENT.md` ("How to *really* test the web app").
+
 ### Frontend / viewer
 
 ```bash

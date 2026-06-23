@@ -1577,6 +1577,14 @@ async def get_current_user(request: Request):
     if not user_id:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
+    # Record the user + their email on login so the share-by-email picker can
+    # resolve email → id. Best-effort: a DB hiccup must not break auth.
+    if db:
+        try:
+            await db.create_user(user_id, user_id, email=email)
+        except Exception as e:
+            logger.warning(f"create_user on auth failed for {user_id}: {e}")
+
     user = {
         "id": user_id,
         "email": email,
@@ -1838,6 +1846,7 @@ async def delete_judge(
 
 from backend.api.compare import router as compare_router
 from backend.api.optimizations import router as optimizations_router
+from backend.api.teams import router as teams_router
 from backend.core.inspect_viewer import create_viewer_app, get_viewer_dist_directory
 from inspect_ai._view.fastapi_server import _InspectStaticFiles
 from inspect_ai._util.file import filesystem
@@ -1846,6 +1855,7 @@ from inspect_ai._view._dist import resolve_dist_directory
 # Mount comparison API before the Inspect viewer (include_router takes priority over mount)
 app.include_router(compare_router, prefix="/api/compare")
 app.include_router(optimizations_router, prefix="/api/optimizations")
+app.include_router(teams_router, prefix="/api/teams")
 
 _log_dir = os.environ.get("INSPECT_LOG_DIR", os.environ.get("USER_STORAGE_BASE", "backend/users"))
 _fs = filesystem(_log_dir)

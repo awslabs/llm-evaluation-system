@@ -153,6 +153,33 @@ AWS_PROFILE=my-profile make dev    # from repo root: builds the SPA, then docker
 
 Opens http://localhost:4001. `make dev` builds the static SPA into `frontend/dist`, which nginx serves directly and proxies the gated paths (`/api`, `/inspect`) to the backend (no Node frontend container — nginx stands in for the EKS edge, where CloudFront serves the SPA from a private S3 bucket and routes the gated paths to the ALB/oauth2-proxy/backend). The backend hot-reloads on Python edits; for frontend edits rerun `make dev-spa` and refresh. See [`local/README.md`](../local/README.md) for commands (`make logs`, `make restart s=backend`, etc.) and the architecture diagram.
 
+## How to *really* test the web app (the layers that count)
+
+Pytest mocks produce false greens for anything touching Bedrock, the MCP subprocess, the agent loop, or per-user storage (same caveat as the MCP — see section 2). For the web app, "tested" means **exercised against the live `make dev` stack**, layered cheapest-first. Use the right layer for the surface you changed:
+
+| Layer | Tool | What it proves | When |
+|---|---|---|---|
+| 1. Pure logic | `pytest tests/` | deny-by-default decisions, path-boundary math, parsing | authz resolvers, validators, regex — anything deterministic |
+| 2. HTTP/API E2E | `curl`/`urllib` against `:4001` (or backend `:8080` direct) | real routes, real DB, real auth-gating | any `/api/*` route; the `verify_*.py` scripts are the model |
+| 3. **Agent/chat E2E** | `curl` the **`/api/chat/message`** endpoint (`{"stream":false}`) | the **model actually invokes the MCP tool** and the result flows back | anything the chat agent drives — MCP tools, tool-arg injection, shared-eval surfacing |
+| 4. Browser UI | **`webapp-testing` skill (Playwright)** | components render, forms submit, modals/nav work | any change the SPA renders — pages, modals, badges, columns |
+
+**Key distinction (don't conflate layers 3 and 4):**
+- **Chat behavior is layer 3, not Playwright.** To prove the agent really lists/reads what it should, POST to `/api/chat/message` with `{"stream": false}` and assert on the model's reply. Example — proving an eval surfaces in chat only when it should:
+  ```bash
+  # turn 1 (no grant): the agent must NOT see it
+  curl -s -X POST http://localhost:4001/api/chat/message -H 'Content-Type: application/json' \
+    -d '{"message":"List my evaluations. Is run id FOO123 present? yes/no.","stream":false}' \
+    | python3 -c 'import sys,json;print(json.load(sys.stdin)["response"])'
+  # ...create the grant, then re-ask in a fresh turn → the agent now names it.
+  ```
+  This needs Bedrock creds (the agent calls Bedrock) — `make dev` already exports them from your AWS profile, so it Just Works; it is **not** a blocker.
+- **Two identities locally:** the nginx stub pins every `:4001` request to `local-user`. To act as a second user, hit the backend container directly with your own header — `docker compose -f local/compose.yaml exec -T backend curl ... -H 'X-Forwarded-User: other-user' http://localhost:8080/...` — or plant the other user's data/grants under `/data/users/<id>/` and via `psql`. See [`verify_grant_isolation.py`](../verify_grant_isolation.py) and [`verify_tenant_isolation.py`](../verify_tenant_isolation.py) for the full pattern (plant → assert deny → grant → assert allow → revoke → assert deny).
+- **Browser UI is layer 4 — the `webapp-testing` skill.** It spins up Playwright headless and clicks through real pages (`:4001`). Use it for what the user *sees*; use layer 3 for what the agent *does*.
+- **Clean up after E2E:** these layers write real rows/files. Remove planted `/data/users/<id>/` dirs and `psql DELETE` test grants/teams/users in a `finally`, and verify zero leftovers (the `verify_*.py` scripts do this).
+
+**Deployed verification (real AWS):** after `./deploy.sh`, the same layers apply, plus in-pod checks via `kubectl exec -n eval-managed <backend-pod> -c backend -- python3 -c '...'` against production RDS (read/describe first; clean up any test rows). CI runs none of this — these are manual, run them before shipping anything non-trivial.
+
 ## Architecture
 
 System architecture, request flow, and security boundaries are in

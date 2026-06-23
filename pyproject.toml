@@ -25,6 +25,13 @@ dependencies = [
     # what a fresh PyPI resolve picks for wheel users. Bump via
     # `uv lock --upgrade-package inspect-ai`.
     "inspect-ai>=0.3.241",
+    # Premade benchmark suite (MMLU, GPQA, GSM8K, HumanEval, …) from UK AISI,
+    # MIT-licensed. Core — benchmark-running is a first-class feature, and the
+    # package also serves as the reference library for authoring new evals
+    # inspired by them. Pulls the HuggingFace `datasets` stack (pyarrow/pandas),
+    # so the wheel is heavier; that's an accepted cost. Individual agentic
+    # benchmarks (SWE-bench, Cybench) still need their own extras + a sandbox.
+    "inspect_evals>=0.14.1",
     "boto3>=1.35.0",
     "click>=8.1.7",
     "rich>=13.7.0",

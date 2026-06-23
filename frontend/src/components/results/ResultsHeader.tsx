@@ -167,7 +167,12 @@ export default function ResultsHeader({ groupId, owner }: ResultsHeaderProps) {
         </div>
       </div>
       {shareOpen && groupId && (
-        <ShareModal groupId={groupId} onClose={() => setShareOpen(false)} />
+        <ShareModal
+          resourceId={groupId}
+          apiBase="/api/compare"
+          label="evaluation"
+          onClose={() => setShareOpen(false)}
+        />
       )}
     </header>
   );

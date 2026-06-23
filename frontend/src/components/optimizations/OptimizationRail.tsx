@@ -10,11 +10,13 @@ interface OptimizationRow {
   iterations_run: number;
   status: string;
   created_at: number;
+  owner?: string;
+  shared?: boolean;
 }
 
 interface Props {
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, owner?: string) => void;
 }
 
 function relativeTime(ms: number): string {
@@ -144,9 +146,9 @@ export default function OptimizationRail({ selectedId, onSelect }: Props) {
               const num = (filtered.length - idx).toString().padStart(3, "0");
               const score = r.winner_test_score;
               return (
-                <li key={r.id}>
+                <li key={`${r.owner ?? ""}:${r.id}`}>
                   <button
-                    onClick={() => onSelect(r.id)}
+                    onClick={() => onSelect(r.id, r.owner)}
                     className={`group flex w-full flex-col gap-2 border-b border-rule-soft border-l-2 px-4 py-3.5 text-left transition-colors ${
                       active
                         ? "border-l-ember bg-ink-raised"
@@ -169,6 +171,14 @@ export default function OptimizationRail({ selectedId, onSelect }: Props) {
                       >
                         {r.dataset || "Untitled"}
                       </span>
+                      {r.shared && (
+                        <span
+                          title={`Shared by ${r.owner}`}
+                          className="shrink-0 rounded-sm border border-rule px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-bone-mute"
+                        >
+                          shared
+                        </span>
+                      )}
                       {typeof score === "number" && (
                         <span
                           className="font-sans text-lg tabular-nums"

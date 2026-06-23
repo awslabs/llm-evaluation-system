@@ -43,24 +43,30 @@ async def resolve_principals(db, caller_id: str) -> List[Principal]:
 
 
 def _grant_covers(grant: Dict[str, Any], owner_id: str,
-                  group_id: Optional[str]) -> bool:
-    """True iff a grant row authorizes reading (owner_id, group_id).
+                  group_id: Optional[str], resource_type: str) -> bool:
+    """True iff a grant row authorizes reading (resource_type, owner_id,
+    group_id).
 
-    A grant with groupId=None is a share-all over that owner's evals. A grant
-    with a groupId matches only that specific group. Both require the owner to
-    match — group_id is not globally unique, so owner scopes it.
+    A grant with groupId=None is a share-all over that owner's resources of
+    that type. A grant with a groupId matches only that specific resource.
+    Both require owner AND resource_type to match — group_id is not globally
+    unique, so owner+type scope it. Grant rows predating multi-resource
+    sharing have no resourceType key → treated as 'eval'.
     """
     if grant["ownerId"] != owner_id:
+        return False
+    if grant.get("resourceType", "eval") != resource_type:
         return False
     g = grant["groupId"]
     return g is None or g == group_id
 
 
 async def can_read(db, caller_id: str, owner_id: str,
-                   group_id: Optional[str] = None) -> bool:
-    """Deny-by-default read check for (owner_id, group_id) by caller_id.
+                   group_id: Optional[str] = None,
+                   resource_type: str = "eval") -> bool:
+    """Deny-by-default read check for (resource_type, owner_id, group_id).
 
-    Returns True only if the caller owns the eval, or a grant explicitly
+    Returns True only if the caller owns the resource, or a grant explicitly
     authorizes one of the caller's principals to read it. Everything else
     (including any error path) returns False.
     """
@@ -78,45 +84,52 @@ async def can_read(db, caller_id: str, owner_id: str,
     except Exception as e:
         logger.warning(
             f"[ACCESS] grant lookup failed for {caller_id} -> "
-            f"{owner_id}/{group_id}: {e}"
+            f"{resource_type}:{owner_id}/{group_id}: {e}"
         )
         return False
 
     for grant in grants:
-        if _grant_covers(grant, owner_id, group_id):
+        if _grant_covers(grant, owner_id, group_id, resource_type):
             return True
 
     return False
 
 
-def assert_path_within_owner(read_path: str, owner_id: str) -> bool:
-    """Re-validate that a concrete read path stays within the resolved
-    owner's log subtree, using the PR #106 boundary primitive.
+def assert_path_within_owner(read_path: str, owner_id: str,
+                             root_fn=None) -> bool:
+    """Re-validate that a concrete read path stays within the resolved owner's
+    subtree, using the PR #106 boundary primitive.
 
     Call this AFTER can_read() returns True, on any code path that touches a
-    raw filesystem/S3 path (e.g. /api/compare/sample). It guarantees a grant
-    can't be turned into a traversal out of the grantor's own dir. Returns
-    False on any escape — callers turn that into a 403.
+    raw filesystem/S3 path (e.g. /api/compare/sample, document content). It
+    guarantees a grant can't be turned into a traversal out of the grantor's
+    own dir. `root_fn(owner_id) -> str` returns the owner's resource root;
+    defaults to the eval log dir. Returns False on any escape — 403.
     """
     # Imported lazily so the pure authz logic (can_read) stays free of the
     # inspect_ai / filesystem dependency chain and is unit-testable stack-free.
     from backend.core.inspect_viewer import _is_within_dir
     from eval_mcp.core.user_storage import get_user_log_dir
 
+    fn = root_fn or get_user_log_dir
     try:
-        owner_root = get_user_log_dir(owner_id)
-    except ValueError:
+        owner_root = fn(owner_id)
+    except (ValueError, Exception):
         return False
     return _is_within_dir(read_path, owner_root)
 
 
-async def list_shared_scopes(db, caller_id: str) -> List[Dict[str, Any]]:
-    """Return the (ownerId, groupId, role) scopes shared with the caller —
-    excluding the caller's own evals. Used by /api/compare/groups to merge a
-    'Shared with me' section. groupId=None means all of that owner's evals.
+async def list_shared_scopes(db, caller_id: str,
+                             resource_type: Optional[str] = None
+                             ) -> List[Dict[str, Any]]:
+    """Return the {ownerId, groupId, resourceType, role} scopes shared with the
+    caller — excluding the caller's own resources. Used by list endpoints to
+    merge a 'shared with me' section. groupId=None = all of that owner's
+    resources of that type. Pass resource_type to filter to one kind.
     """
     principals = await resolve_principals(db, caller_id)
     grants = await db.list_grants_for_principals(principals)
-    # Drop self-grants (a user sharing with themselves) — own evals are
-    # already listed via the normal path.
-    return [g for g in grants if g["ownerId"] != caller_id]
+    out = [g for g in grants if g["ownerId"] != caller_id]
+    if resource_type is not None:
+        out = [g for g in out if g.get("resourceType", "eval") == resource_type]
+    return out

@@ -10,6 +10,9 @@ export interface DatasetSummary {
   source: DatasetSource;
   created_at: number;
   updated_at?: number;
+  // Set when this row was shared with the caller by another user.
+  owner?: string;
+  shared?: boolean;
 }
 
 export interface DatasetTest {
@@ -33,6 +36,8 @@ export interface DocumentEntry {
   path: string;
   size?: number;
   modified?: number;
+  owner?: string;
+  shared?: boolean;
 }
 
 export interface JudgeSummary {
@@ -41,6 +46,8 @@ export interface JudgeSummary {
   domain: string;
   criteria: string[];
   created_at: number;
+  owner?: string;
+  shared?: boolean;
 }
 
 export interface JudgeDetail {

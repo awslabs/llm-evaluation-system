@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 from mcp.types import TextContent
 
-from eval_mcp.core.user_storage import list_judges_from_db
+from eval_mcp.core.user_storage import list_judges_from_db, merge_shared_rows
 
 
 def _judge_summary(judge: Dict[str, Any]) -> Dict[str, Any]:
@@ -46,6 +46,10 @@ async def handle_list_judges(args: Dict[str, Any]) -> List[TextContent]:
             ]
 
         all_judges = list_judges_from_db(user_id, search_term)
+        all_judges.extend(merge_shared_rows(
+            user_id, args.get("shared_scopes"),
+            lambda owner: list_judges_from_db(owner, search_term),
+        ))
         total = len(all_judges)
         page = all_judges[offset : offset + limit]
         has_more = offset + len(page) < total

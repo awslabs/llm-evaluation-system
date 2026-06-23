@@ -27,9 +27,11 @@ export async function getDataset(
   id: string,
   offset = 0,
   limit = 50,
+  owner?: string | null,
 ): Promise<DatasetDetail> {
+  const ownerQs = owner ? `&owner=${encodeURIComponent(owner)}` : "";
   return jsonOrThrow<DatasetDetail>(
-    await fetch(`/api/datasets/${encodeURIComponent(id)}?offset=${offset}&limit=${limit}`),
+    await fetch(`/api/datasets/${encodeURIComponent(id)}?offset=${offset}&limit=${limit}${ownerQs}`),
   );
 }
 
@@ -71,9 +73,10 @@ export async function listJudges(search = ""): Promise<JudgeSummary[]> {
   return data.judges ?? [];
 }
 
-export async function getJudge(id: string): Promise<JudgeDetail> {
+export async function getJudge(id: string, owner?: string | null): Promise<JudgeDetail> {
+  const ownerQs = owner ? `?owner=${encodeURIComponent(owner)}` : "";
   return jsonOrThrow<JudgeDetail>(
-    await fetch(`/api/judges/${encodeURIComponent(id)}`),
+    await fetch(`/api/judges/${encodeURIComponent(id)}${ownerQs}`),
   );
 }
 

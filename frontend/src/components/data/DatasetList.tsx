@@ -4,7 +4,7 @@ import { formatTimestamp, sourceGlyph } from "@/lib/data-types";
 interface Props {
   datasets: DatasetSummary[];
   selectedId: string | null;
-  onSelect: (id: string) => void;
+  onSelect: (id: string, owner?: string) => void;
   loading: boolean;
   search: string;
   onSearch: (q: string) => void;
@@ -59,7 +59,7 @@ export default function DatasetList({
               return (
                 <li key={ds.id}>
                   <button
-                    onClick={() => onSelect(ds.id)}
+                    onClick={() => onSelect(ds.id, ds.owner)}
                     className={`group flex w-full items-baseline gap-3 border-b border-rule-soft border-l-2 px-4 py-3 text-left transition-colors ${
                       active
                         ? "border-l-ember bg-ink-raised"
@@ -91,6 +91,14 @@ export default function DatasetList({
                         >
                           {ds.name || "Untitled dataset"}
                         </span>
+                        {ds.shared && (
+                          <span
+                            title={`Shared by ${ds.owner}`}
+                            className="shrink-0 rounded-sm border border-rule px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-bone-mute"
+                          >
+                            shared
+                          </span>
+                        )}
                       </div>
                       <div className="mt-1.5 flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
                         <span className="tabular-nums">

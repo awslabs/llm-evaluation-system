@@ -43,14 +43,22 @@ class FakeDB:
             raise RuntimeError("grant store down")
         pset = set(principals)
         return [
-            {"ownerId": g["ownerId"], "groupId": g["groupId"], "role": g["role"]}
+            {
+                "ownerId": g["ownerId"],
+                "groupId": g["groupId"],
+                "resourceType": g.get("resourceType", "eval"),
+                "role": g["role"],
+            }
             for g in self._grants
             if g["_principal"] in pset
         ]
 
 
-def _grant(owner, group, principal, role="viewer"):
-    return {"ownerId": owner, "groupId": group, "role": role, "_principal": principal}
+def _grant(owner, group, principal, role="viewer", resource_type="eval"):
+    return {
+        "ownerId": owner, "groupId": group, "role": role,
+        "resourceType": resource_type, "_principal": principal,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -214,3 +222,50 @@ def test_assert_path_within_owner_denies_invalid_owner(monkeypatch):
 
     monkeypatch.setattr(us, "get_user_log_dir", _raise)
     assert assert_path_within_owner("/data/users/x/logs/a.eval", "../etc") is False
+
+
+# --------------------------------------------------------------------------
+# Multi-resource: resource_type scopes the grant — a grant on one type must
+# NOT authorize a read of another type, even with the same owner + id.
+# --------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_dataset_grant_does_not_authorize_eval_read():
+    # Same id string "x1" granted as a DATASET — must not unlock an EVAL read.
+    db = FakeDB(grants=[_grant("alice", "x1", ("user", "bob"), resource_type="dataset")])
+    assert await can_read(db, "bob", "alice", "x1", resource_type="dataset") is True
+    assert await can_read(db, "bob", "alice", "x1", resource_type="eval") is False
+
+
+@pytest.mark.asyncio
+async def test_judge_share_all_scoped_to_judges():
+    db = FakeDB(grants=[_grant("alice", None, ("user", "bob"), resource_type="judge")])
+    assert await can_read(db, "bob", "alice", "j1", resource_type="judge") is True
+    # share-all judges must not leak datasets/evals/optimizations.
+    assert await can_read(db, "bob", "alice", "j1", resource_type="dataset") is False
+    assert await can_read(db, "bob", "alice", "anything", resource_type="eval") is False
+
+
+@pytest.mark.asyncio
+async def test_legacy_eval_grant_has_no_resource_type_key():
+    # Grants written before multi-resource sharing carry no resourceType; the
+    # resolver must treat them as 'eval' (backward compat).
+    legacy = {"ownerId": "alice", "groupId": "g1", "role": "viewer",
+              "_principal": ("user", "bob")}  # no resourceType key
+    db = FakeDB(grants=[legacy])
+    assert await can_read(db, "bob", "alice", "g1", resource_type="eval") is True
+    assert await can_read(db, "bob", "alice", "g1", resource_type="dataset") is False
+
+
+@pytest.mark.asyncio
+async def test_list_shared_scopes_filters_by_resource_type():
+    db = FakeDB(grants=[
+        _grant("alice", "d1", ("user", "bob"), resource_type="dataset"),
+        _grant("alice", "g1", ("user", "bob"), resource_type="eval"),
+    ])
+    ds = await list_shared_scopes(db, "bob", "dataset")
+    assert {s["groupId"] for s in ds} == {"d1"}
+    ev = await list_shared_scopes(db, "bob", "eval")
+    assert {s["groupId"] for s in ev} == {"g1"}
+    allk = await list_shared_scopes(db, "bob")
+    assert len(allk) == 2

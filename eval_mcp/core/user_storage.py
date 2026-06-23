@@ -568,6 +568,40 @@ def get_dataset_by_name(user_id: str, name: str) -> Optional[dict[str, Any]]:
     return None
 
 
+def merge_shared_rows(user_id, shared_scopes, lister) -> list[dict[str, Any]]:
+    """Return rows shared WITH user_id (excluding their own), each tagged with
+    owner + shared=True. `shared_scopes` is the backend-injected list of
+    {ownerId, groupId} (groupId None = all of that owner's items). `lister(owner)`
+    returns that owner's rows (each having an 'id'). Used by the MCP list
+    handlers so shared resources surface in chat. Best-effort per owner."""
+    out: list[dict[str, Any]] = []
+    if not shared_scopes:
+        return out
+    owners: dict[str, set] = {}
+    share_all: set = set()
+    for s in shared_scopes:
+        owner = s.get("ownerId")
+        if not owner or owner == user_id:
+            continue
+        if s.get("groupId") is None:
+            share_all.add(owner)
+        owners.setdefault(owner, set()).add(s.get("groupId"))
+    for owner in set(list(owners) + list(share_all)):
+        try:
+            rows = lister(owner)
+        except Exception:
+            continue
+        allow_all = owner in share_all
+        allowed_ids = owners.get(owner, set())
+        for row in rows:
+            if allow_all or row.get("id") in allowed_ids:
+                tagged = dict(row)
+                tagged["owner"] = owner
+                tagged["shared"] = True
+                out.append(tagged)
+    return out
+
+
 def list_datasets_from_db(user_id: str, search_term: str = "") -> list[dict[str, Any]]:
     if _s3_enabled():
         entries = _s3_list_json(user_id, "datasets")

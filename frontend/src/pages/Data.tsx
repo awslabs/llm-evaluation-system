@@ -16,6 +16,7 @@ export default function DataPage() {
   const [datasetsLoading, setDatasetsLoading] = useState(true);
   const [search, setSearch] = useState("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedOwner, setSelectedOwner] = useState<string | null>(null);
   const [counts, setCounts] = useState<Partial<Record<DataTab, number>>>({});
 
   useEffect(() => {
@@ -77,7 +78,10 @@ export default function DataPage() {
             <DatasetList
               datasets={datasets}
               selectedId={selectedId}
-              onSelect={setSelectedId}
+              onSelect={(id, owner) => {
+                setSelectedId(id);
+                setSelectedOwner(owner ?? null);
+              }}
               loading={datasetsLoading}
               search={search}
               onSearch={setSearch}
@@ -86,6 +90,7 @@ export default function DataPage() {
               {selectedId ? (
                 <DatasetDetailView
                   datasetId={selectedId}
+                  owner={selectedOwner}
                   onRenamed={(id, name) => {
                     setDatasets((cur) =>
                       cur.map((d) => (d.id === id ? { ...d, name } : d)),

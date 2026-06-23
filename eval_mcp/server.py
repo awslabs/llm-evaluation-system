@@ -903,6 +903,7 @@ async def list_evaluations(
     limit: LimitParam = 20,
     offset: OffsetParam = 0,
     response_format: ResponseFormat = "json",
+    shared_scopes: list = None,
 ) -> str:
     """
     List completed evaluations.
@@ -927,6 +928,7 @@ async def list_evaluations(
         "limit": limit,
         "offset": offset,
         "response_format": response_format,
+        "shared_scopes": shared_scopes or [],
     }
     result = await handle_list_evaluations(args)
     return result[0].text
@@ -936,6 +938,7 @@ async def list_evaluations(
 async def get_evaluation_details(
     evalId: EvalId,
     user_id: str = None,
+    shared_scopes: list = None,
 ) -> str:
     """
     Get detailed results for a specific evaluation.
@@ -949,7 +952,11 @@ async def get_evaluation_details(
         JSON with detailed evaluation results
     """
     _auto_pull(user_id)
-    args = {"evalId": evalId, "user_id": _user(user_id)}
+    args = {
+        "evalId": evalId,
+        "user_id": _user(user_id),
+        "shared_scopes": shared_scopes or [],
+    }
     result = await handle_get_evaluation_details(args)
     return result[0].text
 
@@ -1454,6 +1461,7 @@ async def generate_report(
     context: str = None,
     monthly_volume: MonthlyVolume = 10000,
     user_id: str = None,
+    shared_scopes: list = None,
 ) -> str:
     """
     Generate a PDF report for a completed evaluation.
@@ -1480,6 +1488,7 @@ async def generate_report(
         "group_id": group_id,
         "context": context,
         "monthly_volume": monthly_volume,
+        "shared_scopes": shared_scopes or [],
     }
     result = await handle_generate_report(args)
     return result[0].text

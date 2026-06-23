@@ -6,6 +6,7 @@ Supports two authentication modes controlled by POSTGRES_USE_IAM_AUTH:
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import re
@@ -212,6 +213,15 @@ class Database:
                     created_at TIMESTAMP NOT NULL DEFAULT NOW()
                 )
             """)
+            # email is added idempotently (older deployments predate it). It
+            # backs user discovery for the share-by-email picker — grants are
+            # still keyed on the id (X-Forwarded-User), email is only a lookup.
+            await conn.execute(
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email)"
+            )
 
             # Chat sessions table
             await conn.execute("""
@@ -263,8 +273,76 @@ class Database:
                 )
             """)
 
-    async def create_user(self, user_id: str, username: str) -> None:
-        """Create a new user.
+            # Teams — a team is just another principal that grants can
+            # target. Membership lives in team_members. See
+            # docs/EVAL_SHARING_DESIGN.md.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS teams (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    created_by TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    FOREIGN KEY (created_by) REFERENCES users (id)
+                )
+            """)
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS team_members (
+                    team_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'member'
+                        CHECK (role IN ('admin', 'member')),
+                    added_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    PRIMARY KEY (team_id, user_id),
+                    FOREIGN KEY (team_id) REFERENCES teams (id),
+                    FOREIGN KEY (user_id) REFERENCES users (id)
+                )
+            """)
+
+            # Eval sharing grants. One row expresses every sharing case:
+            # share-one (group_id set) or share-all (group_id NULL), to a
+            # user/team/org principal. Authorization is resolved against
+            # (owner_id, group_id) — group_id alone is NOT globally unique
+            # (it's Inspect's run_id), so owner_id supplies the scope. We do
+            # NOT FK principal_id/group_id: a grantee may not have logged in
+            # yet (users are created lazily) and group_id is not a DB row.
+            # principal_type/role are CHECK-constrained so an unknown value
+            # can't silently fail open. Deny-by-default makes a dangling
+            # principal harmless. See docs/EVAL_SHARING_DESIGN.md.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS eval_grants (
+                    id TEXT PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    group_id TEXT,
+                    principal_type TEXT NOT NULL
+                        CHECK (principal_type IN ('user', 'team', 'org')),
+                    principal_id TEXT,
+                    role TEXT NOT NULL DEFAULT 'viewer'
+                        CHECK (role IN ('viewer', 'editor', 'owner')),
+                    granted_by TEXT NOT NULL,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    FOREIGN KEY (owner_id) REFERENCES users (id),
+                    FOREIGN KEY (granted_by) REFERENCES users (id),
+                    UNIQUE (owner_id, group_id, principal_type, principal_id)
+                )
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_grants_principal
+                ON eval_grants(principal_type, principal_id)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_grants_owner
+                ON eval_grants(owner_id)
+            """)
+            await conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_team_members_user
+                ON team_members(user_id)
+            """)
+
+    async def create_user(
+        self, user_id: str, username: str, email: Optional[str] = None
+    ) -> None:
+        """Create a user (idempotent). If `email` is provided, it is recorded /
+        refreshed so the share-by-email picker can resolve it to this id.
 
         Raises:
             DatabaseError: If the user cannot be created.
@@ -272,12 +350,37 @@ class Database:
         await self._ensure_pool_fresh()
         try:
             async with self._pool.acquire() as conn:
+                # COALESCE keeps an existing email if this call passes none,
+                # and updates it when a fresh one arrives on a later login.
                 await conn.execute(
-                    "INSERT INTO users (id, username, created_at) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING",
-                    user_id, username, datetime.now(),
+                    """
+                    INSERT INTO users (id, username, email, created_at)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (id) DO UPDATE
+                      SET email = COALESCE(EXCLUDED.email, users.email)
+                    """,
+                    user_id, username, email, datetime.now(),
                 )
         except asyncpg.PostgresError as e:
             raise DatabaseError(f"Failed to create user {user_id}: {e}") from e
+
+    async def search_users(self, query: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Find users by id or email substring (case-insensitive), for the
+        share recipient picker. Returns [{id, email}]. Empty query → []."""
+        q = (query or "").strip()
+        if not q:
+            return []
+        await self._ensure_pool_fresh()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, email FROM users
+                WHERE id ILIKE '%' || $1 || '%' OR email ILIKE '%' || $1 || '%'
+                ORDER BY id LIMIT $2
+                """,
+                q, limit,
+            )
+            return [{"id": r["id"], "email": r["email"]} for r in rows]
 
     async def create_session(self, session_id: str, user_id: str, title: str = "New Chat") -> None:
         """Create a new chat session.
@@ -429,6 +532,301 @@ class Database:
             # next poll catches it.
             logger.warning(f"Failed to check cancellation for {session_id}: {e}")
             return None
+
+    # ------------------------------------------------------------------
+    # Eval sharing: grants + teams. See docs/EVAL_SHARING_DESIGN.md.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _grant_id(owner_id: str, group_id: Optional[str],
+                  principal_type: str, principal_id: Optional[str]) -> str:
+        """Deterministic id for a grant tuple.
+
+        Used as the PRIMARY KEY so ON CONFLICT dedupes idempotently. The
+        composite UNIQUE constraint alone can't, because Postgres treats
+        NULLs (share-all group_id, org principal_id) as distinct — so two
+        identical share-all grants would otherwise both insert. Hashing the
+        normalized tuple gives a stable id that collides on a true duplicate.
+        """
+        key = "\x1f".join([
+            owner_id,
+            group_id or "",
+            principal_type,
+            principal_id or "",
+        ])
+        return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+
+    async def add_grant(
+        self,
+        owner_id: str,
+        group_id: Optional[str],
+        principal_type: str,
+        principal_id: Optional[str],
+        granted_by: str,
+        role: str = "viewer",
+    ) -> str:
+        """Create a sharing grant. Returns the grant id.
+
+        group_id=None means "all of owner's evals" (including future ones).
+        principal_type='org' means everyone; principal_id is then ignored.
+        Idempotent via the deterministic id.
+
+        Raises:
+            DatabaseError: If the grant cannot be created.
+        """
+        grant_id = self._grant_id(owner_id, group_id, principal_type, principal_id)
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO eval_grants
+                        (id, owner_id, group_id, principal_type, principal_id,
+                         role, granted_by, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    grant_id, owner_id, group_id, principal_type,
+                    principal_id, role, granted_by,
+                )
+        except asyncpg.PostgresError as e:
+            raise DatabaseError(f"Failed to add grant {grant_id}: {e}") from e
+        logger.info(
+            f"[GRANT] {granted_by} granted {principal_type}:{principal_id} "
+            f"{role} on owner={owner_id} group={group_id or '*'}"
+        )
+        return grant_id
+
+    async def remove_grant(self, grant_id: str, owner_id: str) -> bool:
+        """Revoke a grant. owner_id is required so a caller can only delete
+        grants on their OWN evals (defense in depth — the route also checks).
+        Returns True if a row was deleted.
+
+        Raises:
+            DatabaseError: If the delete fails.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                result = await conn.execute(
+                    "DELETE FROM eval_grants WHERE id = $1 AND owner_id = $2",
+                    grant_id, owner_id,
+                )
+        except asyncpg.PostgresError as e:
+            raise DatabaseError(f"Failed to remove grant {grant_id}: {e}") from e
+        deleted = result.endswith(" 1")
+        if deleted:
+            logger.info(f"[GRANT] {owner_id} revoked grant {grant_id}")
+        return deleted
+
+    async def list_grants_by_owner(self, owner_id: str) -> List[Dict[str, Any]]:
+        """List grants the owner has created (for the 'who can see my evals' UI)."""
+        await self._ensure_pool_fresh()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT id, group_id, principal_type, principal_id, role, created_at
+                FROM eval_grants WHERE owner_id = $1 ORDER BY created_at DESC
+                """,
+                owner_id,
+            )
+            return [
+                {
+                    "id": row["id"],
+                    "groupId": row["group_id"],
+                    "principalType": row["principal_type"],
+                    "principalId": row["principal_id"],
+                    "role": row["role"],
+                    "createdAt": row["created_at"].isoformat(),
+                }
+                for row in rows
+            ]
+
+    async def list_grants_for_principals(
+        self, principals: List[tuple]
+    ) -> List[Dict[str, Any]]:
+        """Return all grants visible to a caller given their resolved
+        principals — a list of (principal_type, principal_id) tuples, e.g.
+        [('user', caller), ('team', t1), ('org', None)].
+
+        This is the read side of the resolver: it yields the (owner_id,
+        group_id) scopes the caller may read. group_id NULL = all of that
+        owner's evals.
+        """
+        if not principals:
+            return []
+        await self._ensure_pool_fresh()
+        # Build an OR of (principal_type, principal_id) pairs. principal_id
+        # may be NULL (org), so compare with IS NOT DISTINCT FROM.
+        clauses = []
+        args: List[Any] = []
+        for ptype, pid in principals:
+            args.append(ptype)
+            args.append(pid)
+            n = len(args)
+            clauses.append(
+                f"(principal_type = ${n - 1} "
+                f"AND principal_id IS NOT DISTINCT FROM ${n})"
+            )
+        where = " OR ".join(clauses)
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                f"""
+                SELECT owner_id, group_id, role
+                FROM eval_grants
+                WHERE {where}
+                """,
+                *args,
+            )
+            return [
+                {
+                    "ownerId": row["owner_id"],
+                    "groupId": row["group_id"],
+                    "role": row["role"],
+                }
+                for row in rows
+            ]
+
+    async def get_teams_for_user(self, user_id: str) -> List[str]:
+        """Return the team ids a user belongs to (for principal resolution)."""
+        await self._ensure_pool_fresh()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT team_id FROM team_members WHERE user_id = $1",
+                user_id,
+            )
+            return [row["team_id"] for row in rows]
+
+    async def create_team(self, team_id: str, name: str, created_by: str) -> None:
+        """Create a team and add the creator as an admin member.
+
+        Raises:
+            DatabaseError: If the team cannot be created.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        INSERT INTO teams (id, name, created_by, created_at)
+                        VALUES ($1, $2, $3, NOW())
+                        ON CONFLICT (id) DO NOTHING
+                        """,
+                        team_id, name, created_by,
+                    )
+                    await conn.execute(
+                        """
+                        INSERT INTO team_members (team_id, user_id, role, added_at)
+                        VALUES ($1, $2, 'admin', NOW())
+                        ON CONFLICT (team_id, user_id) DO NOTHING
+                        """,
+                        team_id, created_by,
+                    )
+        except asyncpg.PostgresError as e:
+            raise DatabaseError(f"Failed to create team {team_id}: {e}") from e
+
+    async def add_team_member(
+        self, team_id: str, user_id: str, role: str = "member"
+    ) -> None:
+        """Add a user to a team.
+
+        Raises:
+            DatabaseError: If the member cannot be added.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO team_members (team_id, user_id, role, added_at)
+                    VALUES ($1, $2, $3, NOW())
+                    ON CONFLICT (team_id, user_id) DO UPDATE SET role = EXCLUDED.role
+                    """,
+                    team_id, user_id, role,
+                )
+        except asyncpg.PostgresError as e:
+            raise DatabaseError(
+                f"Failed to add member {user_id} to team {team_id}: {e}"
+            ) from e
+
+    async def remove_team_member(self, team_id: str, user_id: str) -> bool:
+        """Remove a member from a team. Returns True if a row was deleted.
+
+        Raises:
+            DatabaseError: If the delete fails.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                result = await conn.execute(
+                    "DELETE FROM team_members WHERE team_id = $1 AND user_id = $2",
+                    team_id, user_id,
+                )
+        except asyncpg.PostgresError as e:
+            raise DatabaseError(
+                f"Failed to remove member {user_id} from team {team_id}: {e}"
+            ) from e
+        return result.endswith(" 1")
+
+    async def list_teams_for_user_detailed(self, user_id: str) -> List[Dict[str, Any]]:
+        """Teams the user belongs to, with names + the caller's role in each.
+        Powers the team-management UI (get_teams_for_user returns bare ids for
+        the resolver hot path)."""
+        await self._ensure_pool_fresh()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT t.id, t.name, t.created_by, tm.role
+                FROM team_members tm JOIN teams t ON t.id = tm.team_id
+                WHERE tm.user_id = $1 ORDER BY t.name
+                """,
+                user_id,
+            )
+            return [
+                {"id": r["id"], "name": r["name"],
+                 "createdBy": r["created_by"], "role": r["role"]}
+                for r in rows
+            ]
+
+    async def list_team_members(self, team_id: str) -> List[Dict[str, Any]]:
+        """Members of a team, with their email (for display) and role."""
+        await self._ensure_pool_fresh()
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT tm.user_id, tm.role, u.email
+                FROM team_members tm LEFT JOIN users u ON u.id = tm.user_id
+                WHERE tm.team_id = $1 ORDER BY tm.role, tm.user_id
+                """,
+                team_id,
+            )
+            return [
+                {"userId": r["user_id"], "role": r["role"], "email": r["email"]}
+                for r in rows
+            ]
+
+    async def is_team_member(self, team_id: str, user_id: str) -> bool:
+        """True if user_id belongs to team_id. Used to authorize team-scoped
+        reads/management (deny-by-default: missing row → False)."""
+        await self._ensure_pool_fresh()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM team_members WHERE team_id = $1 AND user_id = $2",
+                team_id, user_id,
+            )
+            return row is not None
+
+    async def get_team_role(self, team_id: str, user_id: str) -> Optional[str]:
+        """The caller's role in a team ('admin'/'member'), or None if not a
+        member. Used to gate admin-only team operations."""
+        await self._ensure_pool_fresh()
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT role FROM team_members WHERE team_id = $1 AND user_id = $2",
+                team_id, user_id,
+            )
+            return row["role"] if row else None
 
     async def close(self):
         """Close all connections in the pool. Sets _closed so any

@@ -13,9 +13,16 @@ export default function ResultsPage() {
   // manual history.pushState/popstate plumbing that used to live here.)
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = searchParams.get("group");
+  // owner travels in the URL so deep links / refreshes keep the cross-user
+  // read authorized. Absent (or self) means the caller's own eval.
+  const selectedOwner = searchParams.get("owner");
 
-  const handleSelect = (id: string | null) => {
-    setSearchParams(id ? { group: id } : {});
+  const handleSelect = (id: string | null, owner?: string) => {
+    if (!id) {
+      setSearchParams({});
+      return;
+    }
+    setSearchParams(owner ? { group: id, owner } : { group: id });
   };
 
   useEffect(() => {
@@ -41,14 +48,14 @@ export default function ResultsPage() {
 
   return (
     <div className="flex h-screen flex-col bg-ink">
-      <ResultsHeader groupId={selectedId} />
+      <ResultsHeader groupId={selectedId} owner={selectedOwner} />
 
       <div className="flex flex-1 overflow-hidden">
         <RunRail selectedId={selectedId} onSelect={handleSelect} />
 
         <div className="flex-1 overflow-hidden">
           {selectedId ? (
-            <ComparisonView groupId={selectedId} />
+            <ComparisonView groupId={selectedId} owner={selectedOwner} />
           ) : (
             <div className="flex h-full items-center justify-center px-8">
               <div className="max-w-md text-center">

@@ -1,9 +1,14 @@
 import { useState } from "react";
 import { useAuth } from "@/contexts/AuthContext";
 import { useLocation, useNavigate } from "react-router-dom";
+import ShareModal from "./ShareModal";
 
 interface ResultsHeaderProps {
   groupId: string | null;
+  // Owner of the selected eval. Absent/self = caller's own eval. A shared
+  // eval (owner != caller) can't be re-shared and the report read must carry
+  // the owner hint for the backend resolver.
+  owner?: string | null;
   sessionId?: string | null;
 }
 
@@ -19,19 +24,28 @@ const NAV: NavItem[] = [
   { href: "/results", label: "Results" },
   { href: "/data", label: "Data" },
   { href: "/optimizations", label: "Optimized" },
+  { href: "/teams", label: "Teams", fullOnly: true },
 ];
 
-export default function ResultsHeader({ groupId }: ResultsHeaderProps) {
+export default function ResultsHeader({ groupId, owner }: ResultsHeaderProps) {
   const { user, logoutUrl, mode } = useAuth();
   const navigate = useNavigate();
   const pathname = useLocation().pathname;
   const visibleNav = NAV.filter((item) => !(mode === "viewer" && item.fullOnly));
   const [downloading, setDownloading] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
+
+  // A shared eval (owner present and not the caller) is not the caller's to
+  // re-share. Only own evals get the Share affordance.
+  const isOwn = !owner || owner === user?.id;
 
   const handleDownloadReport = async () => {
     if (!groupId) return;
     setDownloading(true);
     try {
+      // This serves the caller's OWN previously-generated PDF. For a shared
+      // eval the viewer won't have one yet (report generation for shared evals
+      // is a later phase), so this 404s and prompts them to generate one.
       const response = await fetch(
         `/api/compare/report/${encodeURIComponent(groupId)}`,
       );
@@ -108,6 +122,14 @@ export default function ResultsHeader({ groupId }: ResultsHeaderProps) {
         </nav>
 
         <div className="flex items-center gap-3">
+          {groupId && isOwn && (
+            <button
+              onClick={() => setShareOpen(true)}
+              className="eyebrow inline-flex items-center gap-2 border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone-dim"
+            >
+              <span className="font-mono">⤷</span> Share
+            </button>
+          )}
           {groupId && (
             <button
               onClick={handleDownloadReport}
@@ -144,6 +166,9 @@ export default function ResultsHeader({ groupId }: ResultsHeaderProps) {
           )}
         </div>
       </div>
+      {shareOpen && groupId && (
+        <ShareModal groupId={groupId} onClose={() => setShareOpen(false)} />
+      )}
     </header>
   );
 }

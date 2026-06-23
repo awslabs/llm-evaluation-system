@@ -33,30 +33,40 @@ async def handle_get_evaluation_details(args: Dict[str, Any]) -> List[TextConten
                 )
             ]
 
-        log_dir = get_user_log_dir(user_id)
-        eval_log_infos = await list_eval_logs_async(log_dir)
+        # Search the caller's own dir first, then any owner who shared with
+        # them. shared_scopes is injected by the backend from grants (never the
+        # model): {ownerId, groupId}, groupId=None = all of that owner's evals.
+        # Restricting the foreign search to scopes that match eval_id (or are
+        # share-all) is what enforces per-group grants here.
+        shared_scopes = args.get("shared_scopes") or []
+        search_owners = [user_id]
+        for s in shared_scopes:
+            owner = s.get("ownerId")
+            gid = s.get("groupId")
+            if owner and owner != user_id and (gid is None or gid == eval_id):
+                if owner not in search_owners:
+                    search_owners.append(owner)
 
-        if not eval_log_infos:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({"success": False, "error": "No evaluations found."}),
-                )
-            ]
-
-        # Find the matching log file by filename or run_id
+        # Find the matching log file by filename or run_id, across owners.
         target_log = None
-        for info in eval_log_infos:
-            if eval_id in info.name:
-                target_log = info.name
-                break
+        for owner in search_owners:
             try:
-                log = await read_eval_log_async(info.name, header_only=True)
-                if log.eval.run_id == eval_id:
-                    target_log = info.name
-                    break
+                owner_infos = await list_eval_logs_async(get_user_log_dir(owner))
             except Exception:
                 continue
+            for info in owner_infos:
+                if eval_id in info.name:
+                    target_log = info.name
+                    break
+                try:
+                    log = await read_eval_log_async(info.name, header_only=True)
+                    if log.eval.run_id == eval_id:
+                        target_log = info.name
+                        break
+                except Exception:
+                    continue
+            if target_log:
+                break
 
         if not target_log:
             return [

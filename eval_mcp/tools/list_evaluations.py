@@ -38,6 +38,35 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
         log_dir = get_user_log_dir(user_id)
         eval_log_infos = await list_eval_logs_async(log_dir)
 
+        # Append evals shared with this caller. shared_scopes is injected by the
+        # backend from grants (never the model): a list of {ownerId, groupId},
+        # groupId=None meaning all of that owner's evals. We tag each shared
+        # info with the owner so detail/report lookups can scope correctly.
+        shared_scopes = args.get("shared_scopes") or []
+        owner_of_info: Dict[str, str] = {}
+        if shared_scopes:
+            by_owner: Dict[str, set] = {}
+            for s in shared_scopes:
+                by_owner.setdefault(s.get("ownerId"), set()).add(s.get("groupId"))
+            for owner, gids in by_owner.items():
+                if not owner or owner == user_id:
+                    continue
+                try:
+                    owner_infos = await list_eval_logs_async(get_user_log_dir(owner))
+                except Exception:
+                    continue
+                allow_all = None in gids
+                for oi in owner_infos:
+                    try:
+                        if not allow_all:
+                            olog = await read_eval_log_async(oi.name, header_only=True)
+                            if olog.eval.run_id not in gids:
+                                continue
+                        eval_log_infos.append(oi)
+                        owner_of_info[oi.name] = owner
+                    except Exception:
+                        continue
+
         if not eval_log_infos:
             empty_text = (
                 json.dumps({
@@ -64,13 +93,14 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
         # deserialize once (same summary UI/PDF consume).
         detail_cache: Dict[str, Dict[str, Any] | None] = {}
 
-        def _detail_for(run_id: str) -> Dict[str, Any] | None:
-            if run_id not in detail_cache:
+        def _detail_for(run_id: str, owner: str) -> Dict[str, Any] | None:
+            cache_key = f"{owner}:{run_id}"
+            if cache_key not in detail_cache:
                 try:
-                    detail_cache[run_id] = load_eval_detail(user_id, run_id)
+                    detail_cache[cache_key] = load_eval_detail(owner, run_id)
                 except Exception:
-                    detail_cache[run_id] = None
-            return detail_cache[run_id]
+                    detail_cache[cache_key] = None
+            return detail_cache[cache_key]
 
         evaluations = []
         for info in page_infos:
@@ -79,7 +109,8 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
 
                 run_id = log.eval.run_id
                 model_id = log.eval.model
-                detail = _detail_for(run_id)
+                owner = owner_of_info.get(info.name, user_id)
+                detail = _detail_for(run_id, owner)
                 # Score-only runs log model="none/none"; the detail builder
                 # relabels to "pre-generated" — surface the same label here
                 # so the list view doesn't say one thing and the detail view
@@ -113,6 +144,10 @@ async def handle_list_evaluations(args: Dict[str, Any]) -> List[TextContent]:
                     "status": log.status,
                     "logFile": info.name,
                 }
+                # Mark shared (non-own) evals so the chat agent can attribute them.
+                if owner != user_id:
+                    eval_data["owner"] = owner
+                    eval_data["shared"] = True
 
                 if log.stats and log.stats.model_usage:
                     total_tokens = {}

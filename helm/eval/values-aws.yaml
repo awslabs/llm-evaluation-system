@@ -30,6 +30,14 @@ backend:
     maxReplicas: 6
     targetCPUUtilization: 70
     targetMemoryUtilization: 80
+  # MUST-FIX (docs/EVAL_SHARING_DESIGN.md §7.1): isolate :8080 to oauth2-proxy.
+  # Without this, any in-cluster pod can forge X-Forwarded-User. The /health
+  # ALB target group hits the pod directly from node IPs in the VPC, so allow
+  # the VPC CIDR for that identity-free path only.
+  networkPolicy:
+    enabled: true
+    allowedHealthCheckCIDRs:
+      - "10.0.0.0/16"
 
 # oauth2-proxy subchart - handles all authentication at the edge
 oauth2-proxy:
@@ -61,6 +69,15 @@ oauth2-proxy:
       set_xauthrequest = true
       pass_access_token = false
       pass_authorization_header = false
+      # Identity trust boundary (docs/EVAL_SHARING_DESIGN.md §7.1): pin the
+      # header behavior explicitly rather than relying on subchart defaults.
+      # skip_auth_strip_headers=true makes oauth2-proxy STRIP any inbound
+      # client-supplied X-Auth-Request-*/X-Forwarded-User before proxying, then
+      # set them from the validated session — so a client cannot inject its own
+      # identity. pass_user_headers stays false (we use set_xauthrequest's
+      # X-Auth-Request-User, surfaced upstream as X-Forwarded-User by the ALB).
+      skip_auth_strip_headers = true
+      pass_user_headers = false
       silence_ping_logging = true
       reverse_proxy = true
       upstream_timeout = "120s"

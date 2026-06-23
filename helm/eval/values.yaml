@@ -35,6 +35,13 @@ backend:
     maxReplicas: 10
     targetCPUUtilization: 70
     targetMemoryUtilization: 80
+  # Ingress isolation. Off by default (local/dev has no oauth2-proxy pod);
+  # enabled in values-aws.yaml. See docs/EVAL_SHARING_DESIGN.md §7.1.
+  networkPolicy:
+    enabled: false
+    # CIDRs allowed to reach :8080 directly for the ALB /health target group.
+    # Set to the VPC/node CIDRs in the AWS overlay.
+    allowedHealthCheckCIDRs: []
 
 # MCP Sidecar Resources
 mcp:

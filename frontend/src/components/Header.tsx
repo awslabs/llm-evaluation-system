@@ -15,6 +15,7 @@ const NAV: NavItem[] = [
   { href: "/results", label: "Results" },
   { href: "/data", label: "Data" },
   { href: "/optimizations", label: "Optimized" },
+  { href: "/teams", label: "Teams", fullOnly: true },
 ];
 
 export default function Header() {

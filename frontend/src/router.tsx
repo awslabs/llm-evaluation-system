@@ -5,6 +5,7 @@ import History from "@/pages/History";
 import Results from "@/pages/Results";
 import Data from "@/pages/Data";
 import Optimizations from "@/pages/Optimizations";
+import Teams from "@/pages/Teams";
 
 // Flat routes — the app has no nested layouts. Query params (?session, ?group,
 // ?id) are read inside each page via react-router's useSearchParams, which
@@ -19,6 +20,7 @@ export function AppRoutes() {
       <Route path="/results" element={<Results />} />
       <Route path="/data" element={<Data />} />
       <Route path="/optimizations" element={<Optimizations />} />
+      <Route path="/teams" element={<Teams />} />
     </Routes>
   );
 }

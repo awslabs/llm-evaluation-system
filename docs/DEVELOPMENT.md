@@ -18,11 +18,10 @@ End-users install via `uvx --from llm-evaluation-system eval-mcp` — do **not**
 ```bash
 git clone https://github.com/awslabs/llm-evaluation-system.git
 cd llm-evaluation-system
-uv venv
-uv pip install -e .
+uv sync
 ```
 
-`-e` installs editable — edits in `eval_mcp/` take effect on next MCP restart without reinstalling.
+`uv sync` installs editable from `uv.lock` — the **same** pinned versions the deployed EKS image builds with (`uv sync --locked` in the `Dockerfile`), so your local inspect-ai matches production exactly rather than floating to whatever PyPI's latest is. Edits in `eval_mcp/` take effect on next MCP restart without reinstalling. After changing a dependency in `pyproject.toml`, run `uv lock` to refresh the lockfile, then `uv sync` again.
 
 ### 2. Pytest for narrow deterministic logic (optional supplement)
 

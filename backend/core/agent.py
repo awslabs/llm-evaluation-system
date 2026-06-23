@@ -83,6 +83,12 @@ Available Tools:
   * Pass dataset name (from list_datasets or generate_qa_pairs)
   * Pass judge name (from list_judges or generate_judge)
 - run_evaluation: ACTUALLY RUN the evaluation (REQUIRED - don't skip this!)
+- list_benchmarks / get_benchmark_details / run_benchmark: run STANDARD premade
+  benchmarks (MMLU, GPQA, GSM8K, HumanEval, ~120 more from inspect_evals) instead
+  of a generated dataset. When a user asks to run a named benchmark or "a standard
+  benchmark", call list_benchmarks(search=...) to discover it (don't guess task
+  names), get_benchmark_details to pick the exact task variant, then run_benchmark.
+  Some benchmarks need an extra dependency or a sandbox - the tools flag this.
 - list_evaluations: List completed evaluations
 - get_evaluation_details: Get detailed results for a specific eval
 - list_available_models: Discover all available models (Bedrock + external providers)

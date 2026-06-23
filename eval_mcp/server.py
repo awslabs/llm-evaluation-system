@@ -43,6 +43,11 @@ from eval_mcp.tools.run_eval import (
     get_running_eval_info,
 )
 from eval_mcp.tools.generate_report import handle_generate_report
+from eval_mcp.tools.benchmarks import (
+    handle_list_benchmarks,
+    handle_get_benchmark_details,
+    handle_run_benchmark,
+)
 
 # Configuration
 region = os.environ.get("AWS_REGION", "us-west-2")
@@ -187,6 +192,35 @@ SourceFilter = Annotated[
         pattern="^(all|bedrock|external)$",
         description="Source filter for model listing.",
         examples=["all", "bedrock", "external"],
+    ),
+]
+BenchmarkSearch = Annotated[
+    str,
+    Field(
+        description="Substring filter over benchmark id/title/description/category.",
+        examples=["reasoning", "math", "coding"],
+    ),
+]
+BenchmarkCategory = Annotated[
+    str,
+    Field(
+        description=(
+            "Exact category filter. One of: Knowledge, Coding, Reasoning, "
+            "Safeguards, Cybersecurity, Assistants, Mathematics, Scheming, "
+            "Multimodal, Bias, Personality, Writing."
+        ),
+        examples=["Reasoning", "Coding"],
+    ),
+]
+BenchmarkId = Annotated[
+    str,
+    Field(description="Benchmark id from list_benchmarks.", examples=["gsm8k", "mmlu"]),
+]
+BenchmarkTaskName = Annotated[
+    str,
+    Field(
+        description="Runnable task name (or a benchmark id with a single task).",
+        examples=["gsm8k", "mmlu_0_shot", "arc_easy"],
     ),
 ]
 
@@ -1073,6 +1107,108 @@ async def run_evaluation(
         "user_id": _user(user_id),
     }
     result = await handle_run_evaluation(args)
+    return result[0].text
+
+
+@mcp.tool(annotations=READ_LOCAL)
+async def list_benchmarks(
+    search: BenchmarkSearch = None,
+    category: BenchmarkCategory = None,
+    limit: LimitParam = 20,
+    offset: OffsetParam = 0,
+    user_id: str = None,
+) -> str:
+    """
+    Discover premade benchmarks from the UK AISI `inspect_evals` suite
+    (MMLU, GPQA, GSM8K, ARC, HumanEval, TruthfulQA, and ~120 more).
+
+    This is the entry point for running a STANDARD benchmark instead of a
+    generated QA dataset. Returns a COMPACT, filtered, paginated list — call
+    it with `search`/`category` to narrow rather than paging the whole catalog.
+    Then call `get_benchmark_details` for one, and `run_benchmark` to run it.
+
+    Each row includes `needsExtra` (requires an optional dependency group) and
+    `needsSandbox` (runs untrusted code; needs Docker/k8s-sandbox) so you know
+    what can be run as-is. The response also returns a `categories` histogram.
+
+    Args:
+        search: Substring over id/title/description/category (e.g. "reasoning").
+        category: Exact category (e.g. "Coding", "Mathematics").
+        limit: Page size (default 20).
+        offset: Page start (default 0).
+
+    Returns:
+        JSON: {total, categories, benchmarks: [{id, title, category, tasks,
+        sampleCount, needsExtra, needsSandbox}], hasMore, nextOffset}.
+    """
+    result = await handle_list_benchmarks({
+        "search": search, "category": category, "limit": limit, "offset": offset,
+    })
+    return result[0].text
+
+
+@mcp.tool(annotations=READ_LOCAL)
+async def get_benchmark_details(
+    benchmark_id: BenchmarkId,
+    user_id: str = None,
+) -> str:
+    """
+    Full detail for ONE benchmark: description, all runnable task variants
+    (with sample counts), the HuggingFace dataset it uses, and whether it
+    needs an optional dependency group or a sandbox.
+
+    Use after `list_benchmarks` to pick the exact task name to pass to
+    `run_benchmark` (e.g. MMLU exposes `mmlu_0_shot` and `mmlu_5_shot`).
+
+    Args:
+        benchmark_id: A benchmark id from list_benchmarks (e.g. "gsm8k").
+
+    Returns:
+        JSON with id, title, description, tasks, datasets, needsExtra/
+        extraInstall, needsSandbox, and a runHint.
+    """
+    result = await handle_get_benchmark_details({"benchmark_id": benchmark_id})
+    return result[0].text
+
+
+@mcp.tool(annotations=RUN_REMOTE)
+async def run_benchmark(
+    task: BenchmarkTaskName,
+    providers: ProvidersList,
+    limit: int = None,
+    task_args: dict = None,
+    user_id: str = None,
+) -> str:
+    """
+    Run a premade `inspect_evals` benchmark against one or more models.
+
+    Runs `inspect_evals/<task>` via Inspect AI (same subprocess + viewer path
+    as run_evaluation). Datasets download from HuggingFace at run time, so the
+    environment needs outbound network to huggingface.co.
+
+    `task` accepts a runnable task name (from get_benchmark_details) OR a
+    benchmark id that has a single task. Multi-variant benchmarks must be run
+    by an explicit task name. Use `limit` to cap samples for a quick smoke run.
+    Benchmarks flagged needsExtra/needsSandbox in list_benchmarks return a clear
+    error (with the fix) instead of running, unless the requirement is met.
+
+    Args:
+        task: Task name or single-task benchmark id (e.g. "gsm8k", "mmlu_0_shot").
+        providers: Model ids to evaluate (from list_available_models).
+        limit: Optional cap on number of samples (good for a fast check).
+        task_args: Optional benchmark parameters, passed as `-T key=value`.
+
+    Returns:
+        JSON with success, task, runId, viewerUrl, and a scores summary.
+    """
+    args = {
+        "task": task,
+        "providers": providers,
+        "limit": limit,
+        "task_args": task_args,
+        "user_id": _user(user_id),
+    }
+    result = await handle_run_benchmark(args)
     return result[0].text
 
 

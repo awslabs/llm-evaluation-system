@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useState } from "react";
+import ShareModal from "@/components/results/ShareModal";
 
 interface IterationRecord {
   iter: number;
@@ -36,6 +37,9 @@ interface OptimizationRecord {
 
 interface Props {
   optimizationId: string;
+  // Owner of a shared optimization (absent/own → owned). When set, reads are
+  // scoped to the owner and the Share affordance is hidden.
+  owner?: string | null;
 }
 
 function fmtPct(n: number | undefined | null): string {
@@ -188,16 +192,19 @@ function PromptBlock({ label, value }: { label: string; value: string }) {
   );
 }
 
-export default function OptimizationDetail({ optimizationId }: Props) {
+export default function OptimizationDetail({ optimizationId, owner }: Props) {
   const [record, setRecord] = useState<OptimizationRecord | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedIter, setExpandedIter] = useState<number | null>(null);
+  const [shareOpen, setShareOpen] = useState(false);
+  const isShared = !!owner;
 
   useEffect(() => {
     setLoading(true);
     setError(null);
-    fetch(`/api/optimizations/detail?id=${encodeURIComponent(optimizationId)}`)
+    const ownerQs = owner ? `&owner=${encodeURIComponent(owner)}` : "";
+    fetch(`/api/optimizations/detail?id=${encodeURIComponent(optimizationId)}${ownerQs}`)
       .then((res) => {
         if (!res.ok) throw new Error(`Failed: ${res.status}`);
         return res.json();
@@ -210,7 +217,7 @@ export default function OptimizationDetail({ optimizationId }: Props) {
         setError(err.message);
         setLoading(false);
       });
-  }, [optimizationId]);
+  }, [optimizationId, owner]);
 
   if (loading) {
     return (
@@ -248,6 +255,11 @@ export default function OptimizationDetail({ optimizationId }: Props) {
             Judge: {record.judge} · Status: {record.status} · Train:{" "}
             {record.train_size} · Test: {record.test_size}
           </p>
+          {isShared && (
+            <p className="mt-1 font-mono text-[11px] text-bone-mute">
+              Shared by <span className="text-bone-dim">{owner}</span> · read-only
+            </p>
+          )}
         </div>
         <div className="text-right">
           <p className="eyebrow">Winner</p>
@@ -255,9 +267,17 @@ export default function OptimizationDetail({ optimizationId }: Props) {
             {fmtPct(record.winner_test_score)}
           </p>
           <p className="font-mono text-[10px] text-bone-mute">iter #{record.winner_iter}</p>
+          {!isShared && (
+            <button
+              onClick={() => setShareOpen(true)}
+              className="eyebrow mt-2 inline-flex items-center gap-2 border border-rule px-2 py-1 transition-colors hover:border-bone-mute hover:text-bone-dim"
+            >
+              <span className="font-mono">⤷</span> Share
+            </button>
+          )}
           {record.test_run_id && (
             <a
-              href={`/results?group=${encodeURIComponent(record.test_run_id)}`}
+              href={`/results?group=${encodeURIComponent(record.test_run_id)}${owner ? `&owner=${encodeURIComponent(owner)}` : ""}`}
               className="eyebrow mt-2 inline-block border border-rule px-2 py-1 transition-colors hover:border-bone-mute hover:text-bone-dim"
               title="Open the test-time ranking eval in Results"
             >
@@ -266,6 +286,14 @@ export default function OptimizationDetail({ optimizationId }: Props) {
           )}
         </div>
       </div>
+      {shareOpen && (
+        <ShareModal
+          resourceId={optimizationId}
+          apiBase="/api/optimizations"
+          label="optimization"
+          onClose={() => setShareOpen(false)}
+        />
+      )}
 
       <div className="mb-8">
         <p className="eyebrow mb-3">Train pass rate by iteration</p>

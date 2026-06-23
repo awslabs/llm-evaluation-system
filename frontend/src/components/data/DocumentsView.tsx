@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { listDocuments } from "@/lib/data-api";
 import type { DocumentEntry, DatasetSummary } from "@/lib/data-types";
+import ShareModal from "@/components/results/ShareModal";
 
 interface Props {
   datasets: DatasetSummary[];
@@ -15,6 +16,7 @@ export default function DocumentsView({ datasets }: Props) {
   const [docs, setDocs] = useState<DocumentEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [shareOpen, setShareOpen] = useState(false);
 
   useEffect(() => {
     listDocuments()
@@ -74,7 +76,24 @@ export default function DocumentsView({ datasets }: Props) {
           Files uploaded for synthetic Q/A generation or as evaluation context.
           Each row links to datasets generated from it.
         </p>
+        <div className="mt-4">
+          <button
+            onClick={() => setShareOpen(true)}
+            className="eyebrow inline-flex items-center gap-2 border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone-dim"
+          >
+            <span className="font-mono">⤷</span> Share all documents
+          </button>
+        </div>
       </div>
+      {shareOpen && (
+        <ShareModal
+          resourceId=""
+          apiBase="/api/documents"
+          label="document"
+          shareAllOnly
+          onClose={() => setShareOpen(false)}
+        />
+      )}
 
       {docs.length === 0 ? (
         <p className="reveal stagger-1 px-1 py-10 text-sm italic text-bone-mute">
@@ -95,8 +114,16 @@ export default function DocumentsView({ datasets }: Props) {
                     {(idx + 1).toString().padStart(3, "0")}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-[0.95rem] text-bone">
-                      {name}
+                    <div className="flex items-baseline gap-2 truncate text-[0.95rem] text-bone">
+                      <span className="truncate">{name}</span>
+                      {d.shared && (
+                        <span
+                          title={`Shared by ${d.owner}`}
+                          className="shrink-0 rounded-sm border border-rule px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-bone-mute"
+                        >
+                          shared
+                        </span>
+                      )}
                     </div>
                     <div className="mt-1 truncate font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
                       {d.path}

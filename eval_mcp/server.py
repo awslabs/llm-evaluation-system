@@ -496,6 +496,7 @@ async def list_documents(
     limit: LimitParam = 50,
     offset: OffsetParam = 0,
     response_format: ResponseFormat = "json",
+    shared_scopes: list = None,
 ) -> str:
     """
     List uploaded documents available for the user.
@@ -513,6 +514,18 @@ async def list_documents(
     """
     try:
         all_paths = list_user_document_paths(_user(user_id))
+        # Append documents shared with the caller (share-all is the unit for
+        # docs — see backend route). shared_scopes is backend-injected.
+        for s in (shared_scopes or []):
+            owner = s.get("ownerId")
+            if owner and owner != _user(user_id):
+                try:
+                    for p in list_user_document_paths(owner):
+                        # Prefix with owner so the path is unambiguous and the
+                        # consumer knows whose tree it lives in.
+                        all_paths.append(f"@{owner}/{p}")
+                except Exception:
+                    continue
         total = len(all_paths)
         limit = max(1, int(limit or 50))
         offset = max(0, int(offset or 0))
@@ -834,6 +847,7 @@ async def list_datasets(
     limit: LimitParam = 20,
     offset: OffsetParam = 0,
     response_format: ResponseFormat = "markdown",
+    shared_scopes: list = None,
 ) -> str:
     """
     List available datasets.
@@ -857,6 +871,7 @@ async def list_datasets(
         "limit": limit,
         "offset": offset,
         "response_format": response_format,
+        "shared_scopes": shared_scopes or [],
     }
     result = await handle_list_datasets(args)
     return result[0].text
@@ -869,6 +884,7 @@ async def list_judges(
     limit: LimitParam = 20,
     offset: OffsetParam = 0,
     response_format: ResponseFormat = "markdown",
+    shared_scopes: list = None,
 ) -> str:
     """
     List available LLM judges.
@@ -892,6 +908,7 @@ async def list_judges(
         "limit": limit,
         "offset": offset,
         "response_format": response_format,
+        "shared_scopes": shared_scopes or [],
     }
     result = await handle_list_judges(args)
     return result[0].text
@@ -1036,6 +1053,7 @@ async def list_optimizations(
     offset: OffsetParam = 0,
     search: str = "",
     response_format: ResponseFormat = "json",
+    shared_scopes: list = None,
 ) -> str:
     """
     List prompt-optimization runs newest-first.
@@ -1056,6 +1074,7 @@ async def list_optimizations(
         "offset": offset,
         "search": search,
         "response_format": response_format,
+        "shared_scopes": shared_scopes or [],
     }
     result = await handle_list_optimizations(args)
     return result[0].text
@@ -1065,6 +1084,7 @@ async def list_optimizations(
 async def get_optimization_details(
     optimization_id: str,
     user_id: str = None,
+    shared_scopes: list = None,
 ) -> str:
     """
     Get the full record for a single optimization run.
@@ -1078,7 +1098,11 @@ async def get_optimization_details(
         optimization_id: ID from list_optimizations.
     """
     _auto_pull(user_id)
-    args = {"user_id": _user(user_id), "optimization_id": optimization_id}
+    args = {
+        "user_id": _user(user_id),
+        "optimization_id": optimization_id,
+        "shared_scopes": shared_scopes or [],
+    }
     result = await handle_get_optimization_details(args)
     return result[0].text
 

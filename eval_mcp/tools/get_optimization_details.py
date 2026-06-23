@@ -41,6 +41,17 @@ async def handle_get_optimization_details(args: Dict[str, Any]) -> List[TextCont
             ]
 
         record = get_optimization_from_db(user_id, optimization_id)
+        # Fall back to owners who shared this optimization. shared_scopes is
+        # backend-injected from grants; only an owner with a matching grant
+        # (specific id, or share-all) is searched.
+        if not record:
+            for s in (args.get("shared_scopes") or []):
+                owner = s.get("ownerId")
+                gid = s.get("groupId")
+                if owner and owner != user_id and (gid is None or gid == optimization_id):
+                    record = get_optimization_from_db(owner, optimization_id)
+                    if record:
+                        break
         if not record:
             return [
                 TextContent(

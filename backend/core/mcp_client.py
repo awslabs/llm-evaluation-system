@@ -241,18 +241,18 @@ class MultiMCPClient:
         """
         self.user_id = user_id
 
-    async def _shared_scopes(self) -> list:
-        """Evals shared with the current caller, as [{ownerId, groupId}] (a
-        groupId of None means all of that owner's evals). Resolved from grants
-        with the trusted caller identity. Lazy imports keep the eval_mcp
-        package DB-free and avoid a circular import with backend.api.main.
-        Fails closed (returns [])."""
+    async def _shared_scopes(self, resource_type: str = "eval") -> list:
+        """Resources of `resource_type` shared with the current caller, as
+        [{ownerId, groupId}] (groupId None = all of that owner's resources of
+        that type). Resolved from grants with the trusted caller identity. Lazy
+        imports keep the eval_mcp package DB-free and avoid a circular import
+        with backend.api.main. Fails closed (returns [])."""
         try:
             from backend.api.main import db
             if db is None or not self.user_id:
                 return []
             from backend.core import sharing
-            scopes = await sharing.list_shared_scopes(db, self.user_id)
+            scopes = await sharing.list_shared_scopes(db, self.user_id, resource_type)
             return [
                 {"ownerId": s["ownerId"], "groupId": s["groupId"]}
                 for s in scopes
@@ -260,6 +260,19 @@ class MultiMCPClient:
         except Exception as e:
             self.logger.warning(f"shared-scope resolution failed: {e}")
             return []
+
+    # Read tools that should receive shared_scopes, and the resource_type each
+    # one reads. The backend injects the authorized scopes; the model can't.
+    _SHARED_SCOPE_TOOLS = {
+        "list_evaluations": "eval",
+        "get_evaluation_details": "eval",
+        "generate_report": "eval",
+        "list_datasets": "dataset",
+        "list_judges": "judge",
+        "list_optimizations": "optimization",
+        "get_optimization_details": "optimization",
+        "list_documents": "document",
+    }
 
     # Params the backend injects server-side and the model must never set.
     _INJECTED_PARAMS = ("user_id", "shared_scopes", "owner_id")
@@ -375,16 +388,17 @@ class MultiMCPClient:
             arguments = arguments or {}
             arguments["user_id"] = self.user_id
 
-        # For read tools, also inject the evals SHARED with this caller, so
-        # shared results surface in chat. This is computed server-side from
-        # grants using the trusted caller identity (NEVER from the model), so
-        # the model cannot widen its own access. The eval_mcp tools stay
-        # DB-free — they just receive an authorized list of {ownerId, groupId}.
-        if self.user_id and tool_name in (
-            "list_evaluations", "get_evaluation_details", "generate_report",
-        ):
+        # For read tools, also inject the resources SHARED with this caller (of
+        # the type that tool reads), so shared results surface in chat. Computed
+        # server-side from grants using the trusted caller identity (NEVER from
+        # the model), so the model cannot widen its own access. The eval_mcp
+        # tools stay DB-free — they just receive an authorized list of
+        # {ownerId, groupId}.
+        if self.user_id and tool_name in self._SHARED_SCOPE_TOOLS:
             arguments = arguments or {}
-            arguments["shared_scopes"] = await self._shared_scopes()
+            arguments["shared_scopes"] = await self._shared_scopes(
+                self._SHARED_SCOPE_TOOLS[tool_name]
+            )
 
         # Strip any model-supplied owner_id — cross-user reads are authorized
         # only via the injected shared_scopes, never a raw owner the model names.

@@ -298,16 +298,18 @@ class Database:
                 )
             """)
 
-            # Eval sharing grants. One row expresses every sharing case:
+            # Sharing grants. One row expresses every sharing case:
             # share-one (group_id set) or share-all (group_id NULL), to a
-            # user/team/org principal. Authorization is resolved against
-            # (owner_id, group_id) — group_id alone is NOT globally unique
-            # (it's Inspect's run_id), so owner_id supplies the scope. We do
-            # NOT FK principal_id/group_id: a grantee may not have logged in
-            # yet (users are created lazily) and group_id is not a DB row.
-            # principal_type/role are CHECK-constrained so an unknown value
-            # can't silently fail open. Deny-by-default makes a dangling
-            # principal harmless. See docs/EVAL_SHARING_DESIGN.md.
+            # user/team/org principal, for any RESOURCE TYPE (eval, dataset,
+            # judge, optimization, document). Authorization is resolved against
+            # (resource_type, owner_id, group_id) — group_id alone is NOT
+            # globally unique (it's an eval run_id / dataset id / judge id /
+            # doc path), so owner_id+resource_type supply the scope. We do NOT
+            # FK principal_id/group_id: a grantee may not have logged in yet
+            # (users are created lazily) and group_id is not a DB row.
+            # resource_type/principal_type/role are CHECK-constrained so an
+            # unknown value can't silently fail open. Deny-by-default makes a
+            # dangling principal harmless. See docs/EVAL_SHARING_DESIGN.md.
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS eval_grants (
                     id TEXT PRIMARY KEY,
@@ -325,6 +327,19 @@ class Database:
                     UNIQUE (owner_id, group_id, principal_type, principal_id)
                 )
             """)
+            # resource_type added idempotently — rows predating multi-resource
+            # sharing are evals. The deterministic id PK (see _grant_id) is what
+            # dedupes now, so the old 4-col UNIQUE (which omits resource_type)
+            # is left in place harmlessly; a dataset and an eval sharing the same
+            # group_id string would collide on it, so we drop it if present.
+            await conn.execute(
+                "ALTER TABLE eval_grants ADD COLUMN IF NOT EXISTS "
+                "resource_type TEXT NOT NULL DEFAULT 'eval'"
+            )
+            await conn.execute(
+                "ALTER TABLE eval_grants DROP CONSTRAINT IF EXISTS "
+                "eval_grants_owner_id_group_id_principal_type_principal_id_key"
+            )
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_grants_principal
                 ON eval_grants(principal_type, principal_id)
@@ -539,7 +554,8 @@ class Database:
 
     @staticmethod
     def _grant_id(owner_id: str, group_id: Optional[str],
-                  principal_type: str, principal_id: Optional[str]) -> str:
+                  principal_type: str, principal_id: Optional[str],
+                  resource_type: str = "eval") -> str:
         """Deterministic id for a grant tuple.
 
         Used as the PRIMARY KEY so ON CONFLICT dedupes idempotently. The
@@ -547,13 +563,15 @@ class Database:
         NULLs (share-all group_id, org principal_id) as distinct — so two
         identical share-all grants would otherwise both insert. Hashing the
         normalized tuple gives a stable id that collides on a true duplicate.
+        resource_type is part of the key so an eval and a dataset that happen
+        to share a group_id string get distinct grant rows. NOTE: eval grants
+        keep the legacy 'eval'-free key (resource_type omitted from the hash)
+        so ids stay stable across the multi-resource migration.
         """
-        key = "\x1f".join([
-            owner_id,
-            group_id or "",
-            principal_type,
-            principal_id or "",
-        ])
+        parts = [owner_id, group_id or "", principal_type, principal_id or ""]
+        if resource_type != "eval":
+            parts.append(resource_type)
+        key = "\x1f".join(parts)
         return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
 
     async def add_grant(
@@ -564,36 +582,40 @@ class Database:
         principal_id: Optional[str],
         granted_by: str,
         role: str = "viewer",
+        resource_type: str = "eval",
     ) -> str:
         """Create a sharing grant. Returns the grant id.
 
-        group_id=None means "all of owner's evals" (including future ones).
+        group_id=None means "all of owner's <resource_type>s" (incl. future).
         principal_type='org' means everyone; principal_id is then ignored.
+        resource_type is one of eval/dataset/judge/optimization/document.
         Idempotent via the deterministic id.
 
         Raises:
             DatabaseError: If the grant cannot be created.
         """
-        grant_id = self._grant_id(owner_id, group_id, principal_type, principal_id)
+        grant_id = self._grant_id(
+            owner_id, group_id, principal_type, principal_id, resource_type
+        )
         await self._ensure_pool_fresh()
         try:
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     """
                     INSERT INTO eval_grants
-                        (id, owner_id, group_id, principal_type, principal_id,
-                         role, granted_by, created_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                        (id, owner_id, group_id, resource_type, principal_type,
+                         principal_id, role, granted_by, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
                     ON CONFLICT (id) DO NOTHING
                     """,
-                    grant_id, owner_id, group_id, principal_type,
+                    grant_id, owner_id, group_id, resource_type, principal_type,
                     principal_id, role, granted_by,
                 )
         except asyncpg.PostgresError as e:
             raise DatabaseError(f"Failed to add grant {grant_id}: {e}") from e
         logger.info(
             f"[GRANT] {granted_by} granted {principal_type}:{principal_id} "
-            f"{role} on owner={owner_id} group={group_id or '*'}"
+            f"{role} on {resource_type} owner={owner_id} group={group_id or '*'}"
         )
         return grant_id
 
@@ -625,7 +647,8 @@ class Database:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 """
-                SELECT id, group_id, principal_type, principal_id, role, created_at
+                SELECT id, group_id, resource_type, principal_type,
+                       principal_id, role, created_at
                 FROM eval_grants WHERE owner_id = $1 ORDER BY created_at DESC
                 """,
                 owner_id,
@@ -634,6 +657,7 @@ class Database:
                 {
                     "id": row["id"],
                     "groupId": row["group_id"],
+                    "resourceType": row["resource_type"],
                     "principalType": row["principal_type"],
                     "principalId": row["principal_id"],
                     "role": row["role"],
@@ -672,7 +696,7 @@ class Database:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 f"""
-                SELECT owner_id, group_id, role
+                SELECT owner_id, group_id, resource_type, role
                 FROM eval_grants
                 WHERE {where}
                 """,
@@ -682,6 +706,7 @@ class Database:
                 {
                     "ownerId": row["owner_id"],
                     "groupId": row["group_id"],
+                    "resourceType": row["resource_type"],
                     "role": row["role"],
                 }
                 for row in rows

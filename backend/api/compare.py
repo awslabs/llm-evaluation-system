@@ -461,8 +461,21 @@ async def create_share(req: ShareRequest, user_id: str = Depends(_get_user_id)):
         principal_id=principal_id,
         granted_by=user_id,
         role=req.role,
+        resource_type="eval",
     )
-    return {"id": grant_id, "ok": True}
+    # Cascade: also share the dataset/judge this eval's config referenced, so a
+    # viewer can drill into them. Best-effort — the eval is already shared and
+    # self-contained for scores even if cascade finds nothing.
+    cascaded = []
+    if req.group_id:
+        try:
+            from backend.core.sharing_cascade import cascade_eval
+            cascaded = await cascade_eval(
+                _db(), user_id, req.group_id, req.principal_type, principal_id
+            )
+        except Exception as e:
+            logger.warning(f"[GRANT] eval cascade failed for {req.group_id}: {e}")
+    return {"id": grant_id, "ok": True, "cascaded": cascaded}
 
 
 @router.get("/shares")

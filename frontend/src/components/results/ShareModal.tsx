@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 interface Share {
   id: string;
   groupId: string | null;
+  resourceType?: string;
   principalType: string;
   principalId: string | null;
   role: string;
@@ -10,36 +11,50 @@ interface Share {
 }
 
 interface Props {
-  groupId: string;
+  // The resource being shared. `resourceId` is the eval group / dataset id /
+  // judge id / optimization id / document path. `apiBase` is the resource's
+  // route prefix (e.g. "/api/compare", "/api/datasets") — its /shares,
+  // /shares/{id} endpoints live under it. `label` names the resource in copy.
+  resourceId: string;
+  apiBase: string;
+  label?: string;
+  // Documents are path-keyed, so per-item grants are fragile — force share-all.
+  shareAllOnly?: boolean;
   onClose: () => void;
 }
 
 /**
- * Share dialog for an eval the caller OWNS. Lets them grant another user (by
- * id), a team, or the whole org read access — either this one eval or all of
- * their evals. Mirrors the backend /api/compare/shares endpoints. Read-only
- * (viewer) is the only role in v1.
+ * Generic share dialog for any resource the caller OWNS (eval, dataset, judge,
+ * optimization, document). Grants another user (by id/email), a team, or the
+ * whole org read access — either this one resource or all of that type. Mirrors
+ * the per-resource /shares endpoints. Read-only (viewer) is the only role.
  */
-export default function ShareModal({ groupId, onClose }: Props) {
+export default function ShareModal({
+  resourceId,
+  apiBase,
+  label = "resource",
+  shareAllOnly = false,
+  onClose,
+}: Props) {
   const [shares, setShares] = useState<Share[]>([]);
   const [principalType, setPrincipalType] = useState("user");
   const [principalId, setPrincipalId] = useState("");
-  const [shareAll, setShareAll] = useState(false);
+  const [shareAll, setShareAll] = useState(shareAllOnly);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [suggestions, setSuggestions] = useState<{ id: string; email: string | null }[]>([]);
 
   const loadShares = () => {
-    fetch("/api/compare/shares")
+    fetch(`${apiBase}/shares`)
       .then((r) => (r.ok ? r.json() : { shares: [] }))
       .then((d) => setShares(d.shares || []))
       .catch(() => setShares([]));
   };
 
-  useEffect(loadShares, []);
+  useEffect(loadShares, [apiBase]);
 
-  // Email/id autocomplete for the "user" principal. Debounced; grants still
-  // key on the resolved id, email is only the lookup.
+  // Email/id autocomplete for the "user" principal. The search endpoint is
+  // resource-agnostic (lives under /api/compare). Grants key on the id.
   useEffect(() => {
     if (principalType !== "user" || principalId.trim().length < 2) {
       setSuggestions([]);
@@ -62,13 +77,13 @@ export default function ShareModal({ groupId, onClose }: Props) {
     }
     setBusy(true);
     try {
-      const res = await fetch("/api/compare/shares", {
+      const res = await fetch(`${apiBase}/shares`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           principal_type: principalType,
           principal_id: principalType === "org" ? null : principalId.trim(),
-          group_id: shareAll ? null : groupId,
+          resource_id: shareAll || shareAllOnly ? null : resourceId,
           role: "viewer",
         }),
       });
@@ -86,7 +101,7 @@ export default function ShareModal({ groupId, onClose }: Props) {
   };
 
   const revoke = async (id: string) => {
-    await fetch(`/api/compare/shares/${encodeURIComponent(id)}`, {
+    await fetch(`${apiBase}/shares/${encodeURIComponent(id)}`, {
       method: "DELETE",
     });
     loadShares();
@@ -97,7 +112,7 @@ export default function ShareModal({ groupId, onClose }: Props) {
       s.principalType === "org"
         ? "Everyone (org)"
         : `${s.principalType}: ${s.principalId}`;
-    const what = s.groupId ? "this eval" : "ALL my evals";
+    const what = s.groupId ? `this ${label}` : `ALL my ${label}s`;
     return `${who} · ${what}`;
   };
 
@@ -111,7 +126,7 @@ export default function ShareModal({ groupId, onClose }: Props) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-baseline justify-between">
-          <p className="eyebrow">Share evaluation</p>
+          <p className="eyebrow">Share {label}</p>
           <button
             onClick={onClose}
             className="font-mono text-bone-mute hover:text-bone"
@@ -169,19 +184,26 @@ export default function ShareModal({ groupId, onClose }: Props) {
             </button>
           </div>
 
-          <label className="flex items-center gap-2 font-mono text-[11px] text-bone-dim">
-            <input
-              type="checkbox"
-              checked={shareAll}
-              onChange={(e) => setShareAll(e.target.checked)}
-            />
-            Share ALL my evals (including future ones), not just this one
-          </label>
+          {shareAllOnly ? (
+            <p className="font-mono text-[11px] text-bone-mute">
+              {label}s are shared all-at-once (per-item sharing isn't supported
+              for {label}s).
+            </p>
+          ) : (
+            <label className="flex items-center gap-2 font-mono text-[11px] text-bone-dim">
+              <input
+                type="checkbox"
+                checked={shareAll}
+                onChange={(e) => setShareAll(e.target.checked)}
+              />
+              Share ALL my {label}s (including future ones), not just this one
+            </label>
+          )}
 
           {principalType === "org" && (
             <p className="font-mono text-[11px] text-ember">
-              ⚠ This makes {shareAll ? "ALL your evals" : "this eval"} readable
-              by EVERYONE in the organization.
+              ⚠ This makes {shareAll || shareAllOnly ? `ALL your ${label}s` : `this ${label}`}{" "}
+              readable by EVERYONE in the organization.
             </p>
           )}
 

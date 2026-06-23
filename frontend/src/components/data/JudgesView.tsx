@@ -2,15 +2,20 @@ import { useEffect, useState } from "react";
 import { deleteJudge, getJudge, listJudges } from "@/lib/data-api";
 import type { JudgeDetail, JudgeSummary } from "@/lib/data-types";
 import { formatTimestamp } from "@/lib/data-types";
+import ShareModal from "@/components/results/ShareModal";
 
 export default function JudgesView() {
   const [judges, setJudges] = useState<JudgeSummary[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedOwner, setSelectedOwner] = useState<string | null>(null);
   const [detail, setDetail] = useState<JudgeDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+
+  const isShared = !!selectedOwner;
 
   useEffect(() => {
     listJudges()
@@ -26,8 +31,8 @@ export default function JudgesView() {
     }
     setDetail(null);
     setConfirmingDelete(false);
-    getJudge(selectedId).then(setDetail).catch((e) => setError(String(e)));
-  }, [selectedId]);
+    getJudge(selectedId, selectedOwner).then(setDetail).catch((e) => setError(String(e)));
+  }, [selectedId, selectedOwner]);
 
   async function confirmDelete() {
     if (!selectedId) return;
@@ -73,9 +78,12 @@ export default function JudgesView() {
               {judges.map((j, idx) => {
                 const active = selectedId === j.id;
                 return (
-                  <li key={j.id}>
+                  <li key={`${j.owner ?? ""}:${j.id}`}>
                     <button
-                      onClick={() => setSelectedId(j.id)}
+                      onClick={() => {
+                        setSelectedId(j.id);
+                        setSelectedOwner(j.owner ?? null);
+                      }}
                       className={`group flex w-full items-baseline gap-3 border-b border-rule-soft border-l-2 px-4 py-3 text-left transition-colors ${
                         active
                           ? "border-l-ember bg-ink-raised"
@@ -90,8 +98,16 @@ export default function JudgesView() {
                         {(judges.length - idx).toString().padStart(3, "0")}
                       </span>
                       <div className="min-w-0 flex-1">
-                        <div className={`truncate text-[13px] leading-tight ${active ? "text-bone" : "text-bone-dim"}`}>
-                          {j.name || "Untitled judge"}
+                        <div className={`flex items-baseline gap-2 truncate text-[13px] leading-tight ${active ? "text-bone" : "text-bone-dim"}`}>
+                          <span className="truncate">{j.name || "Untitled judge"}</span>
+                          {j.shared && (
+                            <span
+                              title={`Shared by ${j.owner}`}
+                              className="shrink-0 rounded-sm border border-rule px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-eyebrow text-bone-mute"
+                            >
+                              shared
+                            </span>
+                          )}
                         </div>
                         <div className="mt-1 flex items-baseline gap-2 font-mono text-[10px] uppercase tracking-eyebrow text-bone-mute">
                           <span>{j.domain}</span>
@@ -125,8 +141,21 @@ export default function JudgesView() {
                 <span className="mx-2" aria-hidden>·</span>
                 <span>Created {formatTimestamp(detail.created_at)}</span>
               </p>
+              {isShared && (
+                <p className="mt-2 font-mono text-[11px] text-bone-mute">
+                  Shared by <span className="text-bone-dim">{selectedOwner}</span> · read-only
+                </p>
+              )}
               <div className="mt-4 flex items-center gap-3">
-                {confirmingDelete ? (
+                {!isShared && (
+                  <button
+                    onClick={() => setShareOpen(true)}
+                    className="eyebrow inline-flex items-center gap-2 border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone-dim"
+                  >
+                    <span className="font-mono">⤷</span> Share
+                  </button>
+                )}
+                {!isShared && (confirmingDelete ? (
                   <>
                     <button
                       onClick={confirmDelete}
@@ -149,9 +178,17 @@ export default function JudgesView() {
                   >
                     × Delete judge
                   </button>
-                )}
+                ))}
               </div>
             </div>
+            {shareOpen && selectedId && (
+              <ShareModal
+                resourceId={selectedId}
+                apiBase="/api/judges"
+                label="judge"
+                onClose={() => setShareOpen(false)}
+              />
+            )}
 
             <ul className="reveal stagger-1">
               {criteria.map((c, i) => (

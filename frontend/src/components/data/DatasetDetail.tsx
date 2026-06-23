@@ -7,16 +7,22 @@ import {
   getDataset,
   patchDataset,
 } from "@/lib/data-api";
+import ShareModal from "@/components/results/ShareModal";
 
 interface Props {
   datasetId: string;
+  // Owner of a shared dataset (absent/own → editable). When set, the view is
+  // read-only and reads are scoped to the owner via the resolver.
+  owner?: string | null;
   onRenamed: (id: string, name: string) => void;
   onDeleted: (id: string) => void;
 }
 
 const PAGE_SIZE = 50;
 
-export default function DatasetDetailView({ datasetId, onRenamed, onDeleted }: Props) {
+export default function DatasetDetailView({ datasetId, owner, onRenamed, onDeleted }: Props) {
+  const isShared = !!owner;
+  const [shareOpen, setShareOpen] = useState(false);
   const [detail, setDetail] = useState<DatasetDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -40,7 +46,7 @@ export default function DatasetDetailView({ datasetId, onRenamed, onDeleted }: P
     let cancelled = false;
     setLoading(true);
     setError(null);
-    getDataset(datasetId, offset, PAGE_SIZE)
+    getDataset(datasetId, offset, PAGE_SIZE, owner)
       .then((d) => {
         if (!cancelled) {
           setDetail(d);
@@ -56,7 +62,7 @@ export default function DatasetDetailView({ datasetId, onRenamed, onDeleted }: P
     return () => {
       cancelled = true;
     };
-  }, [datasetId, offset]);
+  }, [datasetId, offset, owner]);
 
   if (loading && !detail) {
     return (
@@ -163,7 +169,7 @@ export default function DatasetDetailView({ datasetId, onRenamed, onDeleted }: P
       <div className="reveal border-b border-rule pb-6">
         <p className="eyebrow">Dataset</p>
 
-        {renaming ? (
+        {renaming && !isShared ? (
           <div className="mt-2 flex items-baseline gap-3">
             <input
               autoFocus
@@ -189,6 +195,10 @@ export default function DatasetDetailView({ datasetId, onRenamed, onDeleted }: P
               Cancel
             </button>
           </div>
+        ) : isShared ? (
+          <h2 className="font-display mt-2 text-3xl leading-tight text-bone">
+            {detail.name || "Untitled dataset"}
+          </h2>
         ) : (
           <h2
             className="font-display mt-2 cursor-text text-3xl leading-tight text-bone hover:text-ember"
@@ -197,6 +207,11 @@ export default function DatasetDetailView({ datasetId, onRenamed, onDeleted }: P
           >
             {detail.name || "Untitled dataset"}
           </h2>
+        )}
+        {isShared && (
+          <p className="mt-2 font-mono text-[11px] text-bone-mute">
+            Shared by <span className="text-bone-dim">{owner}</span> · read-only
+          </p>
         )}
 
         <p className="mt-3 font-mono text-[11px] uppercase tracking-eyebrow text-bone-mute">
@@ -221,7 +236,15 @@ export default function DatasetDetailView({ datasetId, onRenamed, onDeleted }: P
           >
             ↓ Export CSV
           </a>
-          {confirmingDelete ? (
+          {!isShared && (
+            <button
+              onClick={() => setShareOpen(true)}
+              className="eyebrow inline-flex items-center gap-2 border border-rule px-3 py-1.5 transition-colors hover:border-bone-mute hover:text-bone-dim"
+            >
+              <span className="font-mono">⤷</span> Share
+            </button>
+          )}
+          {!isShared && (confirmingDelete ? (
             <>
               <button
                 onClick={confirmDelete}
@@ -244,9 +267,17 @@ export default function DatasetDetailView({ datasetId, onRenamed, onDeleted }: P
             >
               × Delete dataset
             </button>
-          )}
+          ))}
         </div>
       </div>
+      {shareOpen && (
+        <ShareModal
+          resourceId={datasetId}
+          apiBase="/api/datasets"
+          label="dataset"
+          onClose={() => setShareOpen(false)}
+        />
+      )}
 
       <ul className="reveal stagger-1">
         {detail.tests.map((t, i) => {
@@ -264,7 +295,7 @@ export default function DatasetDetailView({ datasetId, onRenamed, onDeleted }: P
                   Q{(offset + i + 1).toString().padStart(3, "0")}
                 </span>
                 <div className="flex items-baseline gap-2">
-                  {isEditing ? (
+                  {isShared ? null : isEditing ? (
                     <>
                       <button
                         onClick={saveEdit}

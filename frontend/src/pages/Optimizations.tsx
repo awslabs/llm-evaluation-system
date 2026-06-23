@@ -11,9 +11,16 @@ export default function OptimizationsPage() {
   // ?id= sync and back/forward natively.
   const [searchParams, setSearchParams] = useSearchParams();
   const selectedId = searchParams.get("id");
+  // owner travels in the URL so a shared optimization's reads stay authorized
+  // across refresh/deep-link (mirrors Results.tsx).
+  const selectedOwner = searchParams.get("owner");
 
-  const handleSelect = (id: string | null) => {
-    setSearchParams(id ? { id } : {});
+  const handleSelect = (id: string | null, owner?: string) => {
+    if (!id) {
+      setSearchParams({});
+      return;
+    }
+    setSearchParams(owner ? { id, owner } : { id });
   };
 
   useEffect(() => {
@@ -46,7 +53,7 @@ export default function OptimizationsPage() {
 
         <div className="flex-1 overflow-hidden">
           {selectedId ? (
-            <OptimizationDetail optimizationId={selectedId} />
+            <OptimizationDetail optimizationId={selectedId} owner={selectedOwner} />
           ) : (
             <div className="flex h-full items-center justify-center px-8">
               <div className="max-w-md text-center">

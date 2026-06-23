@@ -91,6 +91,43 @@ async def get_current_user_id(request: Request) -> str:
     return user_id
 
 
+async def _merge_shared_resources(user_id: str, resource_type: str, load_owned):
+    """Return rows of `resource_type` shared WITH `user_id` (excluding own),
+    each tagged with owner + shared=True. `load_owned(owner)` returns that
+    owner's rows (each having an 'id'); we include only granted ids (or all,
+    for a share-all grant). Shared by every sharing-enabled list endpoint so
+    the merge logic lives in one place. Best-effort: failures yield [].
+    """
+    from backend.core import sharing
+    from backend.api.sharing_routes import db as _shared_db
+    out = []
+    try:
+        scopes = await sharing.list_shared_scopes(_shared_db(), user_id, resource_type)
+    except Exception as e:
+        logger.warning(f"[ACCESS] shared {resource_type} scopes failed for {user_id}: {e}")
+        return out
+    owners: dict = {}
+    share_all: set = set()
+    for s in scopes:
+        if s["groupId"] is None:
+            share_all.add(s["ownerId"])
+        owners.setdefault(s["ownerId"], set()).add(s["groupId"])
+    for owner in set(list(owners) + list(share_all)):
+        try:
+            rows = load_owned(owner)
+        except Exception:
+            continue
+        allow_all = owner in share_all
+        allowed_ids = owners.get(owner, set())
+        for row in rows:
+            if allow_all or row.get("id") in allowed_ids:
+                tagged = dict(row)
+                tagged["owner"] = owner
+                tagged["shared"] = True
+                out.append(tagged)
+    return out
+
+
 # Active background tasks for agent processing (keyed by session_id)
 # These run to completion even if client disconnects.
 #
@@ -326,6 +363,15 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Share-management routers for dataset/judge/document. Registered HERE (before
+# the inline `/api/datasets/{dataset_id}` etc. routes below) so the static
+# `/shares` paths win over the greedy dynamic `{id}` segment — FastAPI matches
+# routes in registration order. See backend/api/sharing_routes.py.
+from backend.api.sharing_routes import make_share_router as _make_share_router  # noqa: E402
+app.include_router(_make_share_router("dataset"), prefix="/api/datasets")
+app.include_router(_make_share_router("judge"), prefix="/api/judges")
+app.include_router(_make_share_router("document"), prefix="/api/documents")
 
 
 class FileAttachment(BaseModel):
@@ -1551,18 +1597,28 @@ async def confirm_s3_upload(
 
 @app.get("/api/documents/list")
 async def list_documents(user_id: str = Depends(get_current_user_id)):
-    """List all documents for the authenticated user.
+    """List the user's documents + any shared with them.
 
-    Returns documents from S3 if enabled, otherwise from local storage.
+    Documents are path-keyed (no opaque id), so per-document grants are fragile
+    (rename changes the key); share-all is the supported unit. Shared docs are
+    tagged with owner + `id`=path so the merge helper and frontend can handle
+    them uniformly. Returns from S3 if enabled, else local storage.
     """
-    if is_s3_enabled():
-        documents = list_user_s3_documents(user_id)
-        return {"documents": documents, "storage": "s3"}
-    else:
-        from eval_mcp.core.user_storage import list_user_document_paths
-        paths = list_user_document_paths(user_id)
-        documents = [{"path": p} for p in paths]
-        return {"documents": documents, "storage": "disk"}
+    def _load(owner: str):
+        if is_s3_enabled():
+            docs = list_user_s3_documents(owner)
+        else:
+            from eval_mcp.core.user_storage import list_user_document_paths
+            docs = [{"path": p} for p in list_user_document_paths(owner)]
+        # Normalize: the merge helper keys on `id`; documents use their path.
+        for d in docs:
+            d.setdefault("id", d.get("path"))
+        return docs
+
+    storage = "s3" if is_s3_enabled() else "disk"
+    documents = _load(user_id)
+    documents.extend(await _merge_shared_resources(user_id, "document", _load))
+    return {"documents": documents, "storage": storage}
 
 
 @app.get("/api/auth/user")
@@ -1622,16 +1678,18 @@ async def list_datasets(
     search: str = "",
     user_id: str = Depends(get_current_user_id),
 ):
-    """List the authenticated user's datasets without test payloads (cheap)."""
+    """List the user's datasets + any shared with them, without test payloads."""
     from eval_mcp.core.user_storage import list_datasets_from_db
 
+    def _strip(entries):
+        return [{k: v for k, v in e.items() if k != "tests"} for e in entries]
+
     try:
-        entries = list_datasets_from_db(user_id, search)
-        # Strip the heavy `tests` field — the list view only needs metadata.
-        summaries = [
-            {k: v for k, v in e.items() if k != "tests"}
-            for e in entries
-        ]
+        summaries = _strip(list_datasets_from_db(user_id, search))
+        summaries.extend(await _merge_shared_resources(
+            user_id, "dataset",
+            lambda owner: _strip(list_datasets_from_db(owner, search)),
+        ))
         return {"datasets": summaries}
     except Exception:
         _, safe_msg = _user_safe_error("list_datasets endpoint")
@@ -1643,13 +1701,17 @@ async def get_dataset_detail(
     dataset_id: str,
     offset: int = 0,
     limit: int = 50,
+    owner: Optional[str] = None,
     user_id: str = Depends(get_current_user_id),
 ):
-    """Get a dataset with a windowed slice of its tests."""
+    """Get a dataset with a windowed slice of its tests. `owner` (a shared-row
+    hint) is re-authorized via the resolver before any cross-user read."""
+    from backend.api.sharing_routes import resolve_owner
     from eval_mcp.core.user_storage import get_dataset_from_db
 
     try:
-        data = get_dataset_from_db(user_id, dataset_id)
+        owner_id = await resolve_owner(user_id, dataset_id, owner, "dataset")
+        data = get_dataset_from_db(owner_id, dataset_id)
         if not data:
             raise HTTPException(status_code=404, detail="Dataset not found")
 
@@ -1785,19 +1847,25 @@ async def list_judges(
 ):
     from eval_mcp.core.user_storage import list_judges_from_db
 
-    try:
-        entries = list_judges_from_db(user_id, search)
-        # Shape the list view to what the UI needs (omit full config body).
-        summaries = []
+    def _shape(entries):
+        out = []
         for e in entries:
             cfg = e.get("config") or {}
-            summaries.append({
+            out.append({
                 "id": e["id"],
                 "name": e.get("name", ""),
                 "domain": cfg.get("domain", "general"),
                 "criteria": [c.get("name") for c in cfg.get("criteria", [])],
                 "created_at": e.get("created_at"),
             })
+        return out
+
+    try:
+        summaries = _shape(list_judges_from_db(user_id, search))
+        summaries.extend(await _merge_shared_resources(
+            user_id, "judge",
+            lambda owner: _shape(list_judges_from_db(owner, search)),
+        ))
         return {"judges": summaries}
     except Exception:
         _, safe_msg = _user_safe_error("list_judges endpoint")
@@ -1807,12 +1875,15 @@ async def list_judges(
 @app.get("/api/judges/{judge_id}")
 async def get_judge_detail(
     judge_id: str,
+    owner: Optional[str] = None,
     user_id: str = Depends(get_current_user_id),
 ):
+    from backend.api.sharing_routes import resolve_owner
     from eval_mcp.core.user_storage import get_judge_from_db
 
     try:
-        data = get_judge_from_db(user_id, judge_id)
+        owner_id = await resolve_owner(user_id, judge_id, owner, "judge")
+        data = get_judge_from_db(owner_id, judge_id)
         if not data:
             raise HTTPException(status_code=404, detail="Judge not found")
         return data
@@ -1856,6 +1927,9 @@ from inspect_ai._view._dist import resolve_dist_directory
 app.include_router(compare_router, prefix="/api/compare")
 app.include_router(optimizations_router, prefix="/api/optimizations")
 app.include_router(teams_router, prefix="/api/teams")
+# NOTE: dataset/judge/document share routers are registered earlier (right
+# after the CORS middleware) so their static /shares paths beat the dynamic
+# /{id} detail routes in match order.
 
 _log_dir = os.environ.get("INSPECT_LOG_DIR", os.environ.get("USER_STORAGE_BASE", "backend/users"))
 _fs = filesystem(_log_dir)

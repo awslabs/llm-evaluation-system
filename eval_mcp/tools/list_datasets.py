@@ -5,7 +5,7 @@ from typing import Any, Dict, List
 
 from mcp.types import TextContent
 
-from eval_mcp.core.user_storage import list_datasets_from_db
+from eval_mcp.core.user_storage import list_datasets_from_db, merge_shared_rows
 
 
 def _dataset_preview(dataset: Dict[str, Any]) -> Dict[str, Any]:
@@ -57,6 +57,10 @@ async def handle_list_datasets(args: Dict[str, Any]) -> List[TextContent]:
             ]
 
         all_datasets = list_datasets_from_db(user_id, search_term)
+        all_datasets.extend(merge_shared_rows(
+            user_id, args.get("shared_scopes"),
+            lambda owner: list_datasets_from_db(owner, search_term),
+        ))
         total = len(all_datasets)
         page = all_datasets[offset : offset + limit]
         has_more = offset + len(page) < total

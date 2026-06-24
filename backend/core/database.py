@@ -7,6 +7,7 @@ Supports two authentication modes controlled by POSTGRES_USE_IAM_AUTH:
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -621,6 +622,64 @@ class Database:
             # show idle than to hang the UI polling forever.
             logger.warning(f"Failed to check session_active for {session_id}: {e}")
             return False
+
+    # ------------------------------------------------------------------
+    # Postgres LISTEN/NOTIFY — cross-pod SSE stream relay.
+    #
+    # Producer (run_agent_background): calls notify_session_event() per
+    # SSE event. NOTIFY is fire-and-forget and non-transactional; it
+    # propagates to all connections currently LISTENing on the channel.
+    #
+    # Consumer (chat_stream reconnect path): calls connect_for_listen()
+    # to get a *dedicated* connection (NOT from the pool — LISTEN holds
+    # the connection for the lifetime of the SSE response), registers a
+    # callback that feeds an asyncio.Queue, and awaits queue items to
+    # yield as SSE events. On disconnect the connection is closed.
+    #
+    # Channel naming: "sess_<session_id>" — one channel per active chat
+    # turn. Postgres channels are cheap (just a name) and vanish when
+    # there are no listeners.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _notify_channel(session_id: str) -> str:
+        """Stable Postgres channel name for a session."""
+        return f"sess_{session_id}"
+
+    async def notify_session_event(self, session_id: str, event: dict) -> None:
+        """Publish one SSE event to all pods listening on this session.
+
+        NOTIFY is fire-and-forget — if no pod is listening the message is
+        silently dropped (expected when the client is on the same pod and
+        consuming the in-memory queue directly). Non-fatal on any error.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            payload = json.dumps(event)
+            channel = self._notify_channel(session_id)
+            async with self._pool.acquire() as conn:
+                await conn.execute(f"NOTIFY {channel}, $1", payload)
+        except Exception as e:
+            logger.debug(f"notify_session_event failed for {session_id}: {e}")
+
+    async def connect_for_listen(self) -> asyncpg.Connection:
+        """Open a dedicated connection for LISTEN, using the same auth as the pool.
+
+        Callers MUST close the returned connection when done — it is NOT
+        managed by the pool. Holding it in the pool would starve other
+        queries (LISTEN holds the connection for the full SSE lifetime).
+        """
+        connect_kwargs: dict = {}
+        if self.use_iam_auth:
+            connect_kwargs["ssl"] = "require"
+        return await asyncpg.connect(
+            host=self.host,
+            port=self.port,
+            database=self.database,
+            user=self.user,
+            password=self._get_password(),
+            **connect_kwargs,
+        )
 
     # ------------------------------------------------------------------
     # Eval sharing: grants + teams. See docs/EVAL_SHARING_DESIGN.md.

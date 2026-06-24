@@ -39,7 +39,10 @@ dependencies = [
     # natively; we just need the OpenAI SDK plus the token generator, which
     # mints short-lived Bedrock bearer tokens from the ambient AWS credential
     # chain (IAM role / SSO / profile) so no static API key is required.
-    "openai>=1.99.0",
+    # Floor is >=2.40.0: inspect-ai enforces that minimum at runtime for its
+    # OpenAI provider (MIN_VERSION = "2.40.0") but only declares it in a dev
+    # extra, so a lower floor here lets the resolver pick an incompatible wheel.
+    "openai>=2.40.0",
     "aws-bedrock-token-generator>=1.1.0",
     "click>=8.1.7",
     "rich>=13.7.0",

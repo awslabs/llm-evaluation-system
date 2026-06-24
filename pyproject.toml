@@ -33,6 +33,14 @@ dependencies = [
     # benchmarks (SWE-bench, Cybench) still need their own extras + a sandbox.
     "inspect_evals>=0.14.1",
     "boto3>=1.35.0",
+    # OpenAI models on Amazon Bedrock Mantle (GPT-5.4/5.5) — served on the
+    # bedrock-mantle endpoint via an OpenAI-compatible Responses API, NOT
+    # bedrock-runtime/Converse. Inspect resolves `openai/bedrock/<model>`
+    # natively; we just need the OpenAI SDK plus the token generator, which
+    # mints short-lived Bedrock bearer tokens from the ambient AWS credential
+    # chain (IAM role / SSO / profile) so no static API key is required.
+    "openai>=1.99.0",
+    "aws-bedrock-token-generator>=1.1.0",
     "click>=8.1.7",
     "rich>=13.7.0",
     "prompt-toolkit>=3.0.43",
@@ -118,8 +126,8 @@ where = ["."]
 include = ["backend*", "eval_mcp*"]
 
 [tool.setuptools.package-data]
-eval_mcp = ["viewer_static/**/*", "provider_pricing.json", "INSTALL.md"]
-"eval_mcp.core" = ["provider_pricing.json"]
+eval_mcp = ["viewer_static/**/*", "INSTALL.md"]
+"eval_mcp.core" = ["litellm_pricing_snapshot.json"]
 
 [tool.black]
 line-length = 100

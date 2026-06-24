@@ -54,9 +54,24 @@ def _parse_env_file(path: Path) -> dict[str, str]:
     return result
 
 
+def _aws_credentials_available() -> bool:
+    """True if the ambient AWS credential chain can be resolved.
+
+    Used to gate AWS-credential-based providers (Bedrock Mantle) that have no
+    API key. Cheap and offline — botocore just walks the credential providers
+    (env, profile, SSO, instance/role) without making a network call.
+    """
+    try:
+        import boto3
+
+        return boto3.Session().get_credentials() is not None
+    except Exception:
+        return False
+
+
 def _refresh_keys_from_file() -> None:
     """Merge .env.keys entries into os.environ if the file has changed."""
-    allowed = {cfg["env_var"] for cfg in EXTERNAL_PROVIDERS.values()}
+    allowed = {cfg["env_var"] for cfg in EXTERNAL_PROVIDERS.values() if cfg["env_var"]}
     for path in _candidate_keys_files():
         try:
             mtime = path.stat().st_mtime
@@ -72,10 +87,31 @@ def _refresh_keys_from_file() -> None:
         return
 
 # Registry of external providers. Each entry maps a provider name to:
-#   env_var:      environment variable that must be set to enable this provider
+#   env_var:      environment variable that must be set to enable this provider.
+#                 None means the provider is gated by ambient AWS credentials
+#                 instead of an API key (see "bedrock-mantle" below).
 #   display_name: human-readable name for UI/agent display
 #   models:       curated list of models — IDs use Inspect AI's provider/model format
 EXTERNAL_PROVIDERS: dict[str, dict[str, Any]] = {
+    # OpenAI frontier models hosted on Amazon Bedrock via the Mantle endpoint
+    # (bedrock-mantle, OpenAI-compatible Responses API). These are NOT on
+    # bedrock-runtime/Converse, so they never appear in list_foundation_models —
+    # they must be surfaced explicitly. Inspect resolves the `openai/bedrock/<id>`
+    # string natively: it derives the bedrock-mantle URL, mints a short-lived
+    # bearer token from the ambient AWS credentials, and routes through the
+    # Responses API. Auth is AWS creds (the same chain the rest of the app uses),
+    # so there's no API key — env_var is None and availability follows from
+    # having AWS credentials. Whether the account is actually entitled (C-score /
+    # model access) is proven by the run-time validation in run_eval, matching
+    # our "no allowlist; validate at run time" approach for Bedrock models.
+    "bedrock-mantle": {
+        "env_var": None,
+        "display_name": "OpenAI on Bedrock (Mantle)",
+        "models": [
+            {"id": "openai/bedrock/gpt-5.5", "name": "GPT-5.5 (Bedrock)"},
+            {"id": "openai/bedrock/gpt-5.4", "name": "GPT-5.4 (Bedrock)"},
+        ],
+    },
     "openai": {
         "env_var": "OPENAI_API_KEY",
         "display_name": "OpenAI",
@@ -165,14 +201,22 @@ def detect_available_providers() -> list[dict[str, Any]]:
     _refresh_keys_from_file()
     available = []
     for name, config in EXTERNAL_PROVIDERS.items():
-        key = os.environ.get(config["env_var"], "")
-        if key:  # non-empty string
+        if _provider_enabled(config):
             available.append({
                 "name": name,
                 "display_name": config["display_name"],
                 "model_count": len(config["models"]),
             })
     return available
+
+
+def _provider_enabled(config: dict[str, Any]) -> bool:
+    """Whether a provider is usable: API key set, or AWS creds for key-less ones."""
+    env_var = config["env_var"]
+    if env_var:
+        return bool(os.environ.get(env_var, ""))
+    # Key-less provider (Bedrock Mantle) — gated by ambient AWS credentials.
+    return _aws_credentials_available()
 
 
 def get_external_models(provider: str = "all") -> list[dict[str, Any]]:
@@ -192,9 +236,9 @@ def get_external_models(provider: str = "all") -> list[dict[str, Any]]:
         if provider != "all" and provider != name:
             continue
 
-        # Skip if API key not set
-        key = os.environ.get(config["env_var"], "")
-        if not key:
+        # Skip if the provider isn't usable (no API key, or no AWS creds for
+        # the key-less Bedrock Mantle provider)
+        if not _provider_enabled(config):
             continue
 
         for model in config["models"]:

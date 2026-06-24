@@ -137,6 +137,9 @@ async def _read_log_headers(log_dir: str) -> list[dict]:
                             "input_tokens": mu.input_tokens,
                             "output_tokens": mu.output_tokens,
                             "total_tokens": mu.total_tokens,
+                            # Cache tiers feed cache-aware pricing downstream.
+                            "cache_write_tokens": getattr(mu, "input_tokens_cache_write", None) or 0,
+                            "cache_read_tokens": getattr(mu, "input_tokens_cache_read", None) or 0,
                         }
                 entry["model_usage"] = usage
                 if log.stats.started_at:
@@ -597,10 +600,14 @@ def _build_detail_from_logs(
                 inp = usage["input_tokens"]
                 out = usage["output_tokens"]
                 tot = usage["total_tokens"]
+                cw = usage.get("cache_write_tokens", 0)
+                cr = usage.get("cache_read_tokens", 0)
                 agent_input += inp
                 agent_output += out
                 agent_tokens += tot
-                model_cost = calculate_cost(model_name, inp, out)
+                model_cost = calculate_cost(
+                    model_name, inp, out, cache_write_tokens=cw, cache_read_tokens=cr
+                )
                 if model_cost is not None:
                     agent_cost += model_cost
                 per_model[model_name] = {
@@ -618,14 +625,22 @@ def _build_detail_from_logs(
             total_input = 0
             total_output = 0
             total_tokens = 0
+            total_cache_write = 0
+            total_cache_read = 0
             for usage in log_header["model_usage"].values():
                 total_input += usage.get("input_tokens", 0)
                 total_output += usage.get("output_tokens", 0)
                 total_tokens += usage.get("total_tokens", 0)
+                total_cache_write += usage.get("cache_write_tokens", 0)
+                total_cache_read += usage.get("cache_read_tokens", 0)
             stats[stat_key]["input_tokens"] = total_input
             stats[stat_key]["output_tokens"] = total_output
             stats[stat_key]["total_tokens"] = total_tokens
-            stats[stat_key]["cost"] = calculate_cost(raw_model, total_input, total_output)
+            stats[stat_key]["cost"] = calculate_cost(
+                raw_model, total_input, total_output,
+                cache_write_tokens=total_cache_write,
+                cache_read_tokens=total_cache_read,
+            )
 
             if latency_seconds and latency_seconds > 0:
                 stats[stat_key]["tokensPerSecond"] = round(total_output / latency_seconds, 1)

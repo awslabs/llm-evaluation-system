@@ -19,7 +19,8 @@ Two deployables that share some code:
 | `eval_mcp/tools/` | Tool handlers (QA gen, judge, config, run, …) |
 | `eval_mcp/core/bedrock_client.py` | Bedrock client + cross-region inference + API-key auth |
 | `eval_mcp/core/judge_config.py` | Default judge models and criteria |
-| `eval_mcp/provider_pricing.json` | Source of truth for model pricing — required when adding a model |
+| `eval_mcp/core/pricing.py` | Live model pricing from LiteLLM (24h cache → vendored snapshot fallback); no hand-maintained price table |
+| `eval_mcp/core/litellm_pricing_snapshot.json` | Vendored offline fallback for pricing; refresh with `make sync-pricing` |
 | `backend/core/agent.py` | EKS web app's agent system prompt + loop (the MCP itself doesn't host an agent) |
 | `Makefile` | Local dev commands (`make dev`, `make logs`, `make restart`, `make stop`, `make release`) |
 
@@ -41,11 +42,17 @@ Point Claude Code at your editable install by setting `command` in `~/.claude.js
 ### Tests
 
 ```bash
+uv pip install -e ".[backend]"                         # one-time: full-suite deps (asyncpg)
 .venv/bin/pytest tests/                                # full suite
 .venv/bin/pytest tests/test_run_eval.py                # one file
 .venv/bin/pytest tests/test_run_eval.py::test_name     # one test
 .venv/bin/pytest -k "qa_allocation"                    # by keyword
 ```
+
+The full suite needs the `[backend]` extra (`asyncpg`) for the web-app `test_data_api`
+tests — without it those error at collection, which also takes down unrelated tests in
+the same session. `inspect_evals` is a core dep (used by `test_benchmarks`); if it's
+missing, `uv pip install -e .` again to resync.
 
 Pytest is **only useful for narrow deterministic logic** (parsing, validation, regex). End-to-end coverage requires running the MCP from Claude Code — mocks of Bedrock/subprocesses/user-dirs produce false greens. See `docs/DEVELOPMENT.md` section 2.
 
@@ -106,7 +113,14 @@ Data-layer outputs flow into platform-layer via `-var=` flags (NOT `terraform_re
 
 ### Adding a model
 
-Touch both: `eval_mcp/tools/bedrock_models.py` (add to `SUPPORTED_MODELS`) AND `eval_mcp/provider_pricing.json` (per-1M-token pricing). Missing pricing entries silently break cost reporting downstream.
+Nothing to do. There is no allowlist and no hand-maintained price table — a newly
+launched Bedrock model surfaces automatically the moment AWS enables it on the
+account (`list_bedrock_models` returns everything text-capable and ON_DEMAND-invokable),
+and its pricing resolves live from LiteLLM (`eval_mcp/core/pricing.py`). Compatibility
+is gated at run time by the Converse smoke test in `run_eval.validate_providers`, which
+fails fast with an actionable message if a chosen model doesn't work with the eval
+pipeline. If you ever need the offline fallback prices to be more current, run
+`make sync-pricing` and review the diff.
 
 ### Adding a tool
 

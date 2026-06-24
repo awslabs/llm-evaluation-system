@@ -4,11 +4,16 @@ Canonical model discovery for Bedrock + external providers.
 Single source of truth — the MCP tool wrappers in eval_mcp/server.py just
 delegate here. Do not re-fork this logic into other modules.
 
-Why a curated SUPPORTED_MODELS allowlist: new Bedrock models occasionally
-ship without Converse-API support or with payload quirks that break the
-eval pipeline. Keeping the set explicit means a human acknowledges each
-new model before agents start selecting it. Maintenance cost is real but
-intentional — add new entries below when validating a new release.
+No allowlist: we surface *every* text-capable model that AWS reports as
+available in the account (inference profiles + foundation models). There is no
+hand-maintained list to update — a newly launched model (e.g. a future Opus 5)
+shows up automatically the moment AWS enables it. The historical concern (a
+model that ships without Converse-API support) is handled where it belongs:
+``run_eval.validate_providers`` runs a real Converse smoke test against each
+chosen model before an eval starts and fails fast with an actionable message,
+and pricing resolves live from LiteLLM (see core/pricing.py). So a broken or
+unpriced model is caught at run time with a clear error rather than silently
+hidden — and the maintenance burden is gone.
 """
 
 import os
@@ -24,99 +29,6 @@ from eval_mcp.tools.external_providers import (
 
 region = os.environ.get("AWS_REGION", "us-west-2")
 
-# Curated models supported for evaluations. Updated Mar 2026.
-# Base IDs for models invokable directly + us. prefixed IDs for models
-# requiring cross-region inference profiles (newer Anthropic/Amazon/Meta).
-SUPPORTED_MODELS = {
-    # Amazon Nova
-    "amazon.nova-micro-v1:0", "amazon.nova-lite-v1:0",
-    "amazon.nova-pro-v1:0", "amazon.nova-premier-v1:0",
-    "amazon.nova-2-lite-v1:0",
-    # Anthropic Claude (base IDs listed for matching; require us. prefix to invoke)
-    "anthropic.claude-opus-4-6-v1",
-    "anthropic.claude-opus-4-5-20251101-v1:0", "anthropic.claude-opus-4-1-20250805-v1:0",
-    "anthropic.claude-opus-4-20250514-v1:0",
-    "anthropic.claude-sonnet-4-6",
-    "anthropic.claude-sonnet-4-5-20250929-v1:0", "anthropic.claude-sonnet-4-20250514-v1:0",
-    "anthropic.claude-haiku-4-5-20251001-v1:0",
-    "anthropic.claude-3-7-sonnet-20250219-v1:0",
-    "anthropic.claude-3-5-haiku-20241022-v1:0",
-    "anthropic.claude-3-opus-20240229-v1:0", "anthropic.claude-3-haiku-20240307-v1:0",
-    # Cohere
-    "cohere.command-r-plus-v1:0", "cohere.command-r-v1:0",
-    # DeepSeek
-    "deepseek.r1-v1:0", "deepseek.v3-v1:0", "deepseek.v3.2",
-    # Google Gemma
-    "google.gemma-3-4b-it", "google.gemma-3-12b-it", "google.gemma-3-27b-it",
-    # Meta Llama
-    "meta.llama3-1-8b-instruct-v1:0", "meta.llama3-1-70b-instruct-v1:0",
-    "meta.llama3-1-405b-instruct-v1:0", "meta.llama3-2-3b-instruct-v1:0",
-    "meta.llama4-maverick-17b-instruct-v1:0", "meta.llama4-scout-17b-instruct-v1:0",
-    # MiniMax
-    "minimax.minimax-m2", "minimax.minimax-m2.1",
-    # Mistral
-    "mistral.mistral-7b-instruct-v0:2", "mistral.mixtral-8x7b-instruct-v0:1",
-    "mistral.mistral-large-2402-v1:0", "mistral.mistral-large-2407-v1:0",
-    "mistral.mistral-small-2402-v1:0",
-    "mistral.mistral-large-3-675b-instruct", "mistral.devstral-2-123b",
-    "mistral.magistral-small-2509",
-    "mistral.ministral-3-3b-instruct", "mistral.ministral-3-8b-instruct", "mistral.ministral-3-14b-instruct",
-    # Moonshot
-    "moonshot.kimi-k2-thinking", "moonshotai.kimi-k2.5",
-    # Nvidia Nemotron
-    "nvidia.nemotron-nano-9b-v2", "nvidia.nemotron-nano-12b-v2", "nvidia.nemotron-nano-3-30b",
-    # OpenAI GPT-OSS
-    "openai.gpt-oss-120b-1:0", "openai.gpt-oss-20b-1:0",
-    # Qwen
-    "qwen.qwen3-235b-a22b-2507-v1:0", "qwen.qwen3-32b-v1:0",
-    "qwen.qwen3-coder-30b-a3b-v1:0", "qwen.qwen3-coder-480b-a35b-v1:0",
-    # Writer Palmyra
-    "writer.palmyra-x4-v1:0", "writer.palmyra-x5-v1:0",
-    # Z.AI GLM
-    "zai.glm-4.7", "zai.glm-4.7-flash",
-    # --- Cross-region inference profiles ---
-    # us.
-    "us.amazon.nova-2-lite-v1:0", "us.amazon.nova-lite-v1:0",
-    "us.amazon.nova-micro-v1:0", "us.amazon.nova-premier-v1:0", "us.amazon.nova-pro-v1:0",
-    "us.anthropic.claude-opus-4-6-v1",
-    "us.anthropic.claude-opus-4-5-20251101-v1:0", "us.anthropic.claude-opus-4-1-20250805-v1:0",
-    "us.anthropic.claude-opus-4-20250514-v1:0",
-    "us.anthropic.claude-sonnet-4-6",
-    "us.anthropic.claude-sonnet-4-5-20250929-v1:0", "us.anthropic.claude-sonnet-4-20250514-v1:0",
-    "us.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "us.anthropic.claude-3-7-sonnet-20250219-v1:0",
-    "us.anthropic.claude-3-5-haiku-20241022-v1:0",
-    "us.anthropic.claude-3-opus-20240229-v1:0", "us.anthropic.claude-3-haiku-20240307-v1:0",
-    "us.deepseek.r1-v1:0",
-    "us.meta.llama3-1-8b-instruct-v1:0", "us.meta.llama3-1-70b-instruct-v1:0",
-    "us.meta.llama3-1-405b-instruct-v1:0",
-    "us.meta.llama3-2-1b-instruct-v1:0", "us.meta.llama3-2-3b-instruct-v1:0",
-    "us.meta.llama3-2-11b-instruct-v1:0", "us.meta.llama3-2-90b-instruct-v1:0",
-    "us.meta.llama3-3-70b-instruct-v1:0",
-    "us.meta.llama4-maverick-17b-instruct-v1:0", "us.meta.llama4-scout-17b-instruct-v1:0",
-    # eu.
-    "eu.amazon.nova-2-lite-v1:0", "eu.amazon.nova-lite-v1:0",
-    "eu.amazon.nova-micro-v1:0", "eu.amazon.nova-premier-v1:0", "eu.amazon.nova-pro-v1:0",
-    "eu.anthropic.claude-3-7-sonnet-20250219-v1:0",
-    "eu.anthropic.claude-3-haiku-20240307-v1:0", "eu.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "eu.anthropic.claude-opus-4-1-20250805-v1:0", "eu.anthropic.claude-opus-4-5-20251101-v1:0",
-    "eu.anthropic.claude-sonnet-4-20250514-v1:0", "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "eu.meta.llama3-2-1b-instruct-v1:0", "eu.meta.llama3-2-3b-instruct-v1:0",
-    "eu.meta.llama4-maverick-17b-instruct-v1:0", "eu.meta.llama4-scout-17b-instruct-v1:0",
-    # apac.
-    "apac.amazon.nova-2-lite-v1:0", "apac.amazon.nova-lite-v1:0",
-    "apac.amazon.nova-micro-v1:0", "apac.amazon.nova-premier-v1:0", "apac.amazon.nova-pro-v1:0",
-    "apac.anthropic.claude-3-haiku-20240307-v1:0",
-    "apac.anthropic.claude-haiku-4-5-20251001-v1:0", "apac.anthropic.claude-opus-4-1-20250805-v1:0",
-    "apac.anthropic.claude-opus-4-5-20251101-v1:0", "apac.anthropic.claude-sonnet-4-20250514-v1:0",
-    "apac.anthropic.claude-sonnet-4-5-20250929-v1:0",
-    "apac.meta.llama4-maverick-17b-instruct-v1:0", "apac.meta.llama4-scout-17b-instruct-v1:0",
-    # global.
-    "global.amazon.nova-2-lite-v1:0",
-    # us-gov.
-    "us-gov.anthropic.claude-3-haiku-20240307-v1:0",
-}
-
 
 def list_bedrock_models(
     provider: str = "all",
@@ -126,16 +38,22 @@ def list_bedrock_models(
     """
     Discover Bedrock models, dedup'd across inference profiles and foundation models.
 
-    Returns a dict (callers JSON-encode). Filtered against SUPPORTED_MODELS
-    so only entries a human has validated for the eval pipeline are surfaced.
+    Returns a dict (callers JSON-encode). Surfaces every text-capable model AWS
+    reports as available — no allowlist. Image/embedding models are filtered out
+    in text_only mode; a model's actual eval-pipeline compatibility is verified
+    by the Converse smoke test in run_eval.validate_providers at run time.
     """
     err = get_autodetect_error()
     if err is not None:
         return {"models": [], "count": 0, "error": str(err)}
     bedrock_client = create_boto3_bedrock_client('bedrock', region)
 
-    # Patterns to exclude for text_only mode
-    exclude_patterns = ['stability.', 'embed', 'upscale', 'inpaint', 'outpaint', 'image', 'pegasus']
+    # Patterns to exclude for text_only mode — non-text modalities and
+    # task-specific models that aren't chat/generation endpoints.
+    exclude_patterns = [
+        'stability.', 'embed', 'upscale', 'inpaint', 'outpaint', 'image',
+        'pegasus', 'rerank', 'sonic', 'vision', 'canvas', 'titan-tg',
+    ]
 
     # Track base model IDs (without regional prefix) to avoid duplicates
     # e.g., if we see us.anthropic.claude-*, we mark anthropic.claude-* as seen
@@ -161,7 +79,11 @@ def list_bedrock_models(
         return "unknown"
 
     def should_include(model_id: str, model_name: str, provider_filter: str) -> bool:
-        """Check if model should be included based on filters."""
+        """Check if model should be included based on filters.
+
+        No allowlist gate — only the text_only content filter and the optional
+        provider filter. Run-time Converse validation is the compatibility gate.
+        """
         # Skip non-text models if text_only
         if text_only and any(pat in model_id.lower() for pat in exclude_patterns):
             return False
@@ -169,10 +91,6 @@ def list_bedrock_models(
         # Filter by provider if specified
         provider_name = extract_provider_name(model_id)
         if provider_filter.lower() != "all" and provider_filter.lower() != provider_name.lower():
-            return False
-
-        # Only include supported models
-        if model_id not in SUPPORTED_MODELS:
             return False
 
         return True
@@ -216,6 +134,22 @@ def list_bedrock_models(
                 continue
 
             if not should_include(model_id, model_name, provider):
+                continue
+
+            # Without an allowlist we must trust AWS's capability metadata to
+            # avoid surfacing un-invokable base IDs. A foundation model is only
+            # directly usable when it supports ON_DEMAND inference; models that
+            # are INFERENCE_PROFILE-only (and lacked a profile above) or
+            # PROVISIONED-only can't be called as-is, so skip them.
+            inference_types = model.get('inferenceTypesSupported', [])
+            if inference_types and 'ON_DEMAND' not in inference_types:
+                continue
+            # Text output only (mirrors text_only intent using AWS's modalities).
+            output_modalities = model.get('outputModalities', [])
+            if text_only and output_modalities and 'TEXT' not in output_modalities:
+                continue
+            # Skip retired models.
+            if model.get('modelLifecycle', {}).get('status') == 'LEGACY':
                 continue
 
             seen_base_ids.add(base_id)

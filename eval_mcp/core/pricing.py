@@ -175,6 +175,16 @@ def _candidates(model_id: str) -> list[str]:
     """
     out: list[str] = [model_id]
 
+    # Bedrock Mantle (OpenAI frontier models): Inspect uses "openai/bedrock/<id>",
+    # LiteLLM keys it as "bedrock_mantle/openai.<id>" with DISTINCT pricing from
+    # the OpenAI-direct API (e.g. gpt-5.4 Mantle is $2.75/$16.5 vs $2.5/$15
+    # direct), so we must match the Mantle key — not fall through to bare gpt-5.4.
+    if model_id.startswith("openai/bedrock/"):
+        mantle_id = model_id[len("openai/bedrock/"):]
+        if not mantle_id.startswith("openai."):
+            mantle_id = f"openai.{mantle_id}"
+        out.append(f"bedrock_mantle/{mantle_id}")
+
     bare = model_id
     for pfx in _PROVIDER_PREFIXES:
         if bare.startswith(pfx):

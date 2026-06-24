@@ -66,6 +66,18 @@ def test_context_window_suffix_resolves(pricing):
     assert cost is not None and cost["input"] > 0
 
 
+def test_bedrock_mantle_distinct_pricing(pricing):
+    """Bedrock Mantle GPT-5.4 (openai/bedrock/...) must resolve the Mantle-specific
+    price (bedrock_mantle/openai.gpt-5.4), NOT the cheaper OpenAI-direct gpt-5.4."""
+    mantle = pricing.get_model_cost("openai/bedrock/gpt-5.4")
+    direct = pricing.get_model_cost("gpt-5.4")
+    assert mantle is not None and direct is not None
+    # Mantle is priced higher than the OpenAI-direct API.
+    assert mantle["input"] > direct["input"], (
+        f"Mantle should use its own (higher) pricing, got mantle={mantle} direct={direct}"
+    )
+
+
 def test_unknown_model_returns_none(pricing):
     """Unknown models return None (distinct from a $0 cost)."""
     assert pricing.get_model_cost("bedrock/totally.invented-model-v9:0") is None

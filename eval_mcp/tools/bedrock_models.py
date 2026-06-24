@@ -187,7 +187,14 @@ def list_bedrock_models(
             "limit": limit,
             "text_only": text_only,
         },
-        "note": "Shows inference profiles and foundation models. Use text_only=false to include image/embedding models.",
+        "note": (
+            "Shows standard Bedrock (Converse) inference profiles and foundation "
+            "models only. Use text_only=false to include image/embedding models. "
+            "IMPORTANT: this does NOT include OpenAI GPT-5.x models, which run on "
+            "the separate Bedrock Mantle endpoint — call list_available_models to "
+            "see those (e.g. openai/bedrock/gpt-5.4). Never tell a user a model is "
+            "unavailable based on this tool alone."
+        ),
     }
 
 

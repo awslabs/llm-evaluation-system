@@ -336,6 +336,18 @@ wheels = [
 ]
 
 [[package]]
+name = "aws-bedrock-token-generator"
+version = "1.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "botocore" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fb/39/cf1c2e12bc5a84af0f96a546481213f81fa6e7927d2bbabd81758c6558ca/aws_bedrock_token_generator-1.1.0.tar.gz", hash = "sha256:95ccb07f63a91ac486561f6df05cc4e04784c8ff5086dc687ed9c5fd3ab1b5ba", size = 19123, upload-time = "2025-07-29T19:53:19.511Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f9/fd/745ece98870c3824d294bcdce5dc5e15381188a41bc80832c246b205e40e/aws_bedrock_token_generator-1.1.0-py3-none-any.whl", hash = "sha256:bd12854f7c7e52dde5d980d369379f12d0cc5f0855099d87f38688b0f9de5cd4", size = 10291, upload-time = "2025-07-29T19:53:18.704Z" },
+]
+
+[[package]]
 name = "azure-ai-inference"
 version = "1.0.0b9"
 source = { registry = "https://pypi.org/simple" }
@@ -1601,6 +1613,7 @@ name = "llm-evaluation-system"
 source = { editable = "." }
 dependencies = [
     { name = "anyio" },
+    { name = "aws-bedrock-token-generator" },
     { name = "boto3" },
     { name = "click" },
     { name = "fastapi" },
@@ -1609,6 +1622,7 @@ dependencies = [
     { name = "inspect-ai" },
     { name = "inspect-evals" },
     { name = "mcp" },
+    { name = "openai" },
     { name = "opentelemetry-distro" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-instrumentation-botocore" },
@@ -1651,6 +1665,7 @@ requires-dist = [
     { name = "anthropic", marker = "extra == 'providers'", specifier = ">=0.80.0" },
     { name = "anyio", specifier = ">=4.0.0" },
     { name = "asyncpg", marker = "extra == 'backend'", specifier = ">=0.30.0" },
+    { name = "aws-bedrock-token-generator", specifier = ">=1.1.0" },
     { name = "azure-ai-inference", marker = "extra == 'providers'" },
     { name = "azure-identity", marker = "extra == 'providers'" },
     { name = "black", marker = "extra == 'dev'", specifier = ">=23.0.0" },
@@ -1666,6 +1681,7 @@ requires-dist = [
     { name = "inspect-k8s-sandbox", marker = "extra == 'k8s-sandbox'", specifier = ">=0.4.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.5.0" },
+    { name = "openai", specifier = ">=1.99.0" },
     { name = "openai", marker = "extra == 'providers'", specifier = ">=2.26.0" },
     { name = "opentelemetry-distro", specifier = ">=0.50b0" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = ">=1.30" },
@@ -3993,7 +4009,7 @@ name = "zipfile-zstd"
 version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "zstandard" },
+    { name = "zstandard", marker = "python_full_version < '3.14'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/f7/2a/2e0941bc0058d10ab37d8c578b94a19f611f6ae54f124140f2fb451f0932/zipfile-zstd-0.0.4.tar.gz", hash = "sha256:c1498e15b7922a3d1af0ea55df8b11b2af4e8f7e0e80e414e25d66899f7def89", size = 4603, upload-time = "2021-12-08T07:38:16.245Z" }
 wheels = [

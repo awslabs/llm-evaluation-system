@@ -193,6 +193,23 @@ resource "aws_iam_policy" "backend" {
         Resource = "*"
       },
       {
+        # Bedrock Mantle — OpenAI frontier models (GPT-5.4/5.5) are served on the
+        # bedrock-mantle endpoint (OpenAI-compatible Responses API), not
+        # bedrock-runtime. Inspect mints a short-lived bearer token from this
+        # role's credentials and calls Mantle (bedrock-mantle:CreateInference /
+        # CallWithBearerToken). Account must also be entitled
+        # (model access / C-score); run-time validation surfaces a clear error
+        # if not.
+        Effect = "Allow"
+        Action = [
+          "bedrock-mantle:CreateInference",
+          "bedrock-mantle:Get*",
+          "bedrock-mantle:List*",
+          "bedrock-mantle:CallWithBearerToken",
+        ]
+        Resource = "*"
+      },
+      {
         # IAM database authentication - pods connect to RDS using IAM tokens instead of passwords
         Effect   = "Allow"
         Action   = ["rds-db:connect"]

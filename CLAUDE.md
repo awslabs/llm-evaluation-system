@@ -83,6 +83,16 @@ make clean                                # also wipe volumes
 
 `make dev` builds the static SPA into `frontend/dist`, which nginx serves directly while proxying the gated paths to the backend (no Node frontend container — nginx stands in for CloudFront+S3 serving static and the ALB/oauth2-proxy gating the API, mirroring the EKS split). The backend hot-reloads on Python edits. For frontend edits, rerun `make dev-spa` and refresh. Open http://127.0.0.1:4001. See [local/README.md](local/README.md).
 
+### Deploy-then-merge (web app changes)
+
+**Always deploy the feature branch to AWS and verify live BEFORE merging — never merge then deploy.** `./deploy.sh` zips the local working tree, so a deploy from inside the feature-branch worktree ships exactly that branch's code to EKS (us-east-2). The order is:
+
+1. Make the change on a feature-branch worktree, test locally (`pytest` + a real eval where it applies).
+2. **Deploy that worktree** to us-east-2 (`AWS_REGION=us-east-2 AWS_PROFILE=<profile> ./deploy.sh`) and verify against the live pod / chat endpoint — this is the only way to catch deployed-environment bugs (sandbox availability, IAM grants, dependency-resolution drift, agent tool-selection) that local tests and pytest greens miss.
+3. Only after prod verification passes: open/merge the PR.
+
+Rationale: several real bugs in this project only appeared in the deployed environment (openai version floor rejected at runtime, Mantle IAM, provider-filter excluding models, benchmark Docker-sandbox unavailable on k8s). Merging first means shipping unverified code to `main`; deploying the branch first lets us prove it in prod and merge with confidence. The deploy is non-destructive (idempotent DDL, rolling backend restart), so deploying an unmerged branch is safe.
+
 ### Release
 
 `make release` (patch) / `make release-minor` / `make release-major` from a clean `main`. Tags `vX.Y.Z`, pushes, GitHub Actions builds the wheel (frontend rebuilt in CI) and publishes to PyPI via trusted publishing. Version is derived from the tag by `setuptools-scm` — **never** add a static `version` to `pyproject.toml`. Full ship workflow in the [ship-it skill](./.claude/skills/ship-it/SKILL.md).

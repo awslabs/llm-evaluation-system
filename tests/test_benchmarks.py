@@ -30,7 +30,7 @@ class _Entry:
 
     def __init__(self, id, title="", description="", group=None, tasks=None,
                  dependency=None, dependency_group=None, isolated=False,
-                 external_assets=None, arxiv=None):
+                 external_assets=None, arxiv=None, runtime_metadata=None):
         self.id = id
         self.title = title
         self.description = description
@@ -41,6 +41,12 @@ class _Entry:
         self.isolated = isolated
         self.external_assets = external_assets or []
         self.arxiv = arxiv
+        self.runtime_metadata = runtime_metadata
+
+    def model_dump(self):
+        # _sandbox_requirement reads runtime_metadata via model_dump(); mirror
+        # the real EvalListing entry's shape.
+        return {"isolated": self.isolated, "runtime_metadata": self.runtime_metadata}
 
 
 def test_matches_search_hits_id_title_and_tasks():
@@ -68,6 +74,51 @@ def test_entry_summary_flags_and_first_sample_count():
     assert s["needsSandbox"] is True
     assert s["sampleCount"] == 500  # skips the None, takes first real count
     assert s["tasks"] == ["swe", "swe_v"]
+
+
+def test_sandbox_detected_from_runtime_metadata_not_isolated():
+    """A code-execution benchmark flags needsSandbox via runtime_metadata.sandbox
+    even when the legacy `isolated` flag is False (the HumanEval bug)."""
+    from eval_mcp.tools.benchmarks import _sandbox_requirement
+    he = _Entry("humaneval", group="Coding", tasks=[_Task("humaneval")],
+                isolated=False,
+                runtime_metadata={"sandbox": ["scorer"], "supports_k8s": False})
+    sb = _sandbox_requirement(he)
+    assert sb["needs"] is True
+    assert sb["phases"] == ["scorer"]
+    assert sb["supportsK8s"] is False
+    # and the compact summary reflects it
+    s = _entry_summary(he)
+    assert s["needsSandbox"] is True
+    assert s["sandboxSupportsK8s"] is False
+
+
+def test_no_sandbox_for_plain_qa_benchmark():
+    from eval_mcp.tools.benchmarks import _sandbox_requirement
+    g = _Entry("gsm8k", group="Mathematics", tasks=[_Task("gsm8k")],
+               runtime_metadata=None)
+    assert _sandbox_requirement(g)["needs"] is False
+    assert _entry_summary(g)["needsSandbox"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_benchmark_rejects_docker_only_on_k8s():
+    """A Docker-only (supports_k8s=False) code benchmark must fail fast with an
+    actionable message instead of launching and dying at the scorer."""
+    import os
+    from unittest.mock import patch
+    from eval_mcp.tools import benchmarks as bm
+    he = _Entry("humaneval", group="Coding", tasks=[_Task("humaneval")],
+                runtime_metadata={"sandbox": ["scorer"], "supports_k8s": False})
+    with patch.object(bm, "_load_evals", return_value=[he]), \
+         patch.dict(os.environ, {"INSPECT_SANDBOX_TYPE": "k8s"}, clear=False):
+        r = await bm.handle_run_benchmark({
+            "task": "humaneval", "user_id": "t", "providers": ["bedrock/x"],
+        })
+    d = json.loads(r[0].text)
+    assert d["success"] is False
+    assert "does NOT support Kubernetes" in d["error"]
+    assert d["sandboxSupportsK8s"] is False
 
 
 def test_resolve_task_by_exact_task_name():

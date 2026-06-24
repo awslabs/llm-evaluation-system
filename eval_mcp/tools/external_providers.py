@@ -107,6 +107,13 @@ EXTERNAL_PROVIDERS: dict[str, dict[str, Any]] = {
     "bedrock-mantle": {
         "env_var": None,
         "display_name": "OpenAI on Bedrock (Mantle)",
+        # match_aliases: a provider filter for any of these names ALSO returns
+        # this provider's models. GPT-5.4/5.5 are OpenAI models, so a caller (or
+        # the agent) filtering provider="openai" must find them here even though
+        # the canonical provider key is "bedrock-mantle". Without this, asking
+        # "is GPT-5.4 available?" filters to provider=openai and wrongly misses
+        # the Mantle models.
+        "match_aliases": ["openai"],
         "models": [
             {"id": "openai/bedrock/gpt-5.5", "name": "GPT-5.5 (Bedrock)"},
             {"id": "openai/bedrock/gpt-5.4", "name": "GPT-5.4 (Bedrock)"},
@@ -232,8 +239,10 @@ def get_external_models(provider: str = "all") -> list[dict[str, Any]]:
     _refresh_keys_from_file()
     models = []
     for name, config in EXTERNAL_PROVIDERS.items():
-        # Skip if provider filter doesn't match
-        if provider != "all" and provider != name:
+        # Skip if provider filter doesn't match the canonical name or any alias
+        # (e.g. provider="openai" also matches the "bedrock-mantle" provider,
+        # whose models are OpenAI models hosted on Bedrock).
+        if provider != "all" and provider != name and provider not in config.get("match_aliases", []):
             continue
 
         # Skip if the provider isn't usable (no API key, or no AWS creds for

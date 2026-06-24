@@ -102,23 +102,71 @@ def test_no_sandbox_for_plain_qa_benchmark():
 
 
 @pytest.mark.asyncio
-async def test_run_benchmark_rejects_docker_only_on_k8s():
-    """A Docker-only (supports_k8s=False) code benchmark must fail fast with an
-    actionable message instead of launching and dying at the scorer."""
+async def test_run_benchmark_injects_sandbox_for_code_eval():
+    """A code-execution benchmark must get the resolved sandbox injected as
+    `-T sandbox=<type>` (k8s on EKS) so its verify scorer can run — instead of
+    being rejected. We intercept the subprocess to capture the launched cmd."""
     import os
-    from unittest.mock import patch
+    from unittest.mock import patch, AsyncMock
     from eval_mcp.tools import benchmarks as bm
+
     he = _Entry("humaneval", group="Coding", tasks=[_Task("humaneval")],
                 runtime_metadata={"sandbox": ["scorer"], "supports_k8s": False})
+
+    captured = {}
+
+    async def fake_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.wait = AsyncMock(return_value=0)
+        proc.pid = 4242
+        return proc
+
     with patch.object(bm, "_load_evals", return_value=[he]), \
+         patch.object(bm, "raise_if_autodetect_error", lambda: None), \
+         patch.object(bm.asyncio, "create_subprocess_exec", side_effect=fake_exec), \
          patch.dict(os.environ, {"INSPECT_SANDBOX_TYPE": "k8s"}, clear=False):
-        r = await bm.handle_run_benchmark({
+        await bm.handle_run_benchmark({
             "task": "humaneval", "user_id": "t", "providers": ["bedrock/x"],
         })
-    d = json.loads(r[0].text)
-    assert d["success"] is False
-    assert "does NOT support Kubernetes" in d["error"]
-    assert d["sandboxSupportsK8s"] is False
+
+    cmd = captured.get("cmd", [])
+    # The launched inspect command must carry -T sandbox=k8s.
+    assert "-T" in cmd and "sandbox=k8s" in cmd, f"cmd missing sandbox inject: {cmd}"
+
+
+@pytest.mark.asyncio
+async def test_run_benchmark_no_sandbox_inject_for_plain_qa():
+    """A non-sandbox benchmark (gsm8k) must NOT get a sandbox -T arg."""
+    import os
+    from unittest.mock import patch, AsyncMock
+    from eval_mcp.tools import benchmarks as bm
+
+    g = _Entry("gsm8k", group="Mathematics", tasks=[_Task("gsm8k")],
+               runtime_metadata=None)
+    captured = {}
+
+    async def fake_exec(*cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        proc = AsyncMock()
+        proc.returncode = 0
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.wait = AsyncMock(return_value=0)
+        proc.pid = 4243
+        return proc
+
+    with patch.object(bm, "_load_evals", return_value=[g]), \
+         patch.object(bm, "raise_if_autodetect_error", lambda: None), \
+         patch.object(bm.asyncio, "create_subprocess_exec", side_effect=fake_exec), \
+         patch.dict(os.environ, {"INSPECT_SANDBOX_TYPE": "k8s"}, clear=False):
+        await bm.handle_run_benchmark({
+            "task": "gsm8k", "user_id": "t", "providers": ["bedrock/x"],
+        })
+
+    cmd = captured.get("cmd", [])
+    assert not any(c.startswith("sandbox=") for c in cmd), f"unexpected sandbox inject: {cmd}"
 
 
 def test_resolve_task_by_exact_task_name():

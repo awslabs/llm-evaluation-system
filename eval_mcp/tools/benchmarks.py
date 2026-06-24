@@ -240,20 +240,12 @@ async def handle_get_benchmark_details(args: Dict[str, Any]) -> List[TextContent
         sb = _sandbox_requirement(e)
         if sb["needs"]:
             phases = ", ".join(sb["phases"]) or "execution"
-            if sb["supportsK8s"]:
-                payload["sandboxNote"] = (
-                    f"This benchmark runs untrusted code in a sandbox (phase: {phases}). "
-                    f"Needs Docker locally, or inspect-k8s-sandbox on EKS (set "
-                    f"INSPECT_SANDBOX_TYPE=k8s)."
-                )
-            else:
-                payload["sandboxNote"] = (
-                    f"This benchmark runs untrusted code in a Docker sandbox (phase: "
-                    f"{phases}) and is NOT supported on Kubernetes (supports_k8s=false). "
-                    f"It can only run locally with Docker — it will fail in the EKS "
-                    f"deployment. Consider a custom coding eval (generate_qa_pairs + "
-                    f"generate_judge) instead."
-                )
+            payload["sandboxNote"] = (
+                f"This benchmark executes untrusted model-generated code in a "
+                f"sandbox (phase: {phases}) to verify it. run_benchmark handles "
+                f"this automatically: it runs in inspect-k8s-sandbox (gVisor-"
+                f"isolated) on EKS, or Docker locally. Just run it normally."
+            )
         return [TextContent(type="text", text=json.dumps(payload, indent=2))]
     except Exception as e:
         return [TextContent(type="text", text=json.dumps({
@@ -347,44 +339,25 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
                     "error": f"Benchmark '{entry.id}' needs an optional dependency group.",
                     "extraInstall": f'pip install "inspect_evals[{extra_group}]"',
                 }))]
-        # Sandbox fail-fast. Use runtime_metadata.sandbox (authoritative: ~42
-        # benchmarks), NOT the unreliable `isolated` flag (only 7). Without this,
-        # a code-execution benchmark like HumanEval launches, downloads its
-        # dataset, generates completions, then dies at the scoring step when it
-        # tries to exec generated code in a sandbox that isn't there — exactly
-        # the "failed after downloading the dataset" symptom.
+        # Sandbox resolution. Code-execution benchmarks (HumanEval, MBPP, …) run
+        # untrusted model-generated code to verify it, which needs a sandbox.
+        # Detect the need via runtime_metadata.sandbox (authoritative: ~42
+        # benchmarks; the legacy `isolated` flag covers only 7) and INJECT the
+        # right sandbox type so the run actually works rather than dying at the
+        # scoring step.
+        #
+        # The benchmark's task hardcodes `sandbox="docker"`, but that's an
+        # overridable -T parameter and the verify scorer only needs *a* sandbox
+        # that can exec python. On EKS we have inspect-k8s-sandbox (default image
+        # python:3.12-bookworm, gVisor-isolated — see infra/platform/
+        # sandbox-security.tf), so we override to `sandbox=k8s`; locally we use
+        # Docker. INSPECT_SANDBOX_TYPE selects which (set to "k8s" in the EKS
+        # deployment, defaults to "docker" elsewhere).
         sb = _sandbox_requirement(entry)
-        if sb["needs"]:
-            sandbox_type = os.environ.get("INSPECT_SANDBOX_TYPE")
-            phases = ", ".join(sb["phases"]) or "execution"
-            # Docker-only benchmarks (supports_k8s=False) cannot run on the
-            # EKS k8s-sandbox at all — reject regardless of INSPECT_SANDBOX_TYPE.
-            if sb["supportsK8s"] is False and sandbox_type in (None, "k8s"):
-                return [TextContent(type="text", text=json.dumps({
-                    "success": False,
-                    "error": (
-                        f"Benchmark '{entry.id}' runs untrusted code in a Docker "
-                        f"sandbox (phase: {phases}) and does NOT support Kubernetes "
-                        f"(supports_k8s=false), so it cannot run in this deployment. "
-                        f"It only works locally with Docker. For a model comparison "
-                        f"here, use a custom coding eval instead: generate_qa_pairs "
-                        f"(coding tasks) -> generate_judge -> create_eval_config -> "
-                        f"run_evaluation."
-                    ),
-                    "needsSandbox": True,
-                    "sandboxSupportsK8s": False,
-                }))]
-            if not sandbox_type:
-                return [TextContent(type="text", text=json.dumps({
-                    "success": False,
-                    "error": (
-                        f"Benchmark '{entry.id}' runs untrusted code in a sandbox "
-                        f"(phase: {phases}) and no sandbox is configured. Needs Docker "
-                        f"locally, or inspect-k8s-sandbox on EKS (set "
-                        f"INSPECT_SANDBOX_TYPE=k8s)."
-                    ),
-                    "needsSandbox": True,
-                }))]
+        sandbox_override: Optional[str] = None
+        if sb["needs"] and "sandbox" not in task_args:
+            sandbox_type = os.environ.get("INSPECT_SANDBOX_TYPE", "docker")
+            sandbox_override = sandbox_type
 
         # Bedrock reachability: surface the multi-profile autodetect error here
         # rather than letting it fail deep in the subprocess.
@@ -415,6 +388,10 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
         ]
         if limit:
             cmd.extend(["--limit", str(int(limit))])
+        # Inject the resolved sandbox type for code-execution benchmarks (unless
+        # the caller already specified one via task_args).
+        if sandbox_override:
+            cmd.extend(["-T", f"sandbox={sandbox_override}"])
         for k, v in task_args.items():
             # -T key=value; inspect parses scalars/JSON on the far side.
             cmd.extend(["-T", f"{k}={v}"])

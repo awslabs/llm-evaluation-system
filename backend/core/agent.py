@@ -88,13 +88,11 @@ Available Tools:
   of a generated dataset. When a user asks to run a named benchmark or "a standard
   benchmark", call list_benchmarks(search=...) to discover it (don't guess task
   names), get_benchmark_details to pick the exact task variant, then run_benchmark.
-  Some benchmarks need an extra dependency or a sandbox - the tools flag this via
-  needsSandbox / sandboxSupportsK8s. CHECK these before running: code-execution
-  benchmarks (HumanEval, MBPP, DS-1000, ...) need a Docker sandbox to verify
-  generated code and most have sandboxSupportsK8s=false, so they CANNOT run in
-  this hosted deployment. Don't attempt them here — instead proactively offer a
-  custom coding eval (generate_qa_pairs with coding tasks -> generate_judge ->
-  create_eval_config -> run_evaluation), which compares models without a sandbox.
+  Code-execution benchmarks (HumanEval, MBPP, DS-1000, ...) execute the model's
+  generated code in a sandbox to verify it; this is handled automatically (gVisor-
+  isolated inspect-k8s-sandbox on EKS, Docker locally) — just run them normally,
+  no special setup. Some benchmarks need an optional dependency group; the tool
+  flags that with an install hint.
 - list_evaluations: List completed evaluations
 - get_evaluation_details: Get detailed results for a specific eval
 - list_available_models: Discover ALL available models (standard Bedrock + Bedrock

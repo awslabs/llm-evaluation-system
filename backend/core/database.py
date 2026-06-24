@@ -273,6 +273,20 @@ class Database:
                 )
             """)
 
+            # Cross-pod "session is running" signal. Backend runs as a
+            # multi-pod Deployment; chat_status checks in-memory first
+            # and falls back to this table so a tab that reconnects on a
+            # different pod can still tell the task is alive. Mirrors the
+            # session_cancellations pattern. Row written at task start,
+            # deleted in the finally block of run_agent_background.
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS session_active (
+                    session_id TEXT PRIMARY KEY,
+                    started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    pod_id TEXT
+                )
+            """)
+
             # Teams — a team is just another principal that grants can
             # target. Membership lives in team_members. See
             # docs/EVAL_SHARING_DESIGN.md.
@@ -547,6 +561,66 @@ class Database:
             # next poll catches it.
             logger.warning(f"Failed to check cancellation for {session_id}: {e}")
             return None
+
+    # ------------------------------------------------------------------
+    # Cross-pod session-active signals (mirrors session_cancellations).
+    # ------------------------------------------------------------------
+
+    async def mark_session_active(self, session_id: str, pod_id: str = "") -> None:
+        """Record that a chat session is running on this pod.
+
+        Written at task start so a tab that reconnects on a different pod
+        can still learn the session is live via get_session_active().
+        UPSERT so a retry within the same turn just refreshes started_at.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO session_active (session_id, started_at, pod_id)
+                    VALUES ($1, NOW(), $2)
+                    ON CONFLICT (session_id) DO UPDATE
+                      SET started_at = NOW(), pod_id = EXCLUDED.pod_id
+                    """,
+                    session_id, pod_id,
+                )
+        except asyncpg.PostgresError as e:
+            # Non-fatal — worst case the cross-pod status check misses
+            # this session and the UI treats it as idle. Log and move on.
+            logger.warning(f"Failed to mark session {session_id} active: {e}")
+
+    async def clear_session_active(self, session_id: str) -> None:
+        """Remove the active flag when the session finishes or is cancelled."""
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM session_active WHERE session_id = $1",
+                    session_id,
+                )
+        except asyncpg.PostgresError as e:
+            logger.warning(f"Failed to clear session_active for {session_id}: {e}")
+
+    async def get_session_active(self, session_id: str) -> bool:
+        """Return True if the session has an active row in session_active.
+
+        Used by chat_status as the cross-pod fallback when the session
+        is not found in the local in-memory active_tasks dict.
+        """
+        await self._ensure_pool_fresh()
+        try:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT 1 FROM session_active WHERE session_id = $1",
+                    session_id,
+                )
+                return row is not None
+        except asyncpg.PostgresError as e:
+            # On DB error default to False (idle) — better to briefly
+            # show idle than to hang the UI polling forever.
+            logger.warning(f"Failed to check session_active for {session_id}: {e}")
+            return False
 
     # ------------------------------------------------------------------
     # Eval sharing: grants + teams. See docs/EVAL_SHARING_DESIGN.md.

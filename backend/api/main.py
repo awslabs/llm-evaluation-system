@@ -770,10 +770,22 @@ async def chat(request: ChatRequest, user_id: str = Depends(get_current_user_id)
 
 @app.get("/api/chat/status/{session_id}")
 async def chat_status(session_id: str, user_id: str = Depends(get_current_user_id)):
-    """Check if a chat session is currently processing."""
+    """Check if a chat session is currently processing.
+
+    Checks in-memory first (fast path, same pod). If not found locally,
+    falls back to the session_active DB table so a reconnecting tab that
+    lands on a different pod still gets the correct answer.
+    """
     if session_id in active_tasks and not active_tasks[session_id].done():
         return {"running": True}
-    return {"running": False}
+    # Cross-pod fallback: the task may be running on another replica.
+    try:
+        running = await asyncio.wait_for(
+            db.get_session_active(session_id), timeout=1.0
+        )
+        return {"running": running}
+    except (asyncio.TimeoutError, Exception):
+        return {"running": False}
 
 
 async def _cancel_eval_subprocess_and_reconnect(user_id: str) -> None:
@@ -981,6 +993,17 @@ async def run_agent_background(
         except (asyncio.TimeoutError, Exception):
             pass
 
+        # Write the cross-pod "running" signal so chat_status returns
+        # True even when the reconnecting request lands on a different
+        # pod. Non-fatal — a miss just means the UI briefly shows idle.
+        pod_id = os.environ.get("POD_NAME", os.environ.get("HOSTNAME", ""))
+        try:
+            await asyncio.wait_for(
+                db.mark_session_active(session_id, pod_id), timeout=2.0
+            )
+        except (asyncio.TimeoutError, Exception):
+            pass
+
         logger.info(f"[AGENT START] Starting agent loop for session {session_id}")
 
         # Throttle the cross-pod cancellation poll so we don't hammer
@@ -1136,6 +1159,14 @@ async def run_agent_background(
         if session_id in event_queues:
             del event_queues[session_id]
         cancelled_sessions.pop(session_id, None)
+
+        # Clear the cross-pod "running" signal now that the task is done.
+        try:
+            await asyncio.wait_for(
+                db.clear_session_active(session_id), timeout=2.0
+            )
+        except (asyncio.TimeoutError, Exception):
+            pass
 
         logger.info(f"[BACKGROUND END] Session {session_id}, total events: {event_count}, cancelled: {was_cancelled}")
 

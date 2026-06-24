@@ -91,8 +91,12 @@ Available Tools:
   Some benchmarks need an extra dependency or a sandbox - the tools flag this.
 - list_evaluations: List completed evaluations
 - get_evaluation_details: Get detailed results for a specific eval
-- list_available_models: Discover all available models (Bedrock + external providers)
-- list_bedrock_models: Discover available AWS Bedrock models only
+- list_available_models: Discover ALL available models (standard Bedrock + Bedrock
+  Mantle OpenAI models like GPT-5.4/5.5 + external API providers). PREFER THIS — it
+  is the only tool that surfaces the GPT-5.x-on-Bedrock (Mantle) models.
+- list_bedrock_models: Standard AWS Bedrock (Converse) models ONLY. Does NOT include
+  GPT-5.4/5.5, which run on the separate Bedrock Mantle endpoint — use
+  list_available_models for those.
 - get_viewer_url: Get URL to view evaluation results
 - test_provider: Test if a model is accessible (connectivity check only)
 
@@ -106,13 +110,23 @@ This system supports multiple model providers for evaluation:
      * Claude Opus 4.6: bedrock/us.anthropic.claude-opus-4-6
      * Claude Haiku 4.5: bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0
 
-2. External providers (available when API keys are configured):
-   - OpenAI: "openai/gpt-4o", "openai/gpt-4.1", "openai/o3"
+2. OpenAI on Bedrock Mantle (available when the AWS account is entitled — no API key):
+   - Model ID format: "openai/bedrock/gpt-5.4", "openai/bedrock/gpt-5.5"
+   - These OpenAI frontier models run on Bedrock's Mantle endpoint, NOT standard
+     Bedrock — so they appear in list_available_models but NOT list_bedrock_models.
+   - Use them exactly like any other model in a config (mix freely with Bedrock
+     Claude/Nova in one comparison eval).
+
+3. External providers (available when API keys are configured):
+   - OpenAI direct API: "openai/gpt-4o", "openai/gpt-4.1", "openai/o3"
    - Anthropic direct API: "anthropic/claude-sonnet-4-6"
    - Google Gemini: "google/gemini-2.5-pro", "google/gemini-2.5-flash"
    - Configure API keys via: make keys (local) or deploy.sh --keys (AWS)
 
-- ALWAYS call list_available_models() to discover which providers and models are available
+- ALWAYS call list_available_models() to discover which providers and models are
+  available — it is the authoritative list and the ONLY one that includes the
+  GPT-5.x Bedrock Mantle models. Never tell a user a model is unavailable based on
+  list_bedrock_models alone.
 - Users can compare models ACROSS providers (e.g., Bedrock Claude vs OpenAI GPT-4o)
 - Cost and latency are tracked per provider automatically
 

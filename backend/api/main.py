@@ -953,6 +953,21 @@ def _cancel_suffix(cancel_info: Dict[str, Any]) -> str:
     )
 
 
+async def _notify(session_id: str, event: dict) -> None:
+    """Publish a NOTIFY for cross-pod SSE relay.
+
+    Awaited directly in the event loop so it runs immediately (pool
+    acquire is fast). Safe to call even when db doesn't support NOTIFY
+    yet (e.g. older test mocks) — any AttributeError is swallowed.
+    """
+    notify_fn = getattr(db, "notify_session_event", None)
+    if notify_fn is not None:
+        try:
+            await notify_fn(session_id, event)
+        except Exception:
+            pass
+
+
 async def run_agent_background(
     session_id: str,
     user_id: str,
@@ -1059,15 +1074,21 @@ async def run_agent_background(
                 # is a no-op when nothing is registered).
                 asyncio.create_task(_cancel_eval_subprocess_and_reconnect(user_id))
 
-                await queue.put({"type": "cancelled", "data": {"message": "Request cancelled", **cancel_info}})
+                cancelled_event = {"type": "cancelled", "data": {"message": "Request cancelled", **cancel_info}}
+                await queue.put(cancelled_event)
+                # Publish cross-pod so any listening replica forwards it.
+                await _notify(session_id, cancelled_event)
                 break
 
             event_count += 1
             event_type = event['type']
             logger.debug(f"[EVENT {event_count}] Type: {event_type}")
 
-            # Put event in queue for SSE delivery
+            # Put event in queue for SSE delivery (same-pod path).
             await queue.put(event)
+            # Publish cross-pod so any replica whose client reconnected
+            # on a different pod can forward the token live.
+            await _notify(session_id, event)
 
             # Collect full response text
             if event_type == 'text':
@@ -1153,6 +1174,10 @@ async def run_agent_background(
         except asyncio.TimeoutError:
             logger.warning(f"[BACKGROUND END] queue.put(None) timed out for {session_id}")
 
+        # Publish end-of-stream sentinel cross-pod so any listening
+        # replica closes its SSE response cleanly.
+        await _notify(session_id, {"type": "__end__", "data": {}})
+
         # Cleanup
         if session_id in active_tasks:
             del active_tasks[session_id]
@@ -1195,10 +1220,11 @@ async def chat_stream(request: ChatRequest, user_id: str):
 
     # Check if there's already an active task for this session
     if session_id in active_tasks and not active_tasks[session_id].done():
-        # Reconnecting client - read from existing queue
+        # Reconnecting client — task is running somewhere in the cluster.
         logger.info(f"[RECONNECT] Client reconnected to active session {session_id}")
         queue = event_queues.get(session_id)
         if queue:
+            # Same pod: drain the in-memory queue directly (fast path).
             try:
                 while True:
                     event = await queue.get()
@@ -1206,7 +1232,56 @@ async def chat_stream(request: ChatRequest, user_id: str):
                         break
                     yield f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
             except asyncio.CancelledError:
-                logger.info(f"[RECONNECT CANCELLED] Client disconnected again from session {session_id}")
+                logger.info(f"[RECONNECT CANCELLED] Client disconnected from session {session_id}")
+        else:
+            # Cross-pod: task is on a different replica. Subscribe via
+            # Postgres LISTEN so we receive events as the other pod
+            # publishes them with NOTIFY.
+            logger.info(f"[RECONNECT XPOD] Subscribing via LISTEN for session {session_id}")
+            notify_queue: asyncio.Queue = asyncio.Queue()
+            listen_conn = None
+            try:
+                listen_conn = await db.connect_for_listen()
+
+                def _on_notify(_conn, _pid, _channel, payload):
+                    try:
+                        event = json.loads(payload)
+                        notify_queue.put_nowait(event)
+                    except Exception:
+                        pass
+
+                channel = db._notify_channel(session_id)
+                await listen_conn.add_listener(channel, _on_notify)
+
+                while True:
+                    try:
+                        event = await asyncio.wait_for(notify_queue.get(), timeout=30.0)
+                    except asyncio.TimeoutError:
+                        # No event in 30s — check the session is still
+                        # active before waiting again. Handles the race
+                        # where the task finished between the status check
+                        # and the LISTEN setup.
+                        still_running = await db.get_session_active(session_id)
+                        if not still_running:
+                            break
+                        continue
+                    if event.get("type") == "__end__":
+                        break
+                    yield f"event: {event['type']}\ndata: {json.dumps(event.get('data', {}))}\n\n"
+            except asyncio.CancelledError:
+                logger.info(f"[RECONNECT XPOD CANCELLED] Client disconnected from session {session_id}")
+            except Exception as e:
+                logger.warning(f"[RECONNECT XPOD ERROR] session {session_id}: {e}")
+            finally:
+                if listen_conn:
+                    try:
+                        await listen_conn.remove_listener(channel, _on_notify)
+                    except Exception:
+                        pass
+                    try:
+                        await listen_conn.close()
+                    except Exception:
+                        pass
         return
 
     # Ensure user exists

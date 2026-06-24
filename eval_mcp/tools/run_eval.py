@@ -89,9 +89,16 @@ def _validate_config_name(config_name: str) -> str:
 
 
 async def _validate_providers(providers: List[str]) -> Dict[str, Any]:
-    """Validate all Bedrock providers can be invoked.
+    """Validate that the selected models can actually be invoked.
 
-    Tests each Bedrock provider with a minimal request.
+    Two endpoints, two smoke tests:
+      - ``bedrock/...``        -> bedrock-runtime Converse (standard models)
+      - ``openai/bedrock/...`` -> bedrock-mantle Responses API (OpenAI frontier
+                                  models, e.g. GPT-5.4; not on Converse)
+
+    This run-time check is the compatibility gate (there's no model allowlist):
+    a model that isn't enabled / doesn't support the endpoint fails fast here
+    with an actionable message instead of blowing up mid-eval.
 
     Returns:
         Dict with 'valid': True if all pass, or 'valid': False with 'failed_providers' list
@@ -99,60 +106,84 @@ async def _validate_providers(providers: List[str]) -> Dict[str, Any]:
     if not providers:
         return {"valid": True, "providers": []}
 
-    # Filter to only bedrock providers
-    bedrock_models = [m for m in providers if m.startswith("bedrock/")]
-    if not bedrock_models:
+    runtime_models = [m for m in providers if m.startswith("bedrock/")]
+    mantle_models = [m for m in providers if m.startswith("openai/bedrock/")]
+    if not runtime_models and not mantle_models:
         return {"valid": True, "providers": providers, "note": "No Bedrock providers to validate"}
 
     # Surface the multi-profile autodetect error here rather than letting
     # boto3 fail with "Unable to locate credentials" deep in the validator.
     raise_if_autodetect_error()
 
-    # Validate each bedrock model
     failed = []
-    region = os.environ.get("AWS_REGION", "us-west-2")
 
-    config = Config(
-        region_name=region,
-        read_timeout=15,
-        connect_timeout=10,
-        retries={"max_attempts": 1},
-    )
-    runtime_client = boto3.client("bedrock-runtime", config=config)
+    # --- Standard Bedrock runtime (Converse) ---
+    if runtime_models:
+        region = os.environ.get("AWS_REGION", "us-west-2")
+        config = Config(
+            region_name=region,
+            read_timeout=15,
+            connect_timeout=10,
+            retries={"max_attempts": 1},
+        )
+        runtime_client = boto3.client("bedrock-runtime", config=config)
 
-    for model_id in bedrock_models:
-        # Strip bedrock/ prefix to get actual model ID
-        actual_model_id = model_id.replace("bedrock/", "", 1)
+        for model_id in runtime_models:
+            actual_model_id = model_id.replace("bedrock/", "", 1)
+            try:
+                runtime_client.converse(
+                    modelId=actual_model_id,
+                    messages=[{"role": "user", "content": [{"text": "Hi"}]}],
+                    inferenceConfig={"maxTokens": 10},
+                )
+            except Exception as e:
+                error_msg = str(e)
+                if "AccessDeniedException" in error_msg:
+                    hint = "Model not enabled in AWS account"
+                elif "ValidationException" in error_msg:
+                    hint = "Invalid model ID"
+                elif "ResourceNotFoundException" in error_msg:
+                    hint = "Model not found"
+                else:
+                    hint = error_msg[:200]
+                failed.append({"model": model_id, "error": hint})
+                logger.warning(f"Provider validation failed for {model_id}: {hint}")
 
+    # --- Bedrock Mantle (OpenAI-compatible Responses API) ---
+    # GPT-5.4/5.5 are served only on the bedrock-mantle endpoint, not Converse.
+    # Inspect's openai provider resolves `openai/bedrock/<id>` to that endpoint
+    # and mints a bearer token from the ambient AWS creds; a tiny generate()
+    # proves the account is entitled (C-score / model access) and reachable.
+    for model_id in mantle_models:
         try:
-            # Use Converse API - provider-agnostic
-            runtime_client.converse(
-                modelId=actual_model_id,
-                messages=[{"role": "user", "content": [{"text": "Hi"}]}],
-                inferenceConfig={"maxTokens": 10},
-            )
+            from inspect_ai.model import get_model, GenerateConfig
+
+            model = get_model(model_id)
+            await model.generate("Hi", config=GenerateConfig(max_tokens=16))
         except Exception as e:
             error_msg = str(e)
-            if "AccessDeniedException" in error_msg:
-                hint = "Model not enabled in AWS account"
-            elif "ValidationException" in error_msg:
-                hint = "Invalid model ID"
-            elif "ResourceNotFoundException" in error_msg:
-                hint = "Model not found"
+            if "AccessDenied" in error_msg or "Forbidden" in error_msg or "403" in error_msg:
+                hint = "Bedrock Mantle access not enabled for this account (needs model access / sufficient C-score)"
+            elif "not_found" in error_msg or "does not exist" in error_msg or "404" in error_msg:
+                hint = "Model not available on Bedrock Mantle (check the model ID / region)"
+            elif "aws-bedrock-token-generator" in error_msg:
+                hint = "Missing aws-bedrock-token-generator package"
+            elif "credential" in error_msg.lower():
+                hint = "No AWS credentials available for Bedrock Mantle"
             else:
                 hint = error_msg[:200]
-
             failed.append({"model": model_id, "error": hint})
-            logger.warning(f"Provider validation failed for {model_id}: {hint}")
+            logger.warning(f"Mantle provider validation failed for {model_id}: {hint}")
 
+    validated = runtime_models + mantle_models
     if failed:
         return {
             "valid": False,
             "failed_providers": failed,
-            "message": f"{len(failed)} of {len(bedrock_models)} providers failed validation",
+            "message": f"{len(failed)} of {len(validated)} providers failed validation",
         }
 
-    return {"valid": True, "providers": bedrock_models}
+    return {"valid": True, "providers": validated}
 
 # Registry of running evaluations: user_id -> (process, eval_id, config_name)
 _running_evaluations: Dict[str, Dict[str, Any]] = {}

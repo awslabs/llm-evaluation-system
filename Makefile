@@ -52,6 +52,9 @@ build:           ## Build all images
 clean: stop      ## Stop and remove volumes
 	@$(COMPOSE) down -v
 
+sync-pricing:    ## Refresh the vendored LiteLLM pricing snapshot (review the diff!)
+	@python scripts/sync-pricing.py
+
 release:         ## Tag a patch release and push (triggers PyPI publish)
 	@$(MAKE) _release BUMP=patch
 

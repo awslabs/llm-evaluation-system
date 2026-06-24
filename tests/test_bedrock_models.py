@@ -33,7 +33,16 @@ def _fake_client(pages, foundation_models=None):
 
     client.list_foundation_models.return_value = {
         "modelSummaries": [
-            {"modelId": mid, "modelName": name}
+            {
+                "modelId": mid,
+                "modelName": name,
+                # Default to a directly-invokable text model; tests that care
+                # about capability gating pass explicit dicts instead of tuples.
+                "inferenceTypesSupported": ["ON_DEMAND"],
+                "outputModalities": ["TEXT"],
+            }
+            if isinstance(name, str)
+            else {"modelId": mid, "modelName": mid, **name}
             for mid, name in (foundation_models or [])
         ]
     }
@@ -57,13 +66,33 @@ def test_inference_profiles_are_paginated():
     assert "us.anthropic.claude-3-haiku-20240307-v1:0" in ids
 
 
-def test_supported_models_gate_filters_unknowns():
-    """Entries not in SUPPORTED_MODELS must not appear. This is an intentional
-    manual-curation gate; loosen with care."""
-    pages = [[("us.anthropic.fictional-model-v99", "Fictional")]]
+def test_no_allowlist_unknown_models_surface():
+    """There is no allowlist: any text-capable model AWS reports must appear,
+    including a brand-new one we've never seen (e.g. a future Opus 5). The
+    Converse smoke test in run_eval is the compatibility gate, not discovery."""
+    pages = [[("us.anthropic.claude-opus-5-v1:0", "US Claude Opus 5")]]
     with patch.object(bedrock_models, "create_boto3_bedrock_client", return_value=_fake_client(pages)):
         result = bedrock_models.list_bedrock_models(provider="anthropic")
-    assert result["count"] == 0
+    ids = [m["modelId"] for m in result["models"]]
+    assert "us.anthropic.claude-opus-5-v1:0" in ids
+
+
+def test_foundation_model_requires_on_demand():
+    """A foundation model that is NOT directly invokable (INFERENCE_PROFILE-only,
+    with no profile listed) must be skipped to avoid surfacing un-callable IDs."""
+    foundation = [
+        ("anthropic.future-profile-only-v1:0", {"inferenceTypesSupported": ["INFERENCE_PROFILE"]}),
+        ("amazon.callable-v1:0", {"inferenceTypesSupported": ["ON_DEMAND"], "outputModalities": ["TEXT"]}),
+    ]
+    with patch.object(
+        bedrock_models,
+        "create_boto3_bedrock_client",
+        return_value=_fake_client([], foundation_models=foundation),
+    ):
+        result = bedrock_models.list_bedrock_models(provider="all")
+    ids = [m["modelId"] for m in result["models"]]
+    assert "amazon.callable-v1:0" in ids
+    assert "anthropic.future-profile-only-v1:0" not in ids
 
 
 def test_foundation_model_dedup_against_inference_profile():

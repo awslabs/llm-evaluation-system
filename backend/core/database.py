@@ -643,7 +643,13 @@ class Database:
 
     @staticmethod
     def _notify_channel(session_id: str) -> str:
-        """Stable Postgres channel name for a session."""
+        """Stable Postgres channel name for a session.
+
+        Uses the session_id as-is (prefixed). Channel names passed to
+        pg_notify() / add_listener() are arbitrary strings, so UUIDs with
+        hyphens are fine — the only requirement is to use pg_notify($1,$2)
+        rather than the NOTIFY command syntax (which requires a bare identifier).
+        """
         return f"sess_{session_id}"
 
     async def notify_session_event(self, session_id: str, event: dict) -> None:
@@ -658,7 +664,11 @@ class Database:
             payload = json.dumps(event)
             channel = self._notify_channel(session_id)
             async with self._pool.acquire() as conn:
-                await conn.execute(f"NOTIFY {channel}, $1", payload)
+                # Use pg_notify($1,$2) function rather than the NOTIFY command
+                # so the channel name is treated as a plain string parameter,
+                # not a Postgres identifier — this handles session IDs that
+                # contain hyphens (e.g. UUIDs like "abc-123-...").
+                await conn.execute("SELECT pg_notify($1, $2)", channel, payload)
         except Exception as e:
             logger.debug(f"notify_session_event failed for {session_id}: {e}")
 

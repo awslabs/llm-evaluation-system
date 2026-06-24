@@ -953,16 +953,19 @@ def _cancel_suffix(cancel_info: Dict[str, Any]) -> str:
     )
 
 
-def _notify(session_id: str, event: dict) -> None:
-    """Fire-and-forget Postgres NOTIFY for cross-pod SSE relay.
+async def _notify(session_id: str, event: dict) -> None:
+    """Publish a NOTIFY for cross-pod SSE relay.
 
-    Schedules the async notify as a background task so it never blocks
-    the hot event loop. Safe to call even when db doesn't support NOTIFY
-    yet (e.g. older test mocks) — the AttributeError is swallowed.
+    Awaited directly in the event loop so it runs immediately (pool
+    acquire is fast). Safe to call even when db doesn't support NOTIFY
+    yet (e.g. older test mocks) — any AttributeError is swallowed.
     """
     notify_fn = getattr(db, "notify_session_event", None)
     if notify_fn is not None:
-        asyncio.create_task(notify_fn(session_id, event))
+        try:
+            await notify_fn(session_id, event)
+        except Exception:
+            pass
 
 
 async def run_agent_background(
@@ -1074,7 +1077,7 @@ async def run_agent_background(
                 cancelled_event = {"type": "cancelled", "data": {"message": "Request cancelled", **cancel_info}}
                 await queue.put(cancelled_event)
                 # Publish cross-pod so any listening replica forwards it.
-                _notify(session_id, cancelled_event)
+                await _notify(session_id, cancelled_event)
                 break
 
             event_count += 1
@@ -1085,7 +1088,7 @@ async def run_agent_background(
             await queue.put(event)
             # Publish cross-pod so any replica whose client reconnected
             # on a different pod can forward the token live.
-            _notify(session_id, event)
+            await _notify(session_id, event)
 
             # Collect full response text
             if event_type == 'text':
@@ -1173,7 +1176,7 @@ async def run_agent_background(
 
         # Publish end-of-stream sentinel cross-pod so any listening
         # replica closes its SSE response cleanly.
-        _notify(session_id, {"type": "__end__", "data": {}})
+        await _notify(session_id, {"type": "__end__", "data": {}})
 
         # Cleanup
         if session_id in active_tasks:

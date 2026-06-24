@@ -82,9 +82,10 @@ async def test_notify_uses_correct_channel():
 
     assert len(executed) == 1
     sql, args = executed[0]
-    assert "NOTIFY" in sql
-    assert "sess_abc123" in sql
-    assert json.loads(args[0]) == event
+    # Uses pg_notify($1,$2) so channel names with hyphens (e.g. UUIDs) work.
+    assert "pg_notify" in sql.lower()
+    assert args[0] == "sess_abc123"
+    assert json.loads(args[1]) == event
 
 
 # ---------------------------------------------------------------------------

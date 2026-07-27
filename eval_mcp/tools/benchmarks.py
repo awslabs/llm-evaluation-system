@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 
 from mcp.types import TextContent
 
-from eval_mcp.core.bedrock_client import raise_if_autodetect_error
+from eval_mcp.core.bedrock_client import raise_if_autodetect_error, resolve_region
 from eval_mcp.core.user_storage import get_user_dir, get_user_log_dir
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 from eval_mcp.tools.run_eval import (
@@ -373,7 +373,7 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
         _refresh_keys_from_file()
         env = os.environ.copy()
         env["INSPECT_LOG_DIR"] = log_dir_str
-        region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))
+        region = resolve_region()
         env["AWS_REGION"] = region
         env["AWS_DEFAULT_REGION"] = region
 

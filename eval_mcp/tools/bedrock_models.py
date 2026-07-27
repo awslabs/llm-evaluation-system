@@ -16,7 +16,7 @@ unpriced model is caught at run time with a clear error rather than silently
 hidden — and the maintenance burden is gone.
 """
 
-import os
+import re
 from typing import Optional
 from eval_mcp.core.bedrock_client import (
     create_boto3_bedrock_client,
@@ -27,7 +27,39 @@ from eval_mcp.tools.external_providers import (
     get_external_models,
 )
 
-region = os.environ.get("AWS_REGION", "us-west-2")
+# Regional prefixes AWS uses on cross-region inference profile IDs
+# (e.g. "us.anthropic.claude-...", "jp.anthropic.claude-..."). Stripping these
+# is how we dedupe a profile against its base foundation model and how we read
+# the provider out of an ID — miss one and the model shows up twice with
+# "jp" as its provider.
+_REGIONAL_PREFIXES = (
+    "us", "us-gov", "eu", "apac", "jp", "au", "ca", "global",
+)
+
+
+def strip_regional_prefix(model_id: str) -> str:
+    """Strip a regional prefix ('us.anthropic.claude-…' -> 'anthropic.claude-…')."""
+    parts = model_id.split('.', 1)
+    if len(parts) >= 2 and parts[0] in _REGIONAL_PREFIXES:
+        return parts[1]
+    return model_id
+
+
+def extract_provider_name(model_id: str) -> str:
+    """Extract the provider from a model ID ('us.anthropic.claude-…' -> 'anthropic')."""
+    parts = strip_regional_prefix(model_id).split('.')
+    return parts[0] if parts and parts[0] else "unknown"
+
+
+# Trailing Bedrock version suffix on a foundation-model ID, e.g. the "-1:0" in
+# "openai.gpt-oss-120b-1:0". Mantle omits it ("openai.gpt-oss-120b"), so it has
+# to be stripped before the two catalogs can be compared for duplicates.
+_VERSION_SUFFIX_RE = re.compile(r"-\d+:\d+$")
+
+
+def normalize_model_id(model_id: str) -> str:
+    """Strip regional prefix and version suffix, for cross-catalog comparison."""
+    return _VERSION_SUFFIX_RE.sub("", strip_regional_prefix(model_id))
 
 
 def list_bedrock_models(
@@ -46,7 +78,11 @@ def list_bedrock_models(
     err = get_autodetect_error()
     if err is not None:
         return {"models": [], "count": 0, "error": str(err)}
-    bedrock_client = create_boto3_bedrock_client('bedrock', region)
+    # Region resolved per call (not at import) so a profile/env change is picked
+    # up without restarting the long-lived MCP process — and so the resolved
+    # profile's own region counts, which is what makes region-limited models
+    # (e.g. OpenAI's us-east-only frontier models) discoverable.
+    bedrock_client = create_boto3_bedrock_client('bedrock')
 
     # Patterns to exclude for text_only mode — non-text modalities and
     # task-specific models that aren't chat/generation endpoints.
@@ -60,23 +96,6 @@ def list_bedrock_models(
     # so foundation model anthropic.claude-* won't be added (it requires inference profile)
     seen_base_ids = set()
     models = []
-
-    def strip_regional_prefix(model_id: str) -> str:
-        """Strip regional prefix (e.g., 'us.anthropic.claude-...' -> 'anthropic.claude-...')."""
-        parts = model_id.split('.', 1)
-        if len(parts) >= 2 and parts[0] in ('us', 'eu', 'apac', 'global', 'us-gov'):
-            return parts[1]
-        return model_id
-
-    def extract_provider_name(model_id: str) -> str:
-        """Extract provider from model ID (e.g., 'us.anthropic.claude-...' -> 'anthropic')."""
-        parts = model_id.split('.')
-        if len(parts) >= 2:
-            # Skip regional prefix if present (us., eu., apac., global.)
-            if parts[0] in ('us', 'eu', 'apac', 'global', 'us-gov'):
-                return parts[1]
-            return parts[0]
-        return "unknown"
 
     def should_include(model_id: str, model_name: str, provider_filter: str) -> bool:
         """Check if model should be included based on filters.
@@ -227,11 +246,21 @@ def list_available_models(
             pass
 
     if source in ("all", "external"):
-        external = get_external_models(provider=provider)
-        for m in external:
+        # Some open-weight models (notably openai.gpt-oss-*) are served on BOTH
+        # Converse and Mantle, so they'd otherwise be listed twice under two
+        # different IDs for the same weights. Prefer the Converse entry: it's
+        # what validate_providers smoke-tests and what pricing resolves against.
+        converse_base_ids = {
+            normalize_model_id(m.get("modelId", "")) for m in all_models
+        }
+        for m in get_external_models(provider=provider):
             m["source"] = "external"
             m["type"] = "external"
-        all_models.extend(external)
+            if m["id"].startswith("openai/bedrock/"):
+                short_id = m["id"].rsplit("/", 1)[1]
+                if f"openai.{short_id}" in converse_base_ids:
+                    continue
+            all_models.append(m)
 
     available_providers = detect_available_providers()
 

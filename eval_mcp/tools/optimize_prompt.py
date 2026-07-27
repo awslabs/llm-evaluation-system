@@ -64,7 +64,7 @@ from mcp.types import TextContent
 from inspect_ai._view.common import list_eval_logs_async
 from inspect_ai.log import read_eval_log_async
 
-from eval_mcp.core.bedrock_client import BedrockClient
+from eval_mcp.core.bedrock_client import BedrockClient, resolve_region
 from eval_mcp.core.judge_config import JUDGE_MODELS, JudgeConfig
 from eval_mcp.core.user_storage import (
     get_dataset_by_name,
@@ -382,7 +382,7 @@ async def _spawn_inspect_eval(
     _refresh_keys_from_file()
     env = os.environ.copy()
     env["INSPECT_LOG_DIR"] = log_dir
-    region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))
+    region = resolve_region()
     env["AWS_REGION"] = region
     env["AWS_DEFAULT_REGION"] = region
 

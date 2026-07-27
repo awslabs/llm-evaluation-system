@@ -132,6 +132,27 @@ fails fast with an actionable message if a chosen model doesn't work with the ev
 pipeline. If you ever need the offline fallback prices to be more current, run
 `make sync-pricing` and review the diff.
 
+The same applies to the OpenAI frontier models on **Bedrock Mantle**
+(`openai/bedrock/<id>` — GPT-5.x, served on a separate OpenAI-compatible endpoint,
+NOT Converse, so they never appear in `list_foundation_models`). Those come from
+Mantle's live `/v1/models` catalog via `external_providers.list_mantle_models()`
+(10-min cache); the list in `EXTERNAL_PROVIDERS["bedrock-mantle"]` is only an
+offline fallback.
+
+**Region matters for these.** Mantle models launch region-by-region, so
+availability is per-region, not global — as of 2026-07-27 `gpt-5.5` and
+`gpt-5.6-sol` are us-east-1/us-east-2 only, while `gpt-5.6-terra`, `gpt-5.6-luna`
+and `gpt-5.4` are also in us-west-2. Consequences worth knowing:
+
+- Region resolution goes through `bedrock_client.resolve_region()`:
+  `AWS_REGION` → `AWS_DEFAULT_REGION` → **the resolved profile's region** →
+  `us-west-2`. Never re-add a bare `os.environ.get("AWS_REGION", "us-west-2")` —
+  that ignores the user's profile and silently hides the us-east-only models.
+- Before concluding a model doesn't exist, check another region. `list_*` output
+  is region-scoped, and a "not available" from one region is not evidence of
+  absence. `run_eval` already reports this for you: a Mantle validation failure
+  probes the other regions and names the ones that do serve the model.
+
 ### Adding a tool
 
 1. Async handler in `eval_mcp/tools/<name>.py`.

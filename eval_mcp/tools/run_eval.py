@@ -10,12 +10,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import boto3
-from botocore.config import Config
 from inspect_ai.log import read_eval_log_async
 from mcp.types import TextContent
 
-from eval_mcp.core.bedrock_client import raise_if_autodetect_error
+from eval_mcp.core.bedrock_client import (
+    create_boto3_bedrock_client,
+    raise_if_autodetect_error,
+    resolve_region,
+)
 from eval_mcp.core.user_storage import get_user_dir, get_user_log_dir
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 
@@ -33,6 +35,12 @@ _VALID_CONFIG_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
 
 # Pattern for valid eval IDs: alphanumeric, underscore, dash, colon only
 _VALID_EVAL_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_:-]+$')
+
+# Model IDs to pull out of a config for pre-flight validation. Covers both
+# Bedrock endpoints: `bedrock/<id>` (Converse) and `openai/bedrock/<id>`
+# (Mantle / OpenAI frontier models). The optional `openai/` group is what makes
+# the Mantle models validate — without it they were skipped entirely.
+_PROVIDER_PATTERN = re.compile(r'"((?:openai/)?bedrock/[^"]+)"')
 
 
 def is_catastrophic_eval_failure(scores: list, log_results: Any) -> bool:
@@ -58,6 +66,89 @@ def is_catastrophic_eval_failure(scores: list, log_results: Any) -> bool:
     total = getattr(log_results, "total_samples", 0) or 0
     completed = getattr(log_results, "completed_samples", 0) or 0
     return total > 0 and completed == 0
+
+
+async def _read_stream(stream: Any, label: str, timeout: float = 5.0) -> str:
+    """Drain a subprocess pipe, returning "" rather than raising.
+
+    Used for post-mortem output capture on a failed eval, where losing the
+    diagnostic is worse than any error this could raise.
+    """
+    if stream is None:
+        return ""
+    try:
+        data = await asyncio.wait_for(stream.read(), timeout=timeout)
+    except (asyncio.TimeoutError, Exception):
+        return f"({label} unavailable)"
+    return data.decode("utf-8", errors="replace") if data else ""
+
+
+# Lines that carry the actual cause of an Inspect failure. Ordered by
+# specificity — the first match wins, so a concrete exception beats a generic
+# "Task failed" banner.
+_ERROR_LINE_MARKERS = (
+    "ModuleNotFoundError",
+    "ImportError",
+    "PrerequisiteError",
+    "NotImplementedError",
+    "ValidationException",
+    "AccessDenied",
+    "ResourceNotFound",
+    "Error:",
+    "error:",
+    "Exception",
+    "Traceback",
+)
+
+
+def _summarize_failure(stderr_str: str, stdout_str: str) -> str:
+    """Extract the most informative single line from a failed eval's output.
+
+    Inspect writes fatal errors to stdout via its Rich console, so a caller that
+    only reads stderr gets an empty string and no way to diagnose the run. We
+    scan stderr first (a genuine crash lands there) and fall back to stdout.
+
+    Pure function so the marker matching is unit-testable without spawning
+    Inspect. Returns "" when nothing recognisable is found — the caller keeps
+    its generic exit-code message in that case.
+    """
+    for source in (stderr_str, stdout_str):
+        if not source:
+            continue
+        for marker in _ERROR_LINE_MARKERS:
+            for raw_line in source.splitlines():
+                # Inspect's Rich console box-draws its output, in either Unicode
+                # or ASCII depending on terminal detection. Strip both framing
+                # styles so the message reads cleanly instead of "| ValueError…".
+                line = raw_line.strip().strip("│|").strip()
+                if marker in line and line:
+                    return line[:500]
+    return ""
+
+
+def _mantle_region_hint(model_id: str, current_region: str) -> str:
+    """Build the 'not available here' message, naming regions that do serve it.
+
+    Pure string assembly around the region probe so the wording is testable
+    without network access.
+    """
+    try:
+        from eval_mcp.tools.external_providers import find_mantle_regions_for_model
+
+        regions = [r for r in find_mantle_regions_for_model(model_id) if r != current_region]
+    except Exception:  # pragma: no cover - hint must never break validation
+        regions = []
+
+    base = f"Model not available on Bedrock Mantle in {current_region}"
+    if regions:
+        return (
+            f"{base}. It IS available in: {', '.join(regions)} — "
+            f"set AWS_REGION={regions[0]} and re-run."
+        )
+    return (
+        f"{base}, and it wasn't found in any other region we checked. "
+        "Verify the model ID, or that your account has Bedrock Mantle model access."
+    )
 
 
 def _validate_config_name(config_name: str) -> str:
@@ -119,14 +210,17 @@ async def _validate_providers(providers: List[str]) -> Dict[str, Any]:
 
     # --- Standard Bedrock runtime (Converse) ---
     if runtime_models:
-        region = os.environ.get("AWS_REGION", "us-west-2")
-        config = Config(
-            region_name=region,
+        # Go through create_boto3_bedrock_client, not raw boto3: it honours
+        # AWS_BEARER_TOKEN_BEDROCK (API-key auth) and the resolved profile's
+        # region. A raw client made validation fail for API-key users whose
+        # evals would then have run fine, and pinned the smoke test to
+        # us-west-2 even when the profile pointed elsewhere.
+        runtime_client = create_boto3_bedrock_client(
+            "bedrock-runtime",
             read_timeout=15,
             connect_timeout=10,
             retries={"max_attempts": 1},
         )
-        runtime_client = boto3.client("bedrock-runtime", config=config)
 
         for model_id in runtime_models:
             actual_model_id = model_id.replace("bedrock/", "", 1)
@@ -165,7 +259,13 @@ async def _validate_providers(providers: List[str]) -> Dict[str, Any]:
             if "AccessDenied" in error_msg or "Forbidden" in error_msg or "403" in error_msg:
                 hint = "Bedrock Mantle access not enabled for this account (needs model access / sufficient C-score)"
             elif "not_found" in error_msg or "does not exist" in error_msg or "404" in error_msg:
-                hint = "Model not available on Bedrock Mantle (check the model ID / region)"
+                # "Not found" on Mantle almost always means wrong *region*, not
+                # a nonexistent model — OpenAI's frontier models launch
+                # region-by-region (gpt-5.5 and gpt-5.6-sol were us-east-only
+                # for weeks). Naming the regions that do serve it turns a dead
+                # end into a one-line fix, and stops us telling a user a model
+                # doesn't exist when it merely isn't here.
+                hint = _mantle_region_hint(model_id, resolve_region())
             elif "aws-bedrock-token-generator" in error_msg:
                 hint = "Missing aws-bedrock-token-generator package"
             elif "credential" in error_msg.lower():
@@ -339,9 +439,15 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             if json_config.exists():
                 sources.append(json_config.read_text())
 
-            import re as _re
-            provider_pattern = _re.compile(r'"(bedrock/[^"]+)"')
-            providers = list({m for src in sources for m in provider_pattern.findall(src)})
+            # Match BOTH endpoints. `"(bedrock/...)"` alone could never match
+            # "openai/bedrock/gpt-5.5" — the `"` anchor requires bedrock/ to
+            # start the string — so every GPT-5.x config skipped validation
+            # silently and failed later with an opaque non-zero exit instead of
+            # the actionable region/access message _validate_providers produces.
+            providers = list({
+                m for src in sources
+                for m in _PROVIDER_PATTERN.findall(src)
+            })
 
             if providers:
                 validation = await _validate_providers(providers)
@@ -373,7 +479,11 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         env = os.environ.copy()
         env["INSPECT_LOG_DIR"] = log_dir_str
         # Ensure AWS region is set for Bedrock
-        region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))
+        # Pin the child's region explicitly. resolve_region() also consults the
+        # resolved profile's configured region, so a user on a us-east-2 profile
+        # reaches the models that only launched there (gpt-5.5, gpt-5.6-sol)
+        # without having to export AWS_REGION by hand.
+        region = resolve_region()
         env["AWS_REGION"] = region
         env["AWS_DEFAULT_REGION"] = region
 
@@ -522,14 +632,15 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         finally:
             _running_evaluations.pop(user_id, None)
 
-        # Read stderr only on failure
-        stderr_str = ""
-        if process.returncode != 0 and process.stderr:
-            try:
-                stderr_bytes = await asyncio.wait_for(process.stderr.read(), timeout=5)
-                stderr_str = stderr_bytes.decode("utf-8") if stderr_bytes else ""
-            except (asyncio.TimeoutError, Exception):
-                stderr_str = "(stderr unavailable)"
+        # Read the child's output only on failure.
+        #
+        # Both streams, not just stderr: Inspect's CLI renders fatal errors
+        # through its Rich console, which writes to **stdout**. Reading stderr
+        # alone produced the worst possible failure report — `success: false,
+        # exit code 1, stderr: ""` — with the actual cause (e.g. a missing
+        # `openai` package for openai/bedrock/* models) sitting unread in stdout.
+        stderr_str = await _read_stream(process.stderr, "stderr") if process.returncode != 0 else ""
+        stdout_str = await _read_stream(process.stdout, "stdout") if process.returncode != 0 else ""
 
         # Retry failed/incomplete samples from this run
         try:
@@ -589,18 +700,23 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             logger.warning(f"S3 log sync failed: {e}")
 
         if process.returncode != 0:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps({
-                        "success": False,
-                        "evalId": eval_id,
-                        "configName": config_name,
-                        "error": f"Evaluation failed with exit code {process.returncode}",
-                        "stderr": stderr_str[:2000],
-                    }),
+            payload = {
+                "success": False,
+                "evalId": eval_id,
+                "configName": config_name,
+                "error": f"Evaluation failed with exit code {process.returncode}",
+                "stderr": stderr_str[:2000],
+                "stdout": stdout_str[:4000],
+            }
+            # Inspect prints the traceback to stdout, so that's usually where
+            # the real cause is. Hoist it into `error` when stderr is empty —
+            # otherwise the agent reads "exit code 1" and has nothing to act on.
+            detail = _summarize_failure(stderr_str, stdout_str)
+            if detail:
+                payload["error"] = (
+                    f"Evaluation failed with exit code {process.returncode}: {detail}"
                 )
-            ]
+            return [TextContent(type="text", text=json.dumps(payload))]
 
         # Read results from the latest .eval log file
         results_summary = None
@@ -802,7 +918,11 @@ async def handle_retry_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         _refresh_keys_from_file()
         env = os.environ.copy()
         env["INSPECT_LOG_DIR"] = log_dir_str
-        region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))
+        # Pin the child's region explicitly. resolve_region() also consults the
+        # resolved profile's configured region, so a user on a us-east-2 profile
+        # reaches the models that only launched there (gpt-5.5, gpt-5.6-sol)
+        # without having to export AWS_REGION by hand.
+        region = resolve_region()
         env["AWS_REGION"] = region
         env["AWS_DEFAULT_REGION"] = region
 

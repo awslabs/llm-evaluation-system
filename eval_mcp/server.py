@@ -50,7 +50,6 @@ from eval_mcp.tools.benchmarks import (
 )
 
 # Configuration
-region = os.environ.get("AWS_REGION", "us-west-2")
 port = int(os.environ.get("EVAL_MCP_PORT", "8002"))
 host = os.environ.get("HOST", "127.0.0.1")
 
@@ -65,7 +64,7 @@ if "USER_STORAGE_BASE" not in os.environ:
 mcp = FastMCP("eval-server", port=port, host=host)
 
 # Shared clients
-bedrock = BedrockClient(region=region)
+bedrock = BedrockClient()
 
 
 # Tool annotation presets. These are hints (not security boundaries) that

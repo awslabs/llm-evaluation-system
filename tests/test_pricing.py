@@ -78,6 +78,57 @@ def test_bedrock_mantle_distinct_pricing(pricing):
     )
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "openai/bedrock/gpt-5.5",
+        "openai/bedrock/gpt-5.6-sol",
+        "openai/bedrock/gpt-5.6-terra",
+        "openai/bedrock/gpt-5.6-luna",
+    ],
+)
+def test_gpt5x_mantle_models_priced_offline(pricing, model_id):
+    """Every GPT-5.x model we surface must price from the vendored snapshot.
+
+    These IDs are advertised by list_available_models, so an unpriced one shows
+    up in the viewer as a blank cost column. The snapshot lagged the gpt-5.6
+    launch and returned None for all three variants until `make sync-pricing`.
+    """
+    cost = pricing.get_model_cost(model_id)
+    assert cost is not None, f"{model_id} unpriced — run `make sync-pricing`"
+    assert cost["input"] > 0 and cost["output"] > 0
+
+
+def test_gpt56_price_tiers_ordered(pricing):
+    """Sol > Terra > Luna, per AWS's positioning of the three variants.
+
+    Guards against a snapshot refresh silently scrambling which ID maps to
+    which price — the numbers are plausible individually but wrong in relation.
+    """
+    sol = pricing.get_model_cost("openai/bedrock/gpt-5.6-sol")
+    terra = pricing.get_model_cost("openai/bedrock/gpt-5.6-terra")
+    luna = pricing.get_model_cost("openai/bedrock/gpt-5.6-luna")
+    assert sol["input"] > terra["input"] > luna["input"]
+
+
+def test_dated_snapshot_falls_back_to_floating_alias(pricing):
+    """Pinned date snapshots price as their floating alias.
+
+    Mantle serves both `gpt-5.5` and `gpt-5.5-2026-04-23`; LiteLLM keys only the
+    former. The pinned ID is the better choice for a reproducible eval, so
+    reporting its cost as unknown would penalize the right decision.
+    """
+    dated = pricing.get_model_cost("openai/bedrock/gpt-5.5-2026-04-23")
+    alias = pricing.get_model_cost("openai/bedrock/gpt-5.5")
+    assert dated is not None
+    assert dated == alias
+
+
+def test_date_fallback_does_not_invent_prices(pricing):
+    """The fallback must not price a model family that genuinely isn't listed."""
+    assert pricing.get_model_cost("openai/bedrock/gpt-9.9-imaginary-2030-01-01") is None
+
+
 def test_unknown_model_returns_none(pricing):
     """Unknown models return None (distinct from a $0 cost)."""
     assert pricing.get_model_cost("bedrock/totally.invented-model-v9:0") is None

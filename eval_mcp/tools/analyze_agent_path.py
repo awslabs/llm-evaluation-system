@@ -93,7 +93,7 @@ async def handle_analyze_agent_path(args: Dict[str, Any]) -> List[TextContent]:
         except Exception as e:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": f"Failed to read agent: {str(e)}"}))]
 
-        bedrock = BedrockClient(region=os.environ.get("AWS_REGION", "us-west-2"))
+        bedrock = BedrockClient()
         analysis = await analyze_agent_deep(bedrock, code_files, num_samples, user_context)
 
         test_cases = analysis.get("test_cases", [])

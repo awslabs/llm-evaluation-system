@@ -461,11 +461,25 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
                 if log.results and log.results.scores:
                     for s in log.results.scores:
                         scores.append({"scorer": s.name, "metrics": {n: m.value for n, m in s.metrics.items()}})
+                # Report what actually RAN, not the dataset size. `--limit N`
+                # leaves dataset.samples at the full count (e.g. 164 for
+                # HumanEval) while only N samples are scored, so reporting the
+                # dataset size overstates the evidence behind the score — a
+                # 3-sample smoke test looked like a full 164-sample benchmark.
+                ran = getattr(log.results, "total_samples", None) if log.results else None
+                dataset_total = log.eval.dataset.samples if log.eval.dataset else 0
                 results_summary = {
-                    "totalTests": log.eval.dataset.samples if log.eval.dataset else 0,
+                    "totalTests": ran if ran else dataset_total,
                     "scores": scores,
                     "logFile": latest.name,
                 }
+                if ran and dataset_total and ran < dataset_total:
+                    results_summary["datasetTotal"] = dataset_total
+                    results_summary["limited"] = (
+                        f"Ran {ran} of {dataset_total} samples (--limit). Scores are "
+                        f"from that subset only and are not comparable to published "
+                        f"full-benchmark numbers."
+                    )
                 run_id = log.eval.run_id
                 all_samples_errored = is_catastrophic_eval_failure(scores, log.results)
         except Exception as e:

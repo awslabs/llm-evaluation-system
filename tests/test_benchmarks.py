@@ -224,3 +224,40 @@ async def test_get_benchmark_details_unknown_suggests_near_matches():
     d = json.loads(out[0].text)
     assert d["success"] is False
     assert "gsm8k" in d["didYouMean"]
+
+
+# ---------------------------------------------------------------------------
+# --limit reporting
+#
+# `--limit N` leaves eval.dataset.samples at the FULL dataset size while only N
+# samples are actually scored. Reporting the dataset size made a 3-sample smoke
+# test look like a complete 164-sample HumanEval run — overstating the evidence
+# behind a score, which is the one thing an eval tool must never do.
+# ---------------------------------------------------------------------------
+
+
+def test_limited_run_reports_samples_actually_run():
+    """totalTests must be what ran; the dataset size goes in datasetTotal."""
+    import inspect as _inspect
+
+    from eval_mcp.tools import benchmarks
+
+    src = _inspect.getsource(benchmarks.handle_run_benchmark)
+    # The summary must prefer results.total_samples over dataset.samples.
+    assert "total_samples" in src
+    assert "datasetTotal" in src
+    assert "limited" in src
+
+
+def test_limit_warning_explains_incomparability():
+    """A subset score is not comparable to published full-benchmark numbers.
+
+    Without saying so, a 20-sample HumanEval score gets quoted next to a
+    published pass@1 as though they measured the same thing.
+    """
+    import inspect as _inspect
+
+    from eval_mcp.tools import benchmarks
+
+    src = _inspect.getsource(benchmarks.handle_run_benchmark)
+    assert "not comparable" in src

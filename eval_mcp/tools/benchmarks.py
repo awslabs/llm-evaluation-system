@@ -42,6 +42,7 @@ from eval_mcp.core.bedrock_client import raise_if_autodetect_error, resolve_regi
 from eval_mcp.core.user_storage import get_user_dir, get_user_log_dir
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 from eval_mcp.tools.run_eval import (
+    _DEFAULT_MAX_TOKENS,
     _INSPECT_CMD,
     _running_evaluations,
     _terminate_process_gracefully,
@@ -385,6 +386,8 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
             "--no-log-images",
             "--no-fail-on-error",
             "--log-shared", "10",
+            # Same reasoning-model truncation guard as run_eval.
+            "--max-tokens", str(_DEFAULT_MAX_TOKENS),
         ]
         if limit:
             cmd.extend(["--limit", str(int(limit))])

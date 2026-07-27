@@ -292,3 +292,21 @@ def test_region_hint_survives_probe_failure():
 
     assert "us-west-2" in hint
     assert "AWS_REGION=" not in hint
+
+
+# ---------------------------------------------------------------------------
+# max_tokens default
+# ---------------------------------------------------------------------------
+
+
+def test_eval_launches_with_raised_max_tokens():
+    """Every eval must pass an explicit --max-tokens above Inspect's 2048.
+
+    Inspect's Bedrock provider defaults to 2048, which reasoning models can
+    consume entirely on their reasoning channel — producing an empty completion
+    that scores 0 while the run reports success. Measured: gpt-5.6-luna and
+    gpt-5.6-sol both hit 2048/2048 reasoning tokens with no visible output.
+    """
+    from eval_mcp.tools.run_eval import _DEFAULT_MAX_TOKENS
+
+    assert _DEFAULT_MAX_TOKENS > 2048, "must exceed Inspect's Bedrock default"

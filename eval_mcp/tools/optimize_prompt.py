@@ -81,6 +81,7 @@ from eval_mcp.tools.create_config import (
 )
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 from eval_mcp.tools.run_eval import (
+    _DEFAULT_MAX_TOKENS,
     _running_evaluations,
     _terminate_process_gracefully,
 )
@@ -394,6 +395,8 @@ async def _spawn_inspect_eval(
         "--no-log-images",
         "--no-fail-on-error",
         "--log-shared", "10",
+        # Same reasoning-model truncation guard as run_eval.
+        "--max-tokens", str(_DEFAULT_MAX_TOKENS),
     ]
     if providers:
         cmd.extend(["--model", ",".join(providers)])

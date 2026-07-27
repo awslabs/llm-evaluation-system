@@ -36,6 +36,21 @@ _VALID_CONFIG_NAME_PATTERN = re.compile(r'^[a-zA-Z0-9_-]+$')
 # Pattern for valid eval IDs: alphanumeric, underscore, dash, colon only
 _VALID_EVAL_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_:-]+$')
 
+# Output-token ceiling for every eval we launch.
+#
+# Inspect's Bedrock provider defaults to 2048, which is too low for reasoning
+# models and biases comparisons in a way that is easy to miss: gpt-5.6-luna,
+# gpt-5.6-sol and gpt-oss-20b can spend the WHOLE budget on their reasoning
+# channel and return an empty completion (stop_reason="max_tokens"). The sample
+# still "completes", so it scores 0 and the run reports success — the model that
+# reasoned hardest looks like the worst model. Measured on a hard proof task:
+# luna and sol both consumed 2048/2048 reasoning tokens with 0 visible output.
+#
+# 8192 clears the observed worst case with headroom. It's a ceiling, not a
+# target — models that answer briefly are unaffected and cost nothing extra,
+# since Bedrock bills actual tokens generated.
+_DEFAULT_MAX_TOKENS = 8192
+
 # Model IDs to pull out of a config for pre-flight validation. Covers both
 # Bedrock endpoints: `bedrock/<id>` (Converse) and `openai/bedrock/<id>`
 # (Mantle / OpenAI frontier models). The optional `openai/` group is what makes
@@ -582,6 +597,7 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             "--no-log-images",
             "--no-fail-on-error",
             "--log-shared", "10",
+            "--max-tokens", str(_DEFAULT_MAX_TOKENS),
         ]
 
         # Pass models to inspect eval (comma-separated for multiple).

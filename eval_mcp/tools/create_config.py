@@ -327,6 +327,27 @@ def jury_scorer():
     async def score(state, target):
         output = state.output.completion if state.output else ""
         if not output:
+            # Distinguish "the model produced a bad answer" from "the model
+            # never got to answer". A reasoning model (gpt-5.6-*, gpt-oss-*)
+            # can spend its entire token budget on the reasoning channel and
+            # emit zero visible tokens: stop_reason == "max_tokens" with an
+            # empty completion. Scoring that a plain 0 is a measurement error
+            # masquerading as a quality signal — it silently penalises exactly
+            # the models that think hardest, and the run still reports success.
+            stop_reason = getattr(state.output, "stop_reason", None) if state.output else None
+            if stop_reason == "max_tokens":
+                return Score(
+                    value=0.0,
+                    answer="",
+                    explanation=(
+                        "TRUNCATED: the model hit its max_tokens limit before emitting "
+                        "any answer (all output tokens went to the reasoning channel). "
+                        "This is a token-budget problem, NOT a quality result — raise "
+                        "max_tokens (e.g. --max-tokens 8192) and re-run before comparing "
+                        "this model against others."
+                    ),
+                    metadata={"truncated_no_output": True, "stop_reason": stop_reason},
+                )
             return Score(value=0.0, answer="", explanation="No output generated")
 
         question = str(state.input)

@@ -283,6 +283,27 @@ def _resolve_task(task: str, evals: List[Any]) -> Dict[str, Any]:
     return {"ok": False, "error": f"Unknown benchmark/task '{task}'. Use list_benchmarks to discover names."}
 
 
+async def _count_truncated_samples(log_name: str) -> int:
+    """Number of samples cut off by the max_tokens limit.
+
+    Requires the full log (stop_reason is per-sample, not in the header), so it
+    is called only once per run when building the summary. Best-effort: returns
+    0 on any read failure rather than breaking an otherwise-successful run.
+    """
+    try:
+        from inspect_ai.log import read_eval_log_async
+
+        log = await read_eval_log_async(log_name)
+        return sum(
+            1
+            for s in (log.samples or [])
+            if s.output and s.output.stop_reason == "max_tokens"
+        )
+    except Exception as e:  # pragma: no cover - diagnostics must not break runs
+        logger.warning("Could not count truncated samples for %s: %s", log_name, e)
+        return 0
+
+
 async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
     """Run a premade ``inspect_evals`` benchmark via subprocess.
 
@@ -482,6 +503,25 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
                     )
                 run_id = log.eval.run_id
                 all_samples_errored = is_catastrophic_eval_failure(scores, log.results)
+
+                # Surface truncation. A reasoning model that runs out of tokens
+                # mid-thought scores 0 on that sample, so a high truncation rate
+                # means the score measures the token budget, not the model.
+                # Observed: gpt-oss-20b truncated on 12/30 AIME 2025 problems at
+                # max_tokens=8192 and ALL 12 scored 0 — its reported 0.467 was a
+                # floor, not an ability. Benchmarks are the headline numbers
+                # people quote, so this cannot be left implicit.
+                truncated = await _count_truncated_samples(latest.name)
+                if truncated:
+                    results_summary["truncatedSamples"] = truncated
+                    pct = round(100 * truncated / ran) if ran else 0
+                    results_summary["truncationWarning"] = (
+                        f"{truncated} of {ran} samples ({pct}%) hit the max_tokens "
+                        f"limit and were cut off mid-answer — those score 0 "
+                        f"regardless of ability. This score is a LOWER BOUND. "
+                        f"Re-run with a higher --max-tokens before comparing "
+                        f"this model against others or against published numbers."
+                    )
         except Exception as e:
             results_summary = {"error": f"Could not parse results: {e}"}
 

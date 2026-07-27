@@ -261,3 +261,72 @@ def test_limit_warning_explains_incomparability():
 
     src = _inspect.getsource(benchmarks.handle_run_benchmark)
     assert "not comparable" in src
+
+
+# ---------------------------------------------------------------------------
+# Truncation must be visible on benchmark results
+#
+# A reasoning model that runs out of tokens mid-thought scores 0 on that sample.
+# Observed: gpt-oss-20b truncated on 12/30 AIME 2025 problems at
+# max_tokens=8192, and ALL 12 scored 0 — the reported 0.467 was a floor, not an
+# ability. Benchmark numbers are what people quote, so a score depressed by the
+# token budget cannot be reported as if it measured the model.
+# ---------------------------------------------------------------------------
+
+
+def test_truncation_is_surfaced_as_lower_bound():
+    import inspect as _inspect
+
+    from eval_mcp.tools import benchmarks
+
+    src = _inspect.getsource(benchmarks.handle_run_benchmark)
+    assert "truncatedSamples" in src
+    assert "truncationWarning" in src
+    assert "LOWER BOUND" in src
+
+
+async def _fake_log(samples):
+    class _O:
+        def __init__(self, sr):
+            self.stop_reason = sr
+
+    class _S:
+        def __init__(self, sr):
+            self.output = _O(sr)
+
+    class _L:
+        pass
+
+    log = _L()
+    log.samples = [_S(sr) for sr in samples]
+    return log
+
+
+def test_count_truncated_samples_counts_only_max_tokens(monkeypatch):
+    import asyncio
+
+    from eval_mcp.tools import benchmarks
+
+    async def run():
+        import sys
+        import types
+
+        fake = types.ModuleType("inspect_ai.log")
+
+        async def read_eval_log_async(name, **kw):
+            return await _fake_log(["stop", "max_tokens", "stop", "max_tokens", "tool_calls"])
+
+        fake.read_eval_log_async = read_eval_log_async
+        monkeypatch.setitem(sys.modules, "inspect_ai.log", fake)
+        return await benchmarks._count_truncated_samples("x.eval")
+
+    assert asyncio.run(run()) == 2
+
+
+def test_count_truncated_samples_degrades_to_zero_on_error():
+    """A diagnostics helper must never break an otherwise-successful run."""
+    import asyncio
+
+    from eval_mcp.tools import benchmarks
+
+    assert asyncio.run(benchmarks._count_truncated_samples("/definitely/not/a/log.eval")) == 0

@@ -132,6 +132,55 @@ fails fast with an actionable message if a chosen model doesn't work with the ev
 pipeline. If you ever need the offline fallback prices to be more current, run
 `make sync-pricing` and review the diff.
 
+The same applies to the OpenAI frontier models on **Bedrock Mantle**
+(`openai/bedrock/<id>` — GPT-5.x, served on a separate OpenAI-compatible endpoint,
+NOT Converse, so they never appear in `list_foundation_models`). Those come from
+Mantle's live `/v1/models` catalog via `external_providers.list_mantle_models()`
+(10-min cache); the list in `EXTERNAL_PROVIDERS["bedrock-mantle"]` is only an
+offline fallback.
+
+**Region matters for these.** Mantle models launch region-by-region, so
+availability is per-region, not global — as of 2026-07-27 `gpt-5.5` and
+`gpt-5.6-sol` are us-east-1/us-east-2 only, while `gpt-5.6-terra`, `gpt-5.6-luna`
+and `gpt-5.4` are also in us-west-2. Consequences worth knowing:
+
+- Region resolution goes through `bedrock_client.resolve_region()`:
+  `AWS_REGION` → `AWS_DEFAULT_REGION` → **the resolved profile's region** →
+  `DEFAULT_REGION` (**us-east-2**). Never re-add a bare
+  `os.environ.get("AWS_REGION", ...)` for a Bedrock call — that ignores the
+  user's profile and silently hides the us-east-only models.
+- **`DEFAULT_REGION` is us-east-2, not us-west-2**, because that's the region
+  carrying the full model set: the Mantle frontier models are us-east-only, and
+  every current-generation Converse model (Claude Opus 5 / Sonnet 5 / Haiku 4.5 /
+  Sonnet 4.6, Nova, gpt-oss) is in us-east-2 too. Pinned by a test — don't
+  "tidy" it back to us-west-2.
+- **There is exactly one default region, and it is Bedrock-only.**
+  `core/user_storage.py`, `core/s3_client.py` and `backend/core/database.py`
+  read `AWS_REGION` with **no fallback at all** (empty string) and must NOT use
+  `resolve_region()`. They address S3 buckets and RDS whose location is fixed
+  when created; the Bedrock region would point at resources that don't exist
+  there, and a guessed default would mean silently hitting the wrong bucket or
+  an opaque IAM-auth failure instead of an honest error. A bucket/database is
+  only ever configured together with an explicit `AWS_REGION` (both come from
+  Helm/Terraform), and with no bucket set those modules never touch S3.
+- **Mantle models are auto-routed cross-region**, so GPT-5.x works for any user
+  regardless of where they are. Credentials are global and only the endpoint is
+  regional, so `external_providers.resolve_mantle_region()` sends a model the
+  caller's region doesn't serve to one that does; the decision is baked into the
+  config's `mantle_regions` map at creation time. Judges apply it per-model in
+  the generated task file; targets arrive via `--model` on the CLI, so
+  `run_eval._region_for_run()` moves the whole subprocess instead — the two
+  alternatives are dead ends (`-M aws_region=` is global and errors on Converse
+  models; `BEDROCK_OPENAI_BASE_URL` alone gives "Credential should be scoped to
+  a valid region" because the bearer token is still minted for the ambient
+  region). Only `openai/bedrock/*` inference moves — storage, logs and Converse
+  models stay put. `EVAL_MCP_MANTLE_REGION` pins a region;
+  `EVAL_MCP_NO_CROSS_REGION=1` disables the hop for data-residency constraints.
+- Before concluding a model doesn't exist, check another region. `list_*` output
+  is region-scoped, and a "not available" from one region is not evidence of
+  absence. `run_eval` also reports this: a Mantle validation failure probes the
+  other regions and names the ones that do serve the model.
+
 ### Adding a tool
 
 1. Async handler in `eval_mcp/tools/<name>.py`.

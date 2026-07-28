@@ -224,3 +224,127 @@ async def test_get_benchmark_details_unknown_suggests_near_matches():
     d = json.loads(out[0].text)
     assert d["success"] is False
     assert "gsm8k" in d["didYouMean"]
+
+
+# ---------------------------------------------------------------------------
+# --limit reporting
+#
+# `--limit N` leaves eval.dataset.samples at the FULL dataset size while only N
+# samples are actually scored. Reporting the dataset size made a 3-sample smoke
+# test look like a complete 164-sample HumanEval run — overstating the evidence
+# behind a score, which is the one thing an eval tool must never do.
+# ---------------------------------------------------------------------------
+
+
+def test_limited_run_reports_samples_actually_run():
+    """totalTests must be what ran; the dataset size goes in datasetTotal."""
+    import inspect as _inspect
+
+    from eval_mcp.tools import benchmarks
+
+    src = _inspect.getsource(benchmarks.handle_run_benchmark)
+    # The summary must prefer results.total_samples over dataset.samples.
+    assert "total_samples" in src
+    assert "datasetTotal" in src
+    assert "limited" in src
+
+
+def test_limit_warning_explains_incomparability():
+    """A subset score is not comparable to published full-benchmark numbers.
+
+    Without saying so, a 20-sample HumanEval score gets quoted next to a
+    published pass@1 as though they measured the same thing.
+    """
+    import inspect as _inspect
+
+    from eval_mcp.tools import benchmarks
+
+    src = _inspect.getsource(benchmarks.handle_run_benchmark)
+    assert "not comparable" in src
+
+
+# ---------------------------------------------------------------------------
+# Truncation must be visible on benchmark results
+#
+# A reasoning model that runs out of tokens mid-thought scores 0 on that sample.
+# Observed: gpt-oss-20b truncated on 12/30 AIME 2025 problems at
+# max_tokens=8192, and ALL 12 scored 0 — the reported 0.467 was a floor, not an
+# ability. Benchmark numbers are what people quote, so a score depressed by the
+# token budget cannot be reported as if it measured the model.
+# ---------------------------------------------------------------------------
+
+
+def test_truncation_is_surfaced_as_lower_bound():
+    import inspect as _inspect
+
+    from eval_mcp.tools import benchmarks
+
+    src = _inspect.getsource(benchmarks.handle_run_benchmark)
+    assert "truncatedSamples" in src
+    assert "truncationWarning" in src
+    assert "LOWER BOUND" in src
+
+
+async def _fake_log(samples):
+    class _O:
+        def __init__(self, sr):
+            self.stop_reason = sr
+
+    class _S:
+        def __init__(self, sr):
+            self.output = _O(sr)
+
+    class _L:
+        pass
+
+    log = _L()
+    log.samples = [_S(sr) for sr in samples]
+    return log
+
+
+def test_count_truncated_samples_counts_only_max_tokens(monkeypatch):
+    import asyncio
+
+    from eval_mcp.tools import benchmarks
+
+    async def run():
+        import sys
+        import types
+
+        fake = types.ModuleType("inspect_ai.log")
+
+        async def read_eval_log_async(name, **kw):
+            return await _fake_log(["stop", "max_tokens", "stop", "max_tokens", "tool_calls"])
+
+        fake.read_eval_log_async = read_eval_log_async
+        monkeypatch.setitem(sys.modules, "inspect_ai.log", fake)
+        return await benchmarks._count_truncated_samples("x.eval")
+
+    assert asyncio.run(run()) == 2
+
+
+def test_count_truncated_samples_degrades_to_zero_on_error():
+    """A diagnostics helper must never break an otherwise-successful run."""
+    import asyncio
+
+    from eval_mcp.tools import benchmarks
+
+    assert asyncio.run(benchmarks._count_truncated_samples("/definitely/not/a/log.eval")) == 0
+
+
+def test_errored_samples_shrink_denominator_and_are_reported():
+    """Errored samples are excluded from accuracy, which flatters failing models.
+
+    Observed on AIME 2025: gpt-oss-20b hit 3 Bedrock read timeouts, so its
+    reported 0.519 was 14/27 while haiku and luna were graded on all 30. Treating
+    the errors as unsolved gives 0.467 — a materially different comparison. The
+    report must say which denominator was used.
+    """
+    import inspect as _inspect
+
+    from eval_mcp.tools import benchmarks
+
+    src = _inspect.getsource(benchmarks.handle_run_benchmark)
+    assert "erroredSamples" in src
+    assert "scoredSamples" in src
+    assert "EXCLUDED from the accuracy denominator" in src

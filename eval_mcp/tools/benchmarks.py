@@ -38,10 +38,11 @@ from typing import Any, Dict, List, Optional
 
 from mcp.types import TextContent
 
-from eval_mcp.core.bedrock_client import raise_if_autodetect_error
+from eval_mcp.core.bedrock_client import raise_if_autodetect_error, resolve_region
 from eval_mcp.core.user_storage import get_user_dir, get_user_log_dir
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 from eval_mcp.tools.run_eval import (
+    _DEFAULT_MAX_TOKENS,
     _INSPECT_CMD,
     _running_evaluations,
     _terminate_process_gracefully,
@@ -282,6 +283,27 @@ def _resolve_task(task: str, evals: List[Any]) -> Dict[str, Any]:
     return {"ok": False, "error": f"Unknown benchmark/task '{task}'. Use list_benchmarks to discover names."}
 
 
+async def _count_truncated_samples(log_name: str) -> int:
+    """Number of samples cut off by the max_tokens limit.
+
+    Requires the full log (stop_reason is per-sample, not in the header), so it
+    is called only once per run when building the summary. Best-effort: returns
+    0 on any read failure rather than breaking an otherwise-successful run.
+    """
+    try:
+        from inspect_ai.log import read_eval_log_async
+
+        log = await read_eval_log_async(log_name)
+        return sum(
+            1
+            for s in (log.samples or [])
+            if s.output and s.output.stop_reason == "max_tokens"
+        )
+    except Exception as e:  # pragma: no cover - diagnostics must not break runs
+        logger.warning("Could not count truncated samples for %s: %s", log_name, e)
+        return 0
+
+
 async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
     """Run a premade ``inspect_evals`` benchmark via subprocess.
 
@@ -373,7 +395,7 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
         _refresh_keys_from_file()
         env = os.environ.copy()
         env["INSPECT_LOG_DIR"] = log_dir_str
-        region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-west-2"))
+        region = resolve_region()
         env["AWS_REGION"] = region
         env["AWS_DEFAULT_REGION"] = region
 
@@ -385,6 +407,8 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
             "--no-log-images",
             "--no-fail-on-error",
             "--log-shared", "10",
+            # Same reasoning-model truncation guard as run_eval.
+            "--max-tokens", str(_DEFAULT_MAX_TOKENS),
         ]
         if limit:
             cmd.extend(["--limit", str(int(limit))])
@@ -458,13 +482,65 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
                 if log.results and log.results.scores:
                     for s in log.results.scores:
                         scores.append({"scorer": s.name, "metrics": {n: m.value for n, m in s.metrics.items()}})
+                # Report what actually RAN, not the dataset size. `--limit N`
+                # leaves dataset.samples at the full count (e.g. 164 for
+                # HumanEval) while only N samples are scored, so reporting the
+                # dataset size overstates the evidence behind the score — a
+                # 3-sample smoke test looked like a full 164-sample benchmark.
+                ran = getattr(log.results, "total_samples", None) if log.results else None
+                dataset_total = log.eval.dataset.samples if log.eval.dataset else 0
                 results_summary = {
-                    "totalTests": log.eval.dataset.samples if log.eval.dataset else 0,
+                    "totalTests": ran if ran else dataset_total,
                     "scores": scores,
                     "logFile": latest.name,
                 }
+                if ran and dataset_total and ran < dataset_total:
+                    results_summary["datasetTotal"] = dataset_total
+                    results_summary["limited"] = (
+                        f"Ran {ran} of {dataset_total} samples (--limit). Scores are "
+                        f"from that subset only and are not comparable to published "
+                        f"full-benchmark numbers."
+                    )
                 run_id = log.eval.run_id
                 all_samples_errored = is_catastrophic_eval_failure(scores, log.results)
+
+                # Surface truncation. A reasoning model that runs out of tokens
+                # mid-thought scores 0 on that sample, so a high truncation rate
+                # means the score measures the token budget, not the model.
+                # Observed: gpt-oss-20b truncated on 12/30 AIME 2025 problems at
+                # max_tokens=8192 and ALL 12 scored 0 — its reported 0.467 was a
+                # floor, not an ability. Benchmarks are the headline numbers
+                # people quote, so this cannot be left implicit.
+                # Errored samples are dropped from the accuracy DENOMINATOR, not
+                # scored 0 — so a model whose requests time out gets graded only
+                # on the ones that came back. Observed: gpt-oss-20b hit 3 Bedrock
+                # read timeouts on AIME 2025 and its 0.519 was 14/27, while
+                # haiku and luna were graded on all 30. That flatters whichever
+                # model fails most, which is the opposite of what you want.
+                completed = getattr(log.results, "completed_samples", None) if log.results else None
+                if ran and completed is not None and completed < ran:
+                    errored = ran - completed
+                    results_summary["erroredSamples"] = errored
+                    results_summary["scoredSamples"] = completed
+                    results_summary["errorWarning"] = (
+                        f"{errored} of {ran} samples errored (e.g. timeout) and are "
+                        f"EXCLUDED from the accuracy denominator — this score is "
+                        f"{completed} samples, not {ran}. Cross-model comparison is "
+                        f"skewed unless every model was scored on the same set; "
+                        f"treat errors as unsolved for a like-for-like number."
+                    )
+
+                truncated = await _count_truncated_samples(latest.name)
+                if truncated:
+                    results_summary["truncatedSamples"] = truncated
+                    pct = round(100 * truncated / ran) if ran else 0
+                    results_summary["truncationWarning"] = (
+                        f"{truncated} of {ran} samples ({pct}%) hit the max_tokens "
+                        f"limit and were cut off mid-answer — those score 0 "
+                        f"regardless of ability. This score is a LOWER BOUND. "
+                        f"Re-run with a higher --max-tokens before comparing "
+                        f"this model against others or against published numbers."
+                    )
         except Exception as e:
             results_summary = {"error": f"Could not parse results: {e}"}
 

@@ -393,7 +393,7 @@ async def handle_analyze_agent_image(args: Dict[str, Any]) -> List[TextContent]:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": "No Python files found in image working directory"}))]
 
         # Step 2: Analyze the code
-        bedrock = BedrockClient(region=os.environ.get("AWS_REGION", "us-west-2"))
+        bedrock = BedrockClient()
         analysis = await analyze_agent_deep(bedrock, code_files, num_samples, user_context)
 
         test_cases = analysis.get("test_cases", [])

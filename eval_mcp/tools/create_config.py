@@ -11,6 +11,7 @@ argument — alone or composed with the jury.
 """
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,8 @@ from eval_mcp.core.user_storage import (
     get_dataset_by_name,
     get_user_dir,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +216,38 @@ def build_config_json(
         config["prompts"] = prompts
     if score_only:
         config["score_only"] = True
+
+    # Resolve region routing for any Bedrock Mantle model (target or judge) that
+    # the caller's own region doesn't serve. Done HERE, at config-creation time,
+    # rather than inside the eval: it costs a cached HTTP lookup per distinct
+    # model, and the eval subprocess would otherwise repeat it for every sample.
+    mantle_regions = _resolve_mantle_regions(
+        [m for m in list(providers or []) + list(judge_config.judges.values())
+         if isinstance(m, str) and m.startswith("openai/bedrock/")]
+    )
+    if mantle_regions:
+        config["mantle_regions"] = mantle_regions
     return config
+
+
+def _resolve_mantle_regions(model_ids: list) -> dict:
+    """Map each Mantle model to a region that serves it, where a hop is needed.
+
+    Omits models the caller's own region already serves, so the common case adds
+    nothing to the config. Best-effort: a probe failure just means no override,
+    and the model fails later with the actionable region hint from run_eval.
+    """
+    out = {}
+    for model_id in dict.fromkeys(model_ids):
+        try:
+            from eval_mcp.tools.external_providers import resolve_mantle_region
+
+            region = resolve_mantle_region(model_id)
+            if region:
+                out[model_id] = region
+        except Exception as e:  # pragma: no cover - never block config creation
+            logger.warning("Could not resolve Mantle region for %s: %s", model_id, e)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +287,20 @@ from inspect_ai.tool._tool_params import ToolParams
 JUDGE_MODELS = CONFIG["judge_models"]
 CRITERIA = CONFIG["criteria"]
 SYSTEM_PROMPT = CONFIG["system_prompt"]
+
+# Region routing for Bedrock Mantle judges, baked in at config-creation time by
+# create_eval_config. Mantle model availability is per-region (gpt-5.5 and
+# gpt-5.6-sol are us-east-1/us-east-2 only) while AWS credentials are global, so
+# a judge that isn't served in the user's own region is invoked against one that
+# does serve it. Only openai/bedrock/* inference is affected — Converse judges,
+# storage and logs all stay in the user's region.
+MANTLE_REGIONS = CONFIG.get("mantle_regions") or {}
+
+
+def _judge_model_args(model_id):
+    """Extra get_model() kwargs for a judge — an aws_region override, if needed."""
+    region = MANTLE_REGIONS.get(model_id)
+    return {"aws_region": region} if region else {}
 
 
 def _build_scoring_tool():
@@ -327,6 +375,27 @@ def jury_scorer():
     async def score(state, target):
         output = state.output.completion if state.output else ""
         if not output:
+            # Distinguish "the model produced a bad answer" from "the model
+            # never got to answer". A reasoning model (gpt-5.6-*, gpt-oss-*)
+            # can spend its entire token budget on the reasoning channel and
+            # emit zero visible tokens: stop_reason == "max_tokens" with an
+            # empty completion. Scoring that a plain 0 is a measurement error
+            # masquerading as a quality signal — it silently penalises exactly
+            # the models that think hardest, and the run still reports success.
+            stop_reason = getattr(state.output, "stop_reason", None) if state.output else None
+            if stop_reason == "max_tokens":
+                return Score(
+                    value=0.0,
+                    answer="",
+                    explanation=(
+                        "TRUNCATED: the model hit its max_tokens limit before emitting "
+                        "any answer (all output tokens went to the reasoning channel). "
+                        "This is a token-budget problem, NOT a quality result — raise "
+                        "max_tokens (e.g. --max-tokens 8192) and re-run before comparing "
+                        "this model against others."
+                    ),
+                    metadata={"truncated_no_output": True, "stop_reason": stop_reason},
+                )
             return Score(value=0.0, answer="", explanation="No output generated")
 
         question = str(state.input)
@@ -345,7 +414,7 @@ def jury_scorer():
 
         for label, model_id in JUDGE_MODELS.items():
             try:
-                judge = get_model(model_id)
+                judge = get_model(model_id, **_judge_model_args(model_id))
                 result = await judge.generate(
                     [
                         ChatMessageSystem(content=SYSTEM_PROMPT),

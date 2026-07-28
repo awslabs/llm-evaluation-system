@@ -48,7 +48,26 @@ class Database:
         self.database = self._validate_db_name(_require_env("POSTGRES_DB"))
         self.user = _require_env("POSTGRES_USER")
         self.use_iam_auth = os.getenv("POSTGRES_USE_IAM_AUTH", "").lower() == "true"
-        self.region = os.getenv("AWS_REGION", "us-west-2")
+        # RDS region — no guessed default, but required when it is actually used.
+        #
+        # Deliberately NOT the Bedrock region (bedrock_client.DEFAULT_REGION is
+        # us-east-2 so the us-east-only GPT-5.x models are reachable): RDS lives
+        # wherever it was deployed, and a token signed for the wrong region fails
+        # as an opaque auth error. Helm always sets AWS_REGION in the pod, so this
+        # only bites locally.
+        #
+        # Required only under IAM auth, which is the sole consumer. Left
+        # unvalidated it produced `Invalid endpoint: https://rds..amazonaws.com`
+        # — the cryptic failure this whole approach was meant to avoid.
+        self.region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or ""
+        if self.use_iam_auth and not self.region:
+            raise RuntimeError(
+                "POSTGRES_USE_IAM_AUTH is enabled but no AWS region is set. "
+                "RDS IAM tokens must be signed for the region the database lives "
+                "in — set AWS_REGION (or AWS_DEFAULT_REGION) to that region. "
+                "Note this is the *database* region, which need not match the "
+                "Bedrock region used for model calls."
+            )
 
         # For IAM auth, track token generation time
         self._token_generated_at: float = 0

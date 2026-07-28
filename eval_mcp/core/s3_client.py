@@ -21,8 +21,21 @@ DOCUMENTS_BUCKET = os.environ.get("S3_BUCKET", "") or os.environ.get("DOCUMENTS_
 # Pre-signed URL expiration (1 hour)
 PRESIGN_EXPIRATION = 3600
 
-# AWS region
-AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
+# AWS region for the S3 bucket. NO fallback on purpose.
+#
+# This addresses a *storage* bucket, whose location is fixed when it is created —
+# unrelated to where Bedrock models live (see bedrock_client.DEFAULT_REGION,
+# which is us-east-2 for the us-east-only GPT-5.x models). Using that region
+# here would address a bucket that does not exist.
+#
+# Left empty rather than given a guessed default: a bucket is only ever
+# configured together with an explicit AWS_REGION (both come from Helm/Terraform
+# in deployment), and with no bucket set these modules never touch S3 at all.
+# A plausible-but-wrong region here would mean silently reading the wrong
+# bucket, or a confusing 301 PermanentRedirect, instead of an honest failure.
+# boto3 raises NoRegionError if this is somehow reached unset, which is the
+# correct outcome.
+AWS_REGION = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or ""
 
 
 def get_s3_client():

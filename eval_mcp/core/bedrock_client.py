@@ -173,7 +173,70 @@ def raise_if_autodetect_error() -> None:
         raise err
 
 
-def create_boto3_bedrock_client(service: str = "bedrock-runtime", region: str = "us-west-2", **extra_config):
+# Fallback region when nothing else specifies one (no AWS_REGION, no
+# AWS_DEFAULT_REGION, no region in the resolved profile).
+#
+# us-east-2 rather than us-west-2 because it is the only tier that carries the
+# FULL model set we care about: OpenAI's frontier models on Bedrock Mantle
+# (gpt-5.5, gpt-5.6-sol) launched in us-east-1/us-east-2 ONLY, while every
+# current-generation Converse model — Claude Opus 5, Sonnet 5, Haiku 4.5,
+# Sonnet 4.6, Nova, gpt-oss — is present in us-east-2 exactly as in us-west-2
+# (verified 2026-07-27: 81 vs 86 models, the difference being retired Llama 3.0
+# and Mistral 2402/2407 variants). Defaulting to us-west-2 made two frontier
+# models unreachable and had us report they did not exist.
+#
+# This is only a last resort: an explicit AWS_REGION or a profile region always
+# wins, so nobody's existing setup moves.
+DEFAULT_REGION = "us-east-2"
+
+# Model-id fragments identifying reasoning models that reject a `temperature`
+# parameter outright (HTTP 400 unsupported_parameter, not a soft warning).
+# Verified live against Bedrock Mantle: openai.gpt-5.6-{sol,luna,terra} and
+# openai.gpt-5.5 all fail with `'temperature' is not supported with this model`.
+_NO_TEMPERATURE_FRAGMENTS = ("gpt-5", "o1-", "o3-", "o4-")
+
+
+def model_rejects_temperature(model_id: str) -> bool:
+    """True when a model refuses a `temperature` parameter.
+
+    Matched on id fragments rather than an exhaustive list so a future gpt-5.7
+    is handled without a code change — the failure mode of guessing wrong is
+    only a lost determinism hint, whereas sending the field to a model that
+    forbids it is a hard 400.
+    """
+    lowered = model_id.lower()
+    return any(frag in lowered for frag in _NO_TEMPERATURE_FRAGMENTS)
+
+
+def resolve_region(explicit: Optional[str] = None) -> str:
+    """Resolve which AWS region to use for Bedrock calls.
+
+    Precedence: explicit argument, then ``AWS_REGION``, then
+    ``AWS_DEFAULT_REGION``, then the **resolved profile's** region from
+    ``~/.aws/config``, then ``DEFAULT_REGION``.
+
+    The profile step matters: models are not launched in every region at once
+    (e.g. OpenAI's gpt-5.5 and gpt-5.6-sol are us-east-1/us-east-2 only). A user
+    whose profile says ``region = us-east-2`` used to still get us-west-2
+    because every call site read ``os.environ`` directly and ignored the
+    profile, making those models unreachable with no way to say otherwise short
+    of exporting AWS_REGION. Honouring the profile is also what every other AWS
+    tool does, so this just stops us being the odd one out.
+    """
+    if explicit:
+        return explicit
+    env_region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION")
+    if env_region:
+        return env_region
+    _autodetect_aws_profile()
+    try:
+        session_region = boto3.Session().region_name
+    except Exception:
+        session_region = None
+    return session_region or DEFAULT_REGION
+
+
+def create_boto3_bedrock_client(service: str = "bedrock-runtime", region: Optional[str] = None, **extra_config):
     """Create a boto3 Bedrock client with API key support if configured.
 
     When AWS_BEARER_TOKEN_BEDROCK is set, creates a client that uses bearer token
@@ -182,7 +245,7 @@ def create_boto3_bedrock_client(service: str = "bedrock-runtime", region: str = 
     _autodetect_aws_profile()
     bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
     config_kwargs = {
-        "region_name": region,
+        "region_name": resolve_region(region),
         "retries": {"max_attempts": 10, "mode": "adaptive"},
         **extra_config,
     }
@@ -212,31 +275,60 @@ class BedrockClient:
 
     _instances: Dict[str, "BedrockClient"] = {}
 
-    def __new__(cls, region: str = "us-west-2") -> "BedrockClient":
+    def __new__(cls, region: Optional[str] = None) -> "BedrockClient":
         """Singleton: Return existing instance for this region if it exists."""
+        # Resolve before keying the cache so `BedrockClient()` and
+        # `BedrockClient("us-east-2")` share one instance when the environment
+        # already points at us-east-2.
+        region = resolve_region(region)
         if region not in cls._instances:
             instance = super().__new__(cls)
             cls._instances[region] = instance
             instance._initialized = False
         return cls._instances[region]
 
-    def __init__(self, region: str = "us-west-2") -> None:
+    def __init__(self, region: Optional[str] = None) -> None:
         """Initialize Bedrock client (only once per region)."""
         if self._initialized:
             return
 
-        self.region = region
+        self.region = resolve_region(region)
         self.model_id = os.environ.get(
             "BEDROCK_MODEL_ID", "us.anthropic.claude-sonnet-4-6"
         )
 
         self.client = create_boto3_bedrock_client(
-            "bedrock-runtime", region,
+            "bedrock-runtime", self.region,
             max_pool_connections=100,
             read_timeout=300,  # 5 minutes for PDF processing
             connect_timeout=30,
         )
         self._initialized = True
+
+    def _build_request_body(
+        self,
+        messages: List[Dict[str, Any]],
+        max_tokens: int,
+        temperature: Optional[float],
+    ) -> Dict[str, Any]:
+        """Assemble the Anthropic Messages request body.
+
+        ``temperature`` is omitted when None **or** when the configured model is
+        a reasoning model that rejects the field. Reasoning models (OpenAI's
+        gpt-5.6 family on Mantle, and Bedrock reasoning variants) return
+        ``400 unsupported_parameter`` if `temperature` is present at all — not a
+        warning, a hard failure. Callers pass a temperature for reproducibility,
+        which is right for Claude; dropping it for models that forbid it keeps a
+        BEDROCK_MODEL_ID override from breaking every synthesis call.
+        """
+        body: Dict[str, Any] = {
+            "anthropic_version": "bedrock-2023-05-31",
+            "max_tokens": max_tokens,
+            "messages": messages,
+        }
+        if temperature is not None and not model_rejects_temperature(self.model_id):
+            body["temperature"] = temperature
+        return body
 
     def convert_mcp_tools_to_claude(self, mcp_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
@@ -269,7 +361,7 @@ class BedrockClient:
         tool_choice: Optional[Dict[str, Any]] = None,
         system: Optional[str] = None,
         max_tokens: int = 8192,
-        temperature: float = 0.0,
+        temperature: Optional[float] = 0.0,
     ) -> Dict[str, Any]:
         """
         Send a message to Claude and get response.
@@ -283,18 +375,15 @@ class BedrockClient:
                 - {"type": "tool", "name": "tool_name"} - force specific tool
             system: Optional system prompt
             max_tokens: Maximum tokens in response
-            temperature: Sampling temperature (0.0 = deterministic, default for reproducibility)
+            temperature: Sampling temperature (0.0 = deterministic, default for
+                reproducibility). Pass None to omit the field entirely — some
+                reasoning models reject `temperature` outright.
 
         Returns:
             Response dict from Claude
         """
         raise_if_autodetect_error()
-        request_body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "messages": messages,
-        }
+        request_body = self._build_request_body(messages, max_tokens, temperature)
 
         if system:
             request_body["system"] = system
@@ -332,7 +421,7 @@ class BedrockClient:
         tool_choice: Optional[Dict[str, Any]] = None,
         system: Optional[str] = None,
         max_tokens: int = 8192,
-        temperature: float = 0.0,
+        temperature: Optional[float] = 0.0,
     ):
         """
         Stream a message response from Claude token-by-token.
@@ -344,12 +433,7 @@ class BedrockClient:
         raise_if_autodetect_error()
         import asyncio
 
-        request_body = {
-            "anthropic_version": "bedrock-2023-05-31",
-            "max_tokens": max_tokens,
-            "temperature": temperature,
-            "messages": messages,
-        }
+        request_body = self._build_request_body(messages, max_tokens, temperature)
 
         if system:
             request_body["system"] = system
@@ -431,11 +515,30 @@ class BedrockClient:
                 }
 
     def extract_text_from_response(self, response: Dict[str, Any]) -> str:
-        """Extract text content from Claude response."""
-        content = response.get("content", [])
+        """Extract text content from a Claude (Anthropic Messages) response.
+
+        Raises ValueError when handed a response that isn't in Anthropic shape —
+        which in practice means BEDROCK_MODEL_ID points at a non-Anthropic model.
+        This path builds a native Anthropic Messages body, so an OpenAI-shaped
+        model (gpt-oss, which Bedrock happily serves) returns HTTP 200 with a
+        `choices` array and no `content` key. Returning "" there was the worst
+        outcome available: callers took the empty string as a legitimate answer
+        and downstream JSON parsing failed somewhere unrelated, with nothing
+        pointing back at the real cause. Failing loudly names the actual problem.
+        """
+        if "content" not in response:
+            raise ValueError(
+                "Bedrock response is not in Anthropic Messages format "
+                f"(got keys: {sorted(response)}). The internal synthesis client "
+                f"only speaks the Anthropic Messages API, but BEDROCK_MODEL_ID is "
+                f"'{self.model_id}'. Set BEDROCK_MODEL_ID to an Anthropic model "
+                "(e.g. us.anthropic.claude-sonnet-4-6). Non-Anthropic models are "
+                "fully supported as evaluation targets and judges — this limit "
+                "applies only to the MCP's own synthesis calls."
+            )
 
         text_parts = []
-        for block in content:
+        for block in response.get("content", []):
             if block.get("type") == "text":
                 text_parts.append(block.get("text", ""))
 

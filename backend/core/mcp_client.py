@@ -45,7 +45,7 @@ def setup_mcp_logging(log_dir: str = "backend/logs") -> logging.Logger:
 class MultiMCPClient:
     """Client for interacting with multiple MCP servers with auto-reconnection."""
 
-    def __init__(self, working_dir: Optional[str] = None, region: str = "us-west-2") -> None:
+    def __init__(self, working_dir: Optional[str] = None, region: Optional[str] = None) -> None:
         """Initialize the MCP client with multiple servers.
 
         Args:
@@ -64,7 +64,12 @@ class MultiMCPClient:
         # Get current environment and merge with custom vars
         env = os.environ.copy()
         env["INSPECT_LOG_DIR"] = cwd
-        env["AWS_REGION"] = region
+        # resolve_region() honours AWS_REGION / AWS_DEFAULT_REGION / the
+        # profile, then falls back to us-east-2 (the region with the full
+        # model set, incl. the us-east-only GPT-5.x models). Passing None
+        # through to the subprocess env would set the literal "None".
+        from eval_mcp.core.bedrock_client import resolve_region
+        env["AWS_REGION"] = resolve_region(region)
 
         # Single unified MCP server
         self._server_configs = {

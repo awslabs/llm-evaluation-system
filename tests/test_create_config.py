@@ -293,3 +293,46 @@ def test_non_score_only_unchanged(jc: JudgeConfig) -> None:
     assert "static_output_solver" not in code
     assert 'metadata=["actual_output"]' not in code
     assert "score_only" not in cfg
+
+
+# ---------------------------------------------------------------------------
+# Reasoning-model truncation
+#
+# Inspect's Bedrock provider defaults to max_tokens=2048. Reasoning models
+# (gpt-5.6-luna/sol/terra, gpt-oss-*) can spend that ENTIRE budget on their
+# reasoning channel and return an empty completion with
+# stop_reason="max_tokens". Verified live: luna and sol both burned 2048/2048
+# reasoning tokens with zero visible output on a hard proof task.
+#
+# The sample still "completes", so it used to score a plain 0.0 — a measurement
+# error indistinguishable from a wrong answer. In a real comparison this cost
+# gpt-oss-20b 3 samples and flipped it from 1st to last place.
+# ---------------------------------------------------------------------------
+
+
+def test_jury_scorer_block_flags_truncation_not_quality():
+    """The emitted scorer must distinguish truncation from a bad answer."""
+    from eval_mcp.tools.create_config import JURY_SCORER_BLOCK
+
+    assert "TRUNCATED" in JURY_SCORER_BLOCK
+    assert "truncated_no_output" in JURY_SCORER_BLOCK
+    # It must key off stop_reason, not just the empty string.
+    assert "stop_reason" in JURY_SCORER_BLOCK
+    # And still handle plain no-output separately.
+    assert "No output generated" in JURY_SCORER_BLOCK
+
+
+def test_generated_config_contains_truncation_guard(tmp_path, monkeypatch):
+    """A freshly generated config carries the guard.
+
+    The scorer reaches the eval as *source text* inside the generated task file,
+    so editing the module without the template would silently ship the old
+    behaviour — which is exactly the trap here.
+    """
+    from eval_mcp.tools.create_config import JURY_SCORER_BLOCK
+
+    # The block is emitted verbatim; assert the guard survives .format() by
+    # confirming it carries no unescaped format placeholders around the guard.
+    guard_start = JURY_SCORER_BLOCK.index("TRUNCATED")
+    guard = JURY_SCORER_BLOCK[guard_start - 400 : guard_start + 400]
+    assert "stop_reason ==" in guard or 'stop_reason == "max_tokens"' in guard

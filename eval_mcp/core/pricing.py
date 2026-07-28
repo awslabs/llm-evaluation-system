@@ -184,6 +184,14 @@ def _candidates(model_id: str) -> list[str]:
         if not mantle_id.startswith("openai."):
             mantle_id = f"openai.{mantle_id}"
         out.append(f"bedrock_mantle/{mantle_id}")
+        # Mantle also serves pinned date snapshots ("openai.gpt-5.5-2026-04-23")
+        # that LiteLLM doesn't key separately — it prices only the floating
+        # alias. Fall back to the alias rather than reporting cost unknown for a
+        # model that is priced identically and is the *better* choice for a
+        # reproducible eval.
+        dated = re.match(r"^(?P<base>.+)-\d{4}-\d{2}-\d{2}$", mantle_id)
+        if dated:
+            out.append(f"bedrock_mantle/{dated['base']}")
 
     bare = model_id
     for pfx in _PROVIDER_PREFIXES:

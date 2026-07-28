@@ -659,7 +659,15 @@ def _build_detail_from_logs(
         if task_file:
             config_filename = Path(task_file).with_suffix(".json").name
         else:
-            config_filename = f"{config_name}.json"
+            # No task_file in the log metadata — this is the benchmark path,
+            # where the task is a package reference ("inspect_evals/humaneval")
+            # rather than a generated config in configs/. `config_name` was
+            # never defined in this function, so this branch raised NameError
+            # and killed the whole pre-compute: benchmark runs succeeded but
+            # their results never reached the viewer. Derive the name from
+            # task_name instead; there won't be a matching config JSON for a
+            # benchmark, and the os.path.isfile check below handles that.
+            config_filename = f"{task_name}.json"
         # Filename is user-derived (from log metadata / config name); strip any
         # path components via basename before joining so the result stays under
         # configs_real.

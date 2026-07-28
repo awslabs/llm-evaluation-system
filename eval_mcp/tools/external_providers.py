@@ -9,9 +9,14 @@ To add a new provider:
   2. Add the env var name to scripts/parse-env-keys.sh ALLOWED_KEY_NAMES
 """
 
+import logging
 import os
+import re
+import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -114,7 +119,16 @@ EXTERNAL_PROVIDERS: dict[str, dict[str, Any]] = {
         # "is GPT-5.4 available?" filters to provider=openai and wrongly misses
         # the Mantle models.
         "match_aliases": ["openai"],
+        # Fallback list, used only when the live Mantle catalog can't be reached
+        # (no network / no creds / endpoint error). The real list comes from
+        # list_mantle_models() below — Mantle exposes a genuine `/v1/models`
+        # catalog, so hard-coding IDs here would repeat the mistake this repo
+        # already avoids for Converse models: a stale allowlist that hides
+        # newly launched models and advertises ones the region doesn't have.
         "models": [
+            {"id": "openai/bedrock/gpt-5.6-sol", "name": "GPT-5.6 Sol (Bedrock)"},
+            {"id": "openai/bedrock/gpt-5.6-terra", "name": "GPT-5.6 Terra (Bedrock)"},
+            {"id": "openai/bedrock/gpt-5.6-luna", "name": "GPT-5.6 Luna (Bedrock)"},
             {"id": "openai/bedrock/gpt-5.5", "name": "GPT-5.5 (Bedrock)"},
             {"id": "openai/bedrock/gpt-5.4", "name": "GPT-5.4 (Bedrock)"},
         ],
@@ -199,6 +213,203 @@ EXTERNAL_PROVIDERS: dict[str, dict[str, Any]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Live Bedrock Mantle catalog
+#
+# Mantle serves an OpenAI-compatible `/v1/models` catalog per region, so the set
+# of OpenAI models available to this account is discoverable rather than
+# guessed. This matters because model availability is region-specific: as of
+# this writing gpt-5.5 and gpt-5.6-sol are us-east-1/us-east-2 only, while
+# gpt-5.6-terra/luna and gpt-5.4 are also in us-west-2. A static list either
+# hides models (a newer release) or advertises ones the caller's region can't
+# invoke — both of which we hit in practice.
+#
+# Cached for 10 minutes: the catalog changes on AWS launch timescales, and the
+# MCP process is long-lived, so per-call HTTP would add latency for nothing.
+# ---------------------------------------------------------------------------
+
+_MANTLE_CACHE_TTL_SECONDS = 600
+# Keyed by region: the failure path probes several regions to report where a
+# model does live, and a single-slot cache would evict on every probe.
+_MANTLE_CACHE: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+
+# Display names for the model families we know about. Anything not listed falls
+# back to a title-cased ID, so an unrecognized new model still surfaces.
+_MANTLE_DISPLAY_NAMES = {
+    "gpt-5.6-sol": "GPT-5.6 Sol",
+    "gpt-5.6-terra": "GPT-5.6 Terra",
+    "gpt-5.6-luna": "GPT-5.6 Luna",
+    "gpt-5.5": "GPT-5.5",
+    "gpt-5.4": "GPT-5.4",
+    "gpt-oss-120b": "GPT-OSS 120B",
+    "gpt-oss-20b": "GPT-OSS 20B",
+    "gpt-oss-safeguard-120b": "GPT-OSS Safeguard 120B",
+    "gpt-oss-safeguard-20b": "GPT-OSS Safeguard 20B",
+}
+
+
+_DATED_SNAPSHOT_RE = re.compile(r"^(?P<base>.+)-(?P<date>\d{4}-\d{2}-\d{2})$")
+
+
+def _mantle_display_name(short_id: str) -> str:
+    """Human label for a Mantle model ID, handling pinned date snapshots.
+
+    Mantle lists both a floating alias (`gpt-5.5`) and pinned snapshots
+    (`gpt-5.5-2026-04-23`). Both are invokable and the pinned one is what you
+    want for a reproducible eval, so we surface both and label the snapshot
+    'GPT-5.5 (2026-04-23)' rather than dumping the raw ID.
+    """
+    if short_id in _MANTLE_DISPLAY_NAMES:
+        return _MANTLE_DISPLAY_NAMES[short_id]
+    dated = _DATED_SNAPSHOT_RE.match(short_id)
+    if dated:
+        base = _MANTLE_DISPLAY_NAMES.get(dated["base"], dated["base"])
+        return f"{base} ({dated['date']})"
+    return short_id
+
+
+def list_mantle_models(region: str | None = None) -> list[dict[str, Any]] | None:
+    """Query the live Bedrock Mantle model catalog for OpenAI models.
+
+    Returns Inspect-format entries (``openai/bedrock/<short-id>``) for every
+    OpenAI model the endpoint reports as ``available`` in ``region``, or None if
+    the catalog can't be reached — callers then fall back to the static list in
+    EXTERNAL_PROVIDERS rather than reporting "no models".
+
+    Only ``openai.*`` IDs are returned. Mantle also hosts Anthropic, Qwen,
+    Mistral and others, but Inspect's ``openai/bedrock/`` provider prefix routes
+    through the OpenAI client, so a non-OpenAI ID listed under it wouldn't be
+    invokable the way callers expect. Those models are reachable on Converse via
+    ``list_bedrock_models`` instead.
+    """
+    from eval_mcp.core.bedrock_client import resolve_region
+
+    region = resolve_region(region)
+    now = time.monotonic()
+    cached = _MANTLE_CACHE.get(region)
+    if cached is not None and now - cached[0] < _MANTLE_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    try:
+        import httpx
+        from aws_bedrock_token_generator import provide_token
+
+        token = provide_token(region=region)
+        # The frontier models are served under /openai/v1 for *inference*, but
+        # the catalog itself lives at /v1/models (a GET on /openai/v1/models is
+        # a 404). Verified live in us-east-1/2, us-west-2 and eu-west-1.
+        response = httpx.get(
+            f"https://bedrock-mantle.{region}.api.aws/v1/models",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=10,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as e:
+        logger.debug("Mantle catalog unavailable in %s: %s", region, e)
+        return None
+
+    models: list[dict[str, Any]] = []
+    for entry in payload.get("data", []):
+        model_id = entry.get("id", "")
+        if not model_id.startswith("openai.") or entry.get("status") != "available":
+            continue
+        short_id = model_id.split(".", 1)[1]
+        models.append({
+            "id": f"openai/bedrock/{short_id}",
+            "name": f"{_mantle_display_name(short_id)} (Bedrock {region})",
+        })
+
+    if not models:
+        # An empty OpenAI section is more likely a response-shape change than a
+        # region with genuinely zero OpenAI models. Treat it as "unknown" and
+        # let the static fallback answer.
+        return None
+
+    models.sort(key=lambda m: m["id"], reverse=True)
+    _MANTLE_CACHE[region] = (now, models)
+    return models
+
+
+# Regions where AWS serves Bedrock Mantle. Probed (only on the failure path) to
+# tell a user *where* a model they asked for actually lives, instead of a bare
+# "not available" — the answer that had us wrongly conclude gpt-5.5 and
+# gpt-5.6-sol didn't exist when they were simply us-east-only.
+_MANTLE_PROBE_REGIONS = ("us-east-1", "us-east-2", "us-west-2", "eu-west-1")
+
+
+def resolve_mantle_region(model_id: str) -> str | None:
+    """Region to send this Mantle model's request to, or None to use the default.
+
+    Bedrock Mantle model availability is per-region and AWS rolls models out
+    region by region (as of 2026-07-27, gpt-5.5 and gpt-5.6-sol are
+    us-east-1/us-east-2 only). Credentials, though, are global — only the
+    endpoint is regional — so a user in eu-west-1 or us-west-2 CAN invoke a
+    us-east-only model by pointing that one request at us-east-2. Verified live:
+    with AWS_REGION=us-west-2, `get_model("openai/bedrock/gpt-5.5",
+    aws_region="us-east-2")` succeeds where the un-overridden call 404s.
+
+    Without this, the MCP only worked for users who happened to be in a us-east
+    region, and told everyone else the model did not exist.
+
+    Returns None when the caller's own region already serves the model (the
+    common case — no cross-region hop, no probing cost) or when we can't tell.
+    Scope is deliberately narrow: ONLY ``openai/bedrock/*`` inference is
+    redirected. Converse models, S3, RDS and logs all stay in the user's region.
+
+    Override with EVAL_MCP_MANTLE_REGION to pin a region explicitly, or set
+    EVAL_MCP_NO_CROSS_REGION=1 to disable redirection entirely (for callers with
+    data-residency constraints who would rather see a clear failure).
+    """
+    from eval_mcp.core.bedrock_client import resolve_region
+
+    pinned = os.environ.get("EVAL_MCP_MANTLE_REGION", "").strip()
+    if pinned:
+        return pinned
+    if os.environ.get("EVAL_MCP_NO_CROSS_REGION", "").lower() in ("1", "true", "yes"):
+        return None
+
+    home = resolve_region()
+    short_id = model_id.rsplit("/", 1)[-1].removeprefix("openai.")
+
+    # Fast path: the user's own region serves it. Uses the same 10-min cache as
+    # discovery, so this is normally free.
+    local = list_mantle_models(region=home)
+    if local and any(m["id"] == f"openai/bedrock/{short_id}" for m in local):
+        return None
+
+    for candidate in find_mantle_regions_for_model(model_id):
+        if candidate != home:
+            logger.info(
+                "Routing Mantle model %s to %s (not available in %s)",
+                short_id, candidate, home,
+            )
+            return candidate
+    return None
+
+
+def find_mantle_regions_for_model(model_id: str) -> list[str]:
+    """Regions whose Mantle catalog lists ``model_id`` as available.
+
+    ``model_id`` may be an Inspect ID (``openai/bedrock/gpt-5.5``) or a bare
+    Mantle ID (``openai.gpt-5.5``). Returns [] if the model is found nowhere or
+    no region could be reached — callers treat that as "no extra information",
+    never as proof of absence.
+
+    Intended for error messages only: it issues one HTTP call per region, so it
+    must not sit on a hot path.
+    """
+    short_id = model_id.rsplit("/", 1)[-1].removeprefix("openai.")
+    found = []
+    for probe_region in _MANTLE_PROBE_REGIONS:
+        models = list_mantle_models(region=probe_region)
+        if not models:
+            continue
+        if any(m["id"] == f"openai/bedrock/{short_id}" for m in models):
+            found.append(probe_region)
+    return found
+
+
 def detect_available_providers() -> list[dict[str, Any]]:
     """
     Detect which external providers are available based on environment variables.
@@ -212,7 +423,7 @@ def detect_available_providers() -> list[dict[str, Any]]:
             available.append({
                 "name": name,
                 "display_name": config["display_name"],
-                "model_count": len(config["models"]),
+                "model_count": len(_models_for_provider(name, config)),
             })
     return available
 
@@ -250,7 +461,7 @@ def get_external_models(provider: str = "all") -> list[dict[str, Any]]:
         if not _provider_enabled(config):
             continue
 
-        for model in config["models"]:
+        for model in _models_for_provider(name, config):
             models.append({
                 "id": model["id"],
                 "name": model["name"],
@@ -258,3 +469,12 @@ def get_external_models(provider: str = "all") -> list[dict[str, Any]]:
             })
 
     return models
+
+
+def _models_for_provider(name: str, config: dict[str, Any]) -> list[dict[str, Any]]:
+    """Models for a provider — live catalog where one exists, else the static list."""
+    if name == "bedrock-mantle":
+        live = list_mantle_models()
+        if live is not None:
+            return live
+    return config["models"]

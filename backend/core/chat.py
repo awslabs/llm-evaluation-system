@@ -1,6 +1,8 @@
 """Interactive chat/REPL interface."""
 
 
+from typing import Optional
+
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import InMemoryHistory
 from rich.console import Console
@@ -16,7 +18,7 @@ console = Console()
 class ChatInterface:
     """Interactive chat interface for eval MCP."""
 
-    def __init__(self, mcp_client: MultiMCPClient, debug: bool = False, region: str = "us-west-2") -> None:
+    def __init__(self, mcp_client: MultiMCPClient, debug: bool = False, region: Optional[str] = None) -> None:
         """Initialize chat interface."""
         self.mcp_client = mcp_client
         self.debug = debug

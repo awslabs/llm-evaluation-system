@@ -345,7 +345,7 @@ def _build_code_snippet(recommended_model: str) -> str:
     """Build a code snippet showing how to switch to the recommended model."""
     if "bedrock" in recommended_model.lower() or "anthropic" in recommended_model.lower():
         return f'''import boto3
-client = boto3.client("bedrock-runtime", region_name="us-west-2")
+client = boto3.client("bedrock-runtime", region_name="us-east-2")
 response = client.invoke_model(modelId="{recommended_model}")'''
     elif "openai" in recommended_model.lower() or "gpt" in recommended_model.lower():
         model_name = recommended_model.split("/")[-1]

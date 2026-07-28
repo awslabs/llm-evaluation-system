@@ -234,3 +234,22 @@ def test_empty_content_list_is_not_an_error():
     """A model that legitimately returned only tool_use blocks yields ""."""
     client = _StubClient("us.anthropic.claude-sonnet-4-6")
     assert client.extract_text_from_response({"content": []}) == ""
+
+
+def test_default_region_serves_the_us_east_only_models():
+    """The fallback region must be one where the full model set exists.
+
+    OpenAI's frontier models on Bedrock Mantle (gpt-5.5, gpt-5.6-sol) are served
+    in us-east-1/us-east-2 ONLY. Defaulting anywhere else makes them unreachable
+    and — as actually happened — has the tool report they do not exist. Every
+    current-generation Converse model (Claude Opus 5 / Sonnet 5 / Haiku 4.5 /
+    Sonnet 4.6, Nova, gpt-oss) is present in us-east-2 as well, so this costs
+    nothing.
+
+    Pinned as a test because the failure mode is silent: a well-meaning revert
+    to us-west-2 breaks two models with no error until someone tries to use them.
+    """
+    assert bc.DEFAULT_REGION in ("us-east-1", "us-east-2"), (
+        "DEFAULT_REGION must be a region that serves the Bedrock Mantle "
+        "frontier models; see the comment on DEFAULT_REGION."
+    )

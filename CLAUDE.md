@@ -146,8 +146,19 @@ and `gpt-5.4` are also in us-west-2. Consequences worth knowing:
 
 - Region resolution goes through `bedrock_client.resolve_region()`:
   `AWS_REGION` → `AWS_DEFAULT_REGION` → **the resolved profile's region** →
-  `us-west-2`. Never re-add a bare `os.environ.get("AWS_REGION", "us-west-2")` —
-  that ignores the user's profile and silently hides the us-east-only models.
+  `DEFAULT_REGION` (**us-east-2**). Never re-add a bare
+  `os.environ.get("AWS_REGION", ...)` for a Bedrock call — that ignores the
+  user's profile and silently hides the us-east-only models.
+- **`DEFAULT_REGION` is us-east-2, not us-west-2**, because that's the region
+  carrying the full model set: the Mantle frontier models are us-east-only, and
+  every current-generation Converse model (Claude Opus 5 / Sonnet 5 / Haiku 4.5 /
+  Sonnet 4.6, Nova, gpt-oss) is in us-east-2 too. Pinned by a test — don't
+  "tidy" it back to us-west-2.
+- **Storage regions are separate on purpose.** `core/user_storage.py`,
+  `core/s3_client.py` and `backend/core/database.py` keep their own
+  `AWS_REGION` fallback and must NOT use `resolve_region()` — they address S3
+  buckets and RDS whose location is fixed at deploy time. Pointing them at the
+  Bedrock region would send requests to resources that don't exist there.
 - Before concluding a model doesn't exist, check another region. `list_*` output
   is region-scoped, and a "not available" from one region is not evidence of
   absence. `run_eval` already reports this for you: a Mantle validation failure

@@ -29,7 +29,14 @@ from eval_mcp.core.s3_client import (
 # S3 data bucket for persistent user data (judges, datasets, configs, logs)
 DATA_BUCKET = os.environ.get("DATA_BUCKET", "")
 
-# AWS region
+# AWS region for the S3 data bucket.
+#
+# Deliberately NOT bedrock_client.resolve_region(): this addresses a *storage*
+# bucket, whose location is fixed at deploy time and has nothing to do with
+# where Bedrock models live. The Bedrock default moved to us-east-2 (for the
+# us-east-only GPT-5.x models); pointing S3 there too would send requests to a
+# bucket that does not exist in that region. In deployment AWS_REGION is always
+# set explicitly, so this fallback only matters for local runs with no bucket.
 _AWS_REGION = os.environ.get("AWS_REGION", "us-west-2")
 
 

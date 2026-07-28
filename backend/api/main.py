@@ -206,8 +206,11 @@ async def lifespan(app: FastAPI):
     print("🚀 Initializing backend...")
 
     try:
-        # Get AWS region from environment
-        region = os.getenv("AWS_REGION", "us-west-2")
+        # Bedrock region — resolve_region() also honours the profile and
+        # defaults to us-east-2, where the full model set (incl. the
+        # us-east-only GPT-5.x models) is available.
+        from eval_mcp.core.bedrock_client import resolve_region
+        region = resolve_region()
 
         # Initialize database
         db = Database()

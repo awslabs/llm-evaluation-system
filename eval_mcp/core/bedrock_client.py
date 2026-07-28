@@ -173,7 +173,21 @@ def raise_if_autodetect_error() -> None:
         raise err
 
 
-DEFAULT_REGION = "us-west-2"
+# Fallback region when nothing else specifies one (no AWS_REGION, no
+# AWS_DEFAULT_REGION, no region in the resolved profile).
+#
+# us-east-2 rather than us-west-2 because it is the only tier that carries the
+# FULL model set we care about: OpenAI's frontier models on Bedrock Mantle
+# (gpt-5.5, gpt-5.6-sol) launched in us-east-1/us-east-2 ONLY, while every
+# current-generation Converse model — Claude Opus 5, Sonnet 5, Haiku 4.5,
+# Sonnet 4.6, Nova, gpt-oss — is present in us-east-2 exactly as in us-west-2
+# (verified 2026-07-27: 81 vs 86 models, the difference being retired Llama 3.0
+# and Mistral 2402/2407 variants). Defaulting to us-west-2 made two frontier
+# models unreachable and had us report they did not exist.
+#
+# This is only a last resort: an explicit AWS_REGION or a profile region always
+# wins, so nobody's existing setup moves.
+DEFAULT_REGION = "us-east-2"
 
 # Model-id fragments identifying reasoning models that reject a `temperature`
 # parameter outright (HTTP 400 unsupported_parameter, not a soft warning).

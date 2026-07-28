@@ -330,3 +330,21 @@ def test_count_truncated_samples_degrades_to_zero_on_error():
     from eval_mcp.tools import benchmarks
 
     assert asyncio.run(benchmarks._count_truncated_samples("/definitely/not/a/log.eval")) == 0
+
+
+def test_errored_samples_shrink_denominator_and_are_reported():
+    """Errored samples are excluded from accuracy, which flatters failing models.
+
+    Observed on AIME 2025: gpt-oss-20b hit 3 Bedrock read timeouts, so its
+    reported 0.519 was 14/27 while haiku and luna were graded on all 30. Treating
+    the errors as unsolved gives 0.467 — a materially different comparison. The
+    report must say which denominator was used.
+    """
+    import inspect as _inspect
+
+    from eval_mcp.tools import benchmarks
+
+    src = _inspect.getsource(benchmarks.handle_run_benchmark)
+    assert "erroredSamples" in src
+    assert "scoredSamples" in src
+    assert "EXCLUDED from the accuracy denominator" in src

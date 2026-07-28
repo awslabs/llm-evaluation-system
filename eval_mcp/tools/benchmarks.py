@@ -511,6 +511,25 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
                 # max_tokens=8192 and ALL 12 scored 0 — its reported 0.467 was a
                 # floor, not an ability. Benchmarks are the headline numbers
                 # people quote, so this cannot be left implicit.
+                # Errored samples are dropped from the accuracy DENOMINATOR, not
+                # scored 0 — so a model whose requests time out gets graded only
+                # on the ones that came back. Observed: gpt-oss-20b hit 3 Bedrock
+                # read timeouts on AIME 2025 and its 0.519 was 14/27, while
+                # haiku and luna were graded on all 30. That flatters whichever
+                # model fails most, which is the opposite of what you want.
+                completed = getattr(log.results, "completed_samples", None) if log.results else None
+                if ran and completed is not None and completed < ran:
+                    errored = ran - completed
+                    results_summary["erroredSamples"] = errored
+                    results_summary["scoredSamples"] = completed
+                    results_summary["errorWarning"] = (
+                        f"{errored} of {ran} samples errored (e.g. timeout) and are "
+                        f"EXCLUDED from the accuracy denominator — this score is "
+                        f"{completed} samples, not {ran}. Cross-model comparison is "
+                        f"skewed unless every model was scored on the same set; "
+                        f"treat errors as unsolved for a like-for-like number."
+                    )
+
                 truncated = await _count_truncated_samples(latest.name)
                 if truncated:
                     results_summary["truncatedSamples"] = truncated

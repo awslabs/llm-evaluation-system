@@ -16,8 +16,20 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 dependencies = [
-    # Core MCP + eval engine
-    "mcp>=1.0.0",
+    # Core MCP + eval engine.
+    #
+    # Capped below 2.0: mcp 2.0.0 (published 2026-07-28) REMOVED `FastMCP` from
+    # `mcp.server` — it is not relocated, `mcp.server.fastmcp` and a top-level
+    # `fastmcp` both 404. `eval_mcp/server.py` builds the entire server from
+    # FastMCP, so an unpinned resolve installs 2.0.0 and the MCP dies on import
+    # with "cannot import name 'FastMCP'". Every new install was affected within
+    # hours of that release, in 0.13.0 and 0.14.0 alike.
+    #
+    # The cap is a stopgap, not the destination: mcp 2.x replaces FastMCP with
+    # `MCPServer`, whose __init__ and `.tool()` decorator are close enough that
+    # migration is tractable (tracked separately). Keeping the cap until that
+    # lands means users get a working server today instead of waiting on it.
+    "mcp>=1.0.0,<2",
     # Floor (no upper cap) is intentional: we import several private inspect-ai
     # modules (._view.common, .tool._tool_info, .log._samples, .event._model),
     # so the floor guarantees those paths exist. The deployed image and local

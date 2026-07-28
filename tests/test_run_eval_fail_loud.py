@@ -310,3 +310,72 @@ def test_eval_launches_with_raised_max_tokens():
     from eval_mcp.tools.run_eval import _DEFAULT_MAX_TOKENS
 
     assert _DEFAULT_MAX_TOKENS > 2048, "must exceed Inspect's Bedrock default"
+
+
+# ---------------------------------------------------------------------------
+# Cross-region routing for Mantle models
+#
+# Mantle availability is per-region but AWS credentials are global, so a user in
+# us-west-2 or eu-west-1 CAN invoke a us-east-only model by pointing that request
+# at us-east-2. Without this the MCP only worked for users who happened to be in
+# a us-east region and told everyone else the model did not exist.
+# ---------------------------------------------------------------------------
+
+
+def test_region_for_run_prefers_a_region_serving_the_models():
+    from eval_mcp.tools.run_eval import _region_for_run
+
+    cfg = {"mantle_regions": {"openai/bedrock/gpt-5.6-sol": "us-east-2"}}
+    models = ["bedrock/us.anthropic.claude-haiku-4-5", "openai/bedrock/gpt-5.6-sol"]
+    assert _region_for_run(cfg, models) == "us-east-2"
+
+
+def test_region_for_run_falls_back_to_ambient_when_no_override_needed():
+    """No routing when the caller's own region already serves everything."""
+    from eval_mcp.core.bedrock_client import resolve_region
+    from eval_mcp.tools.run_eval import _region_for_run
+
+    assert _region_for_run({}, ["bedrock/us.anthropic.claude-haiku-4-5"]) == resolve_region()
+
+
+def test_region_for_run_ignores_overrides_for_models_not_in_this_run():
+    """A stale entry for an unused model must not relocate the run."""
+    from eval_mcp.core.bedrock_client import resolve_region
+    from eval_mcp.tools.run_eval import _region_for_run
+
+    cfg = {"mantle_regions": {"openai/bedrock/gpt-5.5": "us-east-1"}}
+    assert _region_for_run(cfg, ["bedrock/amazon.nova-pro-v1:0"]) == resolve_region()
+
+
+def test_region_for_run_is_deterministic_with_conflicting_regions():
+    """Two models wanting different regions must resolve the same way every time.
+
+    Non-deterministic selection would make a config's behaviour depend on dict
+    iteration order — the kind of flake that is nearly impossible to diagnose.
+    """
+    from eval_mcp.tools.run_eval import _region_for_run
+
+    cfg = {
+        "mantle_regions": {
+            "openai/bedrock/gpt-5.5": "us-east-2",
+            "openai/bedrock/gpt-5.6-sol": "us-east-1",
+        }
+    }
+    models = ["openai/bedrock/gpt-5.5", "openai/bedrock/gpt-5.6-sol"]
+    picks = {_region_for_run(cfg, models) for _ in range(5)}
+    assert picks == {"us-east-1"}, "must sort, not depend on dict order"
+
+
+def test_task_file_scan_fallback_does_not_raise_name_error():
+    """The no-JSON-config branch referenced an undefined `task_content`.
+
+    It raised NameError instead of scanning, so a config missing its sibling
+    JSON silently got "no models" rather than the intended fallback.
+    """
+    import inspect as _inspect
+
+    from eval_mcp.tools import run_eval
+
+    src = _inspect.getsource(run_eval.handle_run_evaluation)
+    idx = src.index("Fallback: scan the task .py")
+    assert "task_content = Path(task_file).read_text()" in src[idx : idx + 600]

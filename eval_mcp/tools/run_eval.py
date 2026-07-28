@@ -141,6 +141,32 @@ def _summarize_failure(stderr_str: str, stdout_str: str) -> str:
     return ""
 
 
+def _region_for_run(config_data: Optional[Dict[str, Any]], models: List[str]) -> str:
+    """Region to run the eval subprocess in.
+
+    Defaults to the ambient/resolved region. If the config recorded a Mantle
+    region override for any model in this run (meaning the caller's own region
+    doesn't serve it), use that instead so those models are reachable. Ties are
+    broken deterministically by sorting, so the same config always picks the same
+    region.
+
+    Pure apart from resolve_region(), so the selection logic is unit-testable.
+    """
+    home = resolve_region()
+    overrides = (config_data or {}).get("mantle_regions") or {}
+    needed = sorted({overrides[m] for m in models if m in overrides})
+    if not needed:
+        return home
+    if len(needed) > 1:
+        logger.info(
+            "Models in this run want different Mantle regions %s; using %s.",
+            needed, needed[0],
+        )
+    logger.info("Running eval in %s (ambient region %s lacks a chosen model).",
+                needed[0], home)
+    return needed[0]
+
+
 def _mantle_region_hint(model_id: str, current_region: str) -> str:
     """Build the 'not available here' message, naming regions that do serve it.
 
@@ -267,7 +293,17 @@ async def _validate_providers(providers: List[str]) -> Dict[str, Any]:
         try:
             from inspect_ai.model import get_model, GenerateConfig
 
-            model = get_model(model_id)
+            from eval_mcp.tools.external_providers import resolve_mantle_region
+
+            # Route to a region that actually serves this model. Mantle rolls out
+            # region by region, but credentials are global — so validate against
+            # the same region the eval will use, or this check would reject a
+            # model that is about to work fine.
+            model_args = {}
+            routed = resolve_mantle_region(model_id)
+            if routed:
+                model_args["aws_region"] = routed
+            model = get_model(model_id, **model_args)
             await model.generate("Hi", config=GenerateConfig(max_tokens=16))
         except Exception as e:
             error_msg = str(e)
@@ -489,16 +525,56 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         if not log_dir_str.startswith("s3://"):
             Path(log_dir_str).mkdir(parents=True, exist_ok=True)
 
+        # Extract model providers from the JSON config file
+        models = []
+        config_data = None
+        score_only = False
+        config_json_path = user_dir / "configs" / f"{config_name}.json"
+        if config_json_path.exists():
+            config_data = json.loads(config_json_path.read_text())
+            score_only = bool(config_data.get("score_only"))
+            # Agent evals use single "model" field; standard evals use "providers" list
+            if config_data.get("model"):
+                models = [config_data["model"]]
+            else:
+                models = config_data.get("providers", [])
+        else:
+            # Fallback: scan the task .py for provider strings when there's no
+            # sibling JSON config. `task_content` was never defined here — this
+            # branch raised NameError instead of falling back, so a config
+            # without its JSON got "no models" rather than a scan. Read the file.
+            try:
+                task_content = Path(task_file).read_text()
+            except OSError as e:
+                logger.warning("Could not read task file for provider scan: %s", e)
+                task_content = ""
+            for line in task_content.split("\n"):
+                if '"bedrock/' in line or '"openai/' in line or '"anthropic/' in line or '"google/' in line:
+                    matches = re.findall(r'"([^"]+/[^"]+)"', line)
+                    models.extend(matches)
+
         # Set up environment
         _refresh_keys_from_file()
         env = os.environ.copy()
         env["INSPECT_LOG_DIR"] = log_dir_str
-        # Ensure AWS region is set for Bedrock
         # Pin the child's region explicitly. resolve_region() also consults the
         # resolved profile's configured region, so a user on a us-east-2 profile
         # reaches the models that only launched there (gpt-5.5, gpt-5.6-sol)
         # without having to export AWS_REGION by hand.
-        region = resolve_region()
+        #
+        # When the run includes a Mantle model the ambient region doesn't serve,
+        # move the WHOLE subprocess to a region that does. That is the only lever
+        # available for target models: they arrive via `--model` on the CLI, and
+        # both alternatives are dead ends — Inspect's `-M aws_region=` applies
+        # globally and is a hard error on Converse models, while
+        # BEDROCK_OPENAI_BASE_URL alone yields "Credential should be scoped to a
+        # valid region" because the bearer token is still minted for the ambient
+        # region (both verified live). Since every current-generation Converse
+        # model is available in us-east-1/us-east-2 too, relocating the whole
+        # subprocess costs nothing in model coverage. Judges are routed
+        # per-model inside the task file via the config's mantle_regions map, so
+        # they work regardless.
+        region = _region_for_run(config_data, models)
         env["AWS_REGION"] = region
         env["AWS_DEFAULT_REGION"] = region
 
@@ -519,26 +595,6 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         # Build inspect eval command with relative path (Inspect requires non-absolute paths)
         relative_task = f"configs/{config_name}.py"
 
-        # Extract model providers from the JSON config file
-        models = []
-        config_data = None
-        score_only = False
-        config_json_path = user_dir / "configs" / f"{config_name}.json"
-        if config_json_path.exists():
-            config_data = json.loads(config_json_path.read_text())
-            score_only = bool(config_data.get("score_only"))
-            # Agent evals use single "model" field; standard evals use "providers" list
-            if config_data.get("model"):
-                models = [config_data["model"]]
-            else:
-                models = config_data.get("providers", [])
-        else:
-            # Fallback: scan task file for provider strings
-            for line in task_content.split("\n"):
-                if '"bedrock/' in line or '"openai/' in line or '"anthropic/' in line or '"google/' in line:
-                    import re as _re
-                    matches = _re.findall(r'"([^"]+/[^"]+)"', line)
-                    models.extend(matches)
 
         # Pre-flight capture check for agent evals: spawn the agent once
         # with a trivial prompt and verify ≥1 Bedrock span lands in our

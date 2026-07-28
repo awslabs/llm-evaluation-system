@@ -163,10 +163,23 @@ and `gpt-5.4` are also in us-west-2. Consequences worth knowing:
   an opaque IAM-auth failure instead of an honest error. A bucket/database is
   only ever configured together with an explicit `AWS_REGION` (both come from
   Helm/Terraform), and with no bucket set those modules never touch S3.
+- **Mantle models are auto-routed cross-region**, so GPT-5.x works for any user
+  regardless of where they are. Credentials are global and only the endpoint is
+  regional, so `external_providers.resolve_mantle_region()` sends a model the
+  caller's region doesn't serve to one that does; the decision is baked into the
+  config's `mantle_regions` map at creation time. Judges apply it per-model in
+  the generated task file; targets arrive via `--model` on the CLI, so
+  `run_eval._region_for_run()` moves the whole subprocess instead — the two
+  alternatives are dead ends (`-M aws_region=` is global and errors on Converse
+  models; `BEDROCK_OPENAI_BASE_URL` alone gives "Credential should be scoped to
+  a valid region" because the bearer token is still minted for the ambient
+  region). Only `openai/bedrock/*` inference moves — storage, logs and Converse
+  models stay put. `EVAL_MCP_MANTLE_REGION` pins a region;
+  `EVAL_MCP_NO_CROSS_REGION=1` disables the hop for data-residency constraints.
 - Before concluding a model doesn't exist, check another region. `list_*` output
   is region-scoped, and a "not available" from one region is not evidence of
-  absence. `run_eval` already reports this for you: a Mantle validation failure
-  probes the other regions and names the ones that do serve the model.
+  absence. `run_eval` also reports this: a Mantle validation failure probes the
+  other regions and names the ones that do serve the model.
 
 ### Adding a tool
 

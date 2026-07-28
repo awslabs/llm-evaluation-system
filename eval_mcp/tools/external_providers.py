@@ -338,6 +338,56 @@ def list_mantle_models(region: str | None = None) -> list[dict[str, Any]] | None
 _MANTLE_PROBE_REGIONS = ("us-east-1", "us-east-2", "us-west-2", "eu-west-1")
 
 
+def resolve_mantle_region(model_id: str) -> str | None:
+    """Region to send this Mantle model's request to, or None to use the default.
+
+    Bedrock Mantle model availability is per-region and AWS rolls models out
+    region by region (as of 2026-07-27, gpt-5.5 and gpt-5.6-sol are
+    us-east-1/us-east-2 only). Credentials, though, are global — only the
+    endpoint is regional — so a user in eu-west-1 or us-west-2 CAN invoke a
+    us-east-only model by pointing that one request at us-east-2. Verified live:
+    with AWS_REGION=us-west-2, `get_model("openai/bedrock/gpt-5.5",
+    aws_region="us-east-2")` succeeds where the un-overridden call 404s.
+
+    Without this, the MCP only worked for users who happened to be in a us-east
+    region, and told everyone else the model did not exist.
+
+    Returns None when the caller's own region already serves the model (the
+    common case — no cross-region hop, no probing cost) or when we can't tell.
+    Scope is deliberately narrow: ONLY ``openai/bedrock/*`` inference is
+    redirected. Converse models, S3, RDS and logs all stay in the user's region.
+
+    Override with EVAL_MCP_MANTLE_REGION to pin a region explicitly, or set
+    EVAL_MCP_NO_CROSS_REGION=1 to disable redirection entirely (for callers with
+    data-residency constraints who would rather see a clear failure).
+    """
+    from eval_mcp.core.bedrock_client import resolve_region
+
+    pinned = os.environ.get("EVAL_MCP_MANTLE_REGION", "").strip()
+    if pinned:
+        return pinned
+    if os.environ.get("EVAL_MCP_NO_CROSS_REGION", "").lower() in ("1", "true", "yes"):
+        return None
+
+    home = resolve_region()
+    short_id = model_id.rsplit("/", 1)[-1].removeprefix("openai.")
+
+    # Fast path: the user's own region serves it. Uses the same 10-min cache as
+    # discovery, so this is normally free.
+    local = list_mantle_models(region=home)
+    if local and any(m["id"] == f"openai/bedrock/{short_id}" for m in local):
+        return None
+
+    for candidate in find_mantle_regions_for_model(model_id):
+        if candidate != home:
+            logger.info(
+                "Routing Mantle model %s to %s (not available in %s)",
+                short_id, candidate, home,
+            )
+            return candidate
+    return None
+
+
 def find_mantle_regions_for_model(model_id: str) -> list[str]:
     """Regions whose Mantle catalog lists ``model_id`` as available.
 

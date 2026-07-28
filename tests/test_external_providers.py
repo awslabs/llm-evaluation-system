@@ -268,3 +268,57 @@ def test_live_catalog_preferred_over_static_list():
         ids = [m["id"] for m in ep.get_external_models("bedrock-mantle")]
     # Only the live entry — the static gpt-5.4 must not leak through.
     assert ids == ["openai/bedrock/gpt-5.6-sol"]
+
+
+# ---------------------------------------------------------------------------
+# resolve_mantle_region — making GPT-5.x work for users outside us-east
+# ---------------------------------------------------------------------------
+
+
+def test_no_routing_when_home_region_serves_the_model():
+    """The common case must cost nothing: no hop, no probing."""
+    home = [{"id": "openai/bedrock/gpt-5.6-luna", "name": "l"}]
+    with patch.object(ep, "list_mantle_models", lambda region=None: home), patch.object(
+        ep, "find_mantle_regions_for_model", lambda _m: ["us-east-1"]
+    ):
+        assert ep.resolve_mantle_region("openai/bedrock/gpt-5.6-luna") is None
+
+
+def test_routes_to_another_region_when_home_lacks_the_model():
+    def _list(region=None):
+        return (
+            [{"id": "openai/bedrock/gpt-5.6-luna", "name": "l"}]
+            if region == "us-west-2"
+            else None
+        )
+
+    with patch.object(ep, "list_mantle_models", _list), patch.object(
+        ep, "find_mantle_regions_for_model", lambda _m: ["us-east-1", "us-east-2"]
+    ), patch(
+        "eval_mcp.core.bedrock_client.resolve_region", lambda *a, **k: "us-west-2"
+    ):
+        assert ep.resolve_mantle_region("openai/bedrock/gpt-5.6-sol") == "us-east-1"
+
+
+def test_never_routes_to_the_home_region_itself():
+    """Returning the home region would be a pointless no-op override."""
+    with patch.object(ep, "list_mantle_models", lambda region=None: None), patch.object(
+        ep, "find_mantle_regions_for_model", lambda _m: ["us-west-2"]
+    ), patch(
+        "eval_mcp.core.bedrock_client.resolve_region", lambda *a, **k: "us-west-2"
+    ):
+        assert ep.resolve_mantle_region("openai/bedrock/gpt-5.5") is None
+
+
+def test_pinned_region_env_var_wins(monkeypatch):
+    monkeypatch.setenv("EVAL_MCP_MANTLE_REGION", "eu-west-1")
+    assert ep.resolve_mantle_region("openai/bedrock/gpt-5.5") == "eu-west-1"
+
+
+def test_cross_region_can_be_disabled(monkeypatch):
+    """Data-residency escape hatch: prefer a clear failure over a silent hop."""
+    monkeypatch.setenv("EVAL_MCP_NO_CROSS_REGION", "1")
+    with patch.object(ep, "list_mantle_models", lambda region=None: None), patch.object(
+        ep, "find_mantle_regions_for_model", lambda _m: ["us-east-1"]
+    ):
+        assert ep.resolve_mantle_region("openai/bedrock/gpt-5.6-sol") is None

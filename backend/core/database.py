@@ -48,7 +48,13 @@ class Database:
         self.database = self._validate_db_name(_require_env("POSTGRES_DB"))
         self.user = _require_env("POSTGRES_USER")
         self.use_iam_auth = os.getenv("POSTGRES_USE_IAM_AUTH", "").lower() == "true"
-        self.region = os.getenv("AWS_REGION", "us-west-2")
+        # RDS region — no guessed default. This signs IAM auth tokens, and a
+        # token signed for the wrong region fails as an opaque auth error rather
+        # than a clear misconfiguration. Every sibling connection parameter above
+        # uses _require_env for the same reason. Unrelated to the Bedrock region
+        # (bedrock_client.DEFAULT_REGION = us-east-2): RDS lives where it was
+        # deployed, and Helm always sets AWS_REGION in the pod.
+        self.region = os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or ""
 
         # For IAM auth, track token generation time
         self._token_generated_at: float = 0

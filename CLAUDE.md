@@ -154,11 +154,15 @@ and `gpt-5.4` are also in us-west-2. Consequences worth knowing:
   every current-generation Converse model (Claude Opus 5 / Sonnet 5 / Haiku 4.5 /
   Sonnet 4.6, Nova, gpt-oss) is in us-east-2 too. Pinned by a test — don't
   "tidy" it back to us-west-2.
-- **Storage regions are separate on purpose.** `core/user_storage.py`,
-  `core/s3_client.py` and `backend/core/database.py` keep their own
-  `AWS_REGION` fallback and must NOT use `resolve_region()` — they address S3
-  buckets and RDS whose location is fixed at deploy time. Pointing them at the
-  Bedrock region would send requests to resources that don't exist there.
+- **There is exactly one default region, and it is Bedrock-only.**
+  `core/user_storage.py`, `core/s3_client.py` and `backend/core/database.py`
+  read `AWS_REGION` with **no fallback at all** (empty string) and must NOT use
+  `resolve_region()`. They address S3 buckets and RDS whose location is fixed
+  when created; the Bedrock region would point at resources that don't exist
+  there, and a guessed default would mean silently hitting the wrong bucket or
+  an opaque IAM-auth failure instead of an honest error. A bucket/database is
+  only ever configured together with an explicit `AWS_REGION` (both come from
+  Helm/Terraform), and with no bucket set those modules never touch S3.
 - Before concluding a model doesn't exist, check another region. `list_*` output
   is region-scoped, and a "not available" from one region is not evidence of
   absence. `run_eval` already reports this for you: a Mantle validation failure

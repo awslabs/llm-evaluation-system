@@ -34,15 +34,18 @@ export default function ChatPage() {
 
     if (sessionParam) {
       if (autoLoadedRef.current === sessionParam) return;
-      if (chatSessions.some((s) => s.id === sessionParam)) {
-        loadChat(sessionParam);
-        autoLoadedRef.current = sessionParam;
-        // If this session was still streaming when the page was loaded/
-        // refreshed, reattach to the live backend stream so tokens keep
-        // arriving instead of the response appearing frozen.
-        reconnectIfRunning(sessionParam);
-      }
-      // If sessions haven't loaded yet, this effect re-runs when they do.
+      // Load unconditionally — do NOT gate on the session being present
+      // in the cached chatSessions. The cache is filled once at mount, so
+      // a conversation created later (or in another tab) is missing from
+      // it; gating meant the click changed the URL but left the previous
+      // transcript rendered, with currentSessionId still pointing at the
+      // old chat. loadChat now fetches when it needs to.
+      loadChat(sessionParam);
+      autoLoadedRef.current = sessionParam;
+      // If this session was still streaming when the page was loaded/
+      // refreshed, reattach to the live backend stream so tokens keep
+      // arriving instead of the response appearing frozen.
+      reconnectIfRunning(sessionParam);
       return;
     }
 
@@ -71,6 +74,14 @@ export default function ChatPage() {
   // the empty new-chat stub, so it can't race the "+ New chat" clear.
   useEffect(() => {
     if (!currentSessionId || sessionParam === currentSessionId) return;
+    // The URL already names a DIFFERENT session than the one in context.
+    // That means the user just navigated here (e.g. clicked an entry on
+    // /history) and the switch hasn't settled yet. Writing the URL now
+    // would clobber their target with the previous conversation's id and
+    // bounce them straight back out of the chat they picked — the
+    // reported "click something in history and it jumps around". The
+    // ?session=X effect above owns this case; let it land.
+    if (sessionParam) return;
     const s = chatSessions.find(
       (x: ChatSession) => x.id === currentSessionId,
     );

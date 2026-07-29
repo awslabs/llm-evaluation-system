@@ -31,7 +31,7 @@ interface ChatContextType {
   cancelRequest: () => Promise<void>;
   handleDocumentsUploaded: (result: UploadResult) => void;
   createNewChat: () => void;
-  loadChat: (sessionId: string) => void;
+  loadChat: (sessionId: string) => Promise<void>;
   // If `sessionId` is still streaming on the backend (e.g. after a page
   // refresh mid-response), reattach to the live SSE stream. Returns true if a
   // reconnect happened. No-op if the session already finished.
@@ -85,13 +85,44 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   }, [authLoading, user?.name]);
 
 
-  const loadChat = useCallback((sessionId: string) => {
-    const session = chatSessions.find((s) => s.id === sessionId);
-    if (session) {
+  // Show `sessionId`'s transcript. Falls back to fetching when the
+  // session isn't in the local cache.
+  //
+  // It used to silently no-op in that case, and the cache goes stale
+  // easily: it's populated once at mount, while /history fetches its own
+  // fresh list. So clicking a conversation created after mount (or in
+  // another tab) switched the URL but left the PREVIOUS conversation's
+  // messages on screen — the reported "shows several things", and it also
+  // stranded currentSessionId on the old session, which let the
+  // URL-sync effect in Chat.tsx rewrite ?session back and bounce the user
+  // out of the chat they clicked.
+  const loadChat = useCallback(async (sessionId: string) => {
+    const cached = chatSessions.find((s) => s.id === sessionId);
+    if (cached) {
       setCurrentSessionId(sessionId);
-      setMessages(session.messages);
+      setMessages(cached.messages);
+      return;
     }
-  }, [chatSessions]);
+
+    // Not cached — switch immediately so currentSessionId and the URL
+    // agree (otherwise the URL-sync effect fights this navigation), then
+    // fill in the transcript.
+    setCurrentSessionId(sessionId);
+    setMessages([]);
+    try {
+      const response = await fetch(
+        `/api/sessions?user_id=${encodeURIComponent(user?.name ?? "")}`,
+      );
+      if (!response.ok) return;
+      const data = await response.json();
+      const sessions: ChatSession[] = data.sessions || [];
+      setChatSessions(sessions);
+      const found = sessions.find((s) => s.id === sessionId);
+      if (found) setMessages(found.messages);
+    } catch (error) {
+      console.error("Failed to load chat:", error);
+    }
+  }, [chatSessions, user?.name]);
 
   const createNewChat = useCallback(() => {
     const newSession: ChatSession = {

@@ -1,7 +1,7 @@
 import { useAuth, login } from "@/contexts/AuthContext";
 import { useChat } from "@/contexts/ChatContext";
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import Header from "@/components/Header";
 
 interface ChatSession {

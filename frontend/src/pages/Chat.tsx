@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router";
 import type { ChatSession } from "@/contexts/ChatContext";
 import { useAuth, login } from "@/contexts/AuthContext";
 import { useChat } from "@/contexts/ChatContext";

@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router";
 import { useAuth, login } from "@/contexts/AuthContext";
 import ComparisonView from "@/components/results/ComparisonView";
 import ResultsHeader from "@/components/results/ResultsHeader";

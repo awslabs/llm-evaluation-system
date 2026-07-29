@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router";
 import { useAuth, login } from "@/contexts/AuthContext";
 import Header from "@/components/Header";
 import OptimizationRail from "@/components/optimizations/OptimizationRail";

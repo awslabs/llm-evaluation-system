@@ -1,5 +1,5 @@
 import { useAuth } from "@/contexts/AuthContext";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 
 interface NavItem {
   href: string;

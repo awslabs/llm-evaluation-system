@@ -199,7 +199,7 @@ The repo hosts two deployable things that share some code:
 llm-evaluation-system/
 ├── eval_mcp/                     # MCP package (published to PyPI)
 │   ├── cli.py                    # `eval-mcp` CLI entry point
-│   ├── server.py                 # FastMCP server registering all tools
+│   ├── server.py                 # MCPServer (mcp 2.x) registering all tools
 │   ├── core/                     # Shared utilities (bedrock client, storage, pricing, ...)
 │   ├── tools/                    # MCP tool handlers (run_eval, generate_qa, ...)
 │   ├── bedrock_capture.py        # OTel-based Bedrock call capture for agent evals

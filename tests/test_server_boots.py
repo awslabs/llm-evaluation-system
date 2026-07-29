@@ -5,6 +5,11 @@ broken MCP in two consecutive releases (0.13.0, 0.14.0) without anything failing
 The dependency was pinned `mcp>=1.0.0`, so every fresh install resolved 2.0.0 and
 died at `eval_mcp/server.py` with "cannot import name 'FastMCP'".
 
+server.py has since migrated to the 2.x API, so the version assertions here are
+inverted from their original form — the hazard is now resolving mcp 1.x, which
+lacks `MCPServer`. The boot checks themselves are unchanged and are the reason
+the migration could be verified at all.
+
 It went unnoticed because the obvious checks all route around the failure:
 
   - `eval-mcp --help` is a Click callback that returns BEFORE
@@ -64,25 +69,30 @@ def test_server_registers_tools():
     assert count >= 20, f"expected the full tool set, got {count}"
 
 
-def test_fastmcp_is_importable():
-    """Pin the specific symbol whose removal caused the outage.
+def test_mcpserver_is_importable():
+    """Pin the constructor symbol the server is built from.
 
-    A dependency bump that takes FastMCP away must fail here — loudly, in CI —
-    rather than in a user's IDE after release.
+    The v1 counterpart of this test pinned `FastMCP`, whose removal in mcp
+    2.0.0 was the original outage. Now that server.py is on the 2.x API, the
+    symbol to guard is `MCPServer` — a future rename must fail here, loudly in
+    CI, rather than in a user's IDE after release.
     """
     try:
-        from mcp.server import FastMCP  # noqa: F401
+        from mcp.server import MCPServer  # noqa: F401
     except ImportError as e:
         pytest.fail(
-            "mcp.server.FastMCP is unavailable, so the MCP server cannot be "
-            "constructed. mcp 2.x removed it in favour of MCPServer — either "
-            "keep the `mcp<2` cap in pyproject.toml or migrate "
-            f"eval_mcp/server.py to the 2.x API. Underlying error: {e}"
+            "mcp.server.MCPServer is unavailable, so the MCP server cannot be "
+            f"constructed. Check the mcp changelog for a rename. Error: {e}"
         )
 
 
-def test_mcp_dependency_is_capped_below_2():
-    """The declared requirement must exclude the incompatible major version.
+def test_mcp_dependency_requires_2x():
+    """The declared requirement must floor at the major version we target.
+
+    server.py uses the 2.x API (`MCPServer`, transport args on the run
+    methods), which 1.x does not provide — so resolving 1.x would break the
+    import just as surely as unpinned 2.x did before the migration. This is the
+    mirror of the old `<2` cap: the hazard moved from "too new" to "too old".
 
     Asserted on package metadata rather than the pyproject text so it reflects
     what a user actually resolves.
@@ -92,7 +102,29 @@ def test_mcp_dependency_is_capped_below_2():
     reqs = md.requires("llm-evaluation-system") or []
     mcp_reqs = [r for r in reqs if r.split(";")[0].strip().startswith("mcp")]
     assert mcp_reqs, "no mcp requirement declared"
-    assert any("<2" in r for r in mcp_reqs), (
-        f"mcp must be capped below 2.0 until server.py migrates off FastMCP; "
+    assert any(">=2" in r.replace(" ", "") for r in mcp_reqs), (
+        f"mcp must require >=2.0 now that server.py uses the 2.x API; "
         f"found {mcp_reqs}"
+    )
+
+
+def test_server_reports_a_version():
+    """`serverInfo.version` must not be empty.
+
+    v1's FastMCP derived the version automatically; MCPServer defaults it to
+    "" and would silently report a blank version to every client. server.py
+    passes it explicitly from package metadata — this guards that wiring.
+    """
+    code = (
+        "import eval_mcp.server as s;"
+        "print(s.mcp.version or '<empty>')"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True
+    )
+    assert result.returncode == 0, f"reading version failed:\n{result.stderr}"
+    reported = result.stdout.strip().splitlines()[-1]
+    assert reported != "<empty>", (
+        "MCPServer was constructed without an explicit version=, so clients "
+        "see an empty serverInfo.version."
     )

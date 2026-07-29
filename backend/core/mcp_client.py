@@ -8,7 +8,7 @@ from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 
 def setup_mcp_logging(log_dir: str = "backend/logs") -> logging.Logger:
@@ -108,7 +108,7 @@ class MultiMCPClient:
                 if server_config["type"] == "http":
                     # Connect via HTTP with extended timeout for long-running evaluations
                     read, write, _ = await exit_stack.enter_async_context(
-                        streamablehttp_client(
+                        streamable_http_client(
                             server_config["url"],
                             timeout=3600.0,  # 1 hour for connection/request
                             sse_read_timeout=7200.0  # 2 hours for SSE streaming

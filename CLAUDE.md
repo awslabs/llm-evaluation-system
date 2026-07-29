@@ -181,6 +181,34 @@ and `gpt-5.4` are also in us-west-2. Consequences worth knowing:
   absence. `run_eval` also reports this: a Mantle validation failure probes the
   other regions and names the ones that do serve the model.
 
+### The mcp SDK is 2.x — things not to "tidy" back
+
+`eval_mcp/server.py` is built on `mcp.server.MCPServer` (mcp >= 2.0). v1's
+`FastMCP` no longer exists, and `pyproject.toml` floors mcp at `>=2.0.0`
+(pinned by a test). Four consequences that look like mistakes but aren't:
+
+- **`port`/`host` are not constructor args.** 2.x moved every
+  transport-specific parameter onto the run/app methods. The HTTP branch in
+  `main()` passes them to its own `uvicorn.run(...)`, which is why the
+  constructor doesn't need them. Re-adding `MCPServer(..., port=)` is a
+  `TypeError`.
+- **`version=` is passed explicitly.** v1 derived it; 2.x defaults to `""`
+  and would report a blank `serverInfo.version` to every client. It comes
+  from installed package metadata because setuptools-scm owns the version.
+- **`streamable_http_app(max_request_body_size=...)` is deliberate.** 2.x
+  caps bodies at 4 MiB (HTTP 413); v1 had no cap. `save_dataset` accepts a
+  dataset inline via `file_content`, so the default would newly reject
+  uploads that used to work. Override with `EVAL_MCP_MAX_BODY_BYTES`.
+- **Annotations are camelCase in constructors, snake_case on attributes.**
+  `ToolAnnotations(readOnlyHint=True)` is still correct, but *reading* it is
+  `.read_only_hint`. The wire format stays camelCase, so clients are
+  unaffected.
+
+Client-side, the Streamable HTTP transport is `streamable_http_client`
+(renamed from `streamablehttp_client`). Note mcp 2.x depends on **`httpx2`**,
+a separately-named package; our own code still uses plain `httpx` and the two
+coexist as distinct modules.
+
 ### Adding a tool
 
 1. Async handler in `eval_mcp/tools/<name>.py`.

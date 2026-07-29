@@ -16,7 +16,7 @@ from typing import Annotated
 
 from pydantic import Field
 
-from mcp.server import FastMCP
+from mcp.server import MCPServer
 from mcp.types import ToolAnnotations
 
 from eval_mcp.core.bedrock_client import BedrockClient
@@ -60,8 +60,33 @@ DEFAULT_USER = os.environ.get("EVAL_MCP_USER", "local")
 if "USER_STORAGE_BASE" not in os.environ:
     os.environ["USER_STORAGE_BASE"] = str(Path.home() / ".eval-mcp" / "users")
 
-# Initialize server
-mcp = FastMCP("eval-server", port=port, host=host)
+
+def _server_version() -> str:
+    """Version reported in the MCP handshake's `serverInfo`.
+
+    Read from installed package metadata because the version is derived
+    from the git tag by setuptools-scm — there is no static version in
+    pyproject.toml to import (see CLAUDE.md). Falls back to "" (what mcp
+    itself defaults to) if the package isn't installed, e.g. when running
+    straight from a source checkout.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        return version("llm-evaluation-system")
+    except PackageNotFoundError:
+        return ""
+
+# Initialize server.
+#
+# `port`/`host` are deliberately NOT passed here: mcp 2.x moved every
+# transport-specific parameter off the constructor and onto the run/app
+# methods. Our HTTP branch in main() builds `streamable_http_app()` and
+# hands it to its own `uvicorn.run(host=..., port=...)`, so the values are
+# applied there and the constructor never needed them.
+#
+# `version` IS passed explicitly: v1's FastMCP derived it, v2 defaults to
+# "" and would report an empty `serverInfo.version` to every client.
+mcp = MCPServer("eval-server", version=_server_version())
 
 # Shared clients
 bedrock = BedrockClient()
@@ -1648,7 +1673,21 @@ def main():
                     )
                 return await call_next(request)
 
-        app = mcp.streamable_http_app()
+        # mcp 2.x added a 4 MiB cap on Streamable HTTP request bodies
+        # (HTTP 413 past it). That's a sane default for most servers but
+        # too tight here: `save_dataset` accepts the dataset inline via
+        # `file_content` for callers whose data isn't on the local
+        # filesystem, and a mid-size CSV clears 4 MiB easily. v1 had no
+        # cap, so keeping the default would newly reject uploads that
+        # work today — a silent regression for existing users.
+        #
+        # 64 MiB is a deliberate compromise, not a measured limit: the
+        # layers in front of this impose none (nginx runs
+        # `client_max_body_size 0`, the backend sets no ceiling), so the
+        # alternative to a number here is no protection at all. Raise it
+        # with EVAL_MCP_MAX_BODY_BYTES if a real dataset ever exceeds it.
+        max_body = int(os.environ.get("EVAL_MCP_MAX_BODY_BYTES", 64 * 1024 * 1024))
+        app = mcp.streamable_http_app(max_request_body_size=max_body)
         app.add_middleware(OriginValidationMiddleware)
         app.routes.insert(0, Route("/eval-info/{user_id}", eval_info_handler, methods=["GET"]))
         app.routes.insert(0, Route("/cancel/{user_id}", cancel_handler, methods=["POST"]))

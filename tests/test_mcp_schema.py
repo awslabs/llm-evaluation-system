@@ -54,10 +54,10 @@ def test_read_only_tools_claim_read_only(tool_name: str):
     tool = srv.mcp._tool_manager.get_tool(tool_name)
     assert tool is not None, f"Tool {tool_name} not registered"
     assert tool.annotations is not None
-    assert tool.annotations.readOnlyHint is True, (
+    assert tool.annotations.read_only_hint is True, (
         f"{tool_name} should declare readOnlyHint=True"
     )
-    assert tool.annotations.destructiveHint is False
+    assert tool.annotations.destructive_hint is False
 
 
 @pytest.mark.parametrize(
@@ -75,7 +75,7 @@ def test_read_only_tools_claim_read_only(tool_name: str):
 def test_write_tools_are_not_read_only(tool_name: str):
     tool = srv.mcp._tool_manager.get_tool(tool_name)
     assert tool is not None, f"Tool {tool_name} not registered"
-    assert tool.annotations.readOnlyHint is False
+    assert tool.annotations.read_only_hint is False
 
 
 def test_no_tool_declares_destructive_hint():
@@ -83,7 +83,7 @@ def test_no_tool_declares_destructive_hint():
     that changes, update the corresponding tool's annotation explicitly
     rather than relying on the default."""
     destructive = [
-        t.name for t in _registered_tools() if t.annotations and t.annotations.destructiveHint
+        t.name for t in _registered_tools() if t.annotations and t.annotations.destructive_hint
     ]
     assert destructive == [], f"Unexpected destructive tools: {destructive}"
 

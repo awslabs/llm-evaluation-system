@@ -58,6 +58,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // "network error" in the UI.
   const cancelledAtRef = useRef<number | null>(null);
   const POST_CANCEL_COOLDOWN_MS = 2000;
+  // Session ids with a reconnect attempt in flight — see
+  // reconnectIfRunning.
+  const reconnectingRef = useRef<Set<string>>(new Set());
 
   const loadUserSessions = async () => {
     if (!user?.name) return;
@@ -278,7 +281,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // After a page refresh mid-response, the backend keeps the agent running
   // (the SSE client just disconnected). Re-POST with an empty message to
   // reattach to the live queue and show tokens as they continue to arrive.
-  const reconnectIfRunning = useCallback(
+  const runReconnect = useCallback(
     async (sessionId: string): Promise<boolean> => {
       let running = false;
       try {
@@ -337,6 +340,26 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       }
     },
     [consumeStream, user?.id],
+  );
+
+  // One reconnect per session at a time. Chat.tsx's effect re-fires
+  // whenever chatSessions or currentSessionId changes, so without this a
+  // single visit fans out into a burst of concurrent reconnects — the
+  // deployed DB shows 9 landing inside the same second, each having
+  // started its own turn and written its own empty row. A ref, not
+  // state: concurrent callers have to observe the flag synchronously,
+  // and a setState wouldn't have applied yet.
+  const reconnectIfRunning = useCallback(
+    async (sessionId: string): Promise<boolean> => {
+      if (reconnectingRef.current.has(sessionId)) return false;
+      reconnectingRef.current.add(sessionId);
+      try {
+        return await runReconnect(sessionId);
+      } finally {
+        reconnectingRef.current.delete(sessionId);
+      }
+    },
+    [runReconnect],
   );
 
   const sendMessage = useCallback(

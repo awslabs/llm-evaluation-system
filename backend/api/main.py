@@ -1287,6 +1287,42 @@ async def chat_stream(request: ChatRequest, user_id: str):
                         pass
         return
 
+    # No live task to reattach to, and nothing to say. This is the
+    # reconnect-lost-the-race path: `reconnectIfRunning` checked
+    # /chat/status, saw `running: true`, and POSTed an empty message to
+    # reattach — but by the time the POST landed the task had finished
+    # (or the "running" flag was a stale `session_active` row from a pod
+    # that died mid-run). Falling through would start a REAL turn with
+    # empty text, and Bedrock hard-rejects that:
+    #
+    #     ValidationException: messages.2: user messages must have
+    #     non-empty content
+    #
+    # Worse, the empty user message is already persisted by then, so the
+    # session is poisoned permanently — every later turn re-loads that
+    # row from history and fails the same way. Symptom: opening /history
+    # and returning to a finished chat fills the transcript with
+    # "Thinking…" bubbles that each die, and the conversation can never
+    # be used again. Close the stream cleanly instead; there's nothing
+    # to stream and nothing to say.
+    if not request.message.strip() and not request.file:
+        logger.info(
+            f"[STREAM] Empty message with no live task for session {session_id} "
+            "— reconnect lost the race; closing stream without starting a turn"
+        )
+        # Clear the stale flag so the next status check reports idle
+        # instead of luring another reconnect into the same dead end.
+        try:
+            await asyncio.wait_for(db.clear_session_active(session_id), timeout=2.0)
+        except (asyncio.TimeoutError, Exception):
+            pass
+        # Close the stream with no further events. Deliberately NOT a
+        # `complete` event: the frontend's handler reads `data.response`
+        # and would blank the bubble to `undefined`. An empty stream lets
+        # `reconnectIfRunning` see "no content arrived" and drop its
+        # placeholder bubble entirely.
+        return
+
     # Ensure user exists
     await db.create_user(user_id, user_id)
 
@@ -1383,6 +1419,12 @@ async def chat_non_stream(request: ChatRequest, user_id: str) -> ChatResponse:
     """Handle non-streaming chat requests (legacy mode)."""
     if not bedrock_client or not mcp_client or not db:
         raise HTTPException(status_code=500, detail="Backend not initialized")
+
+    # Same guard as the streaming path: an empty message would be
+    # persisted and then rejected by Bedrock ("user messages must have
+    # non-empty content"), permanently poisoning the session's history.
+    if not request.message.strip() and not request.file:
+        raise HTTPException(status_code=400, detail="Message cannot be empty")
 
     try:
         # Generate session ID if not provided

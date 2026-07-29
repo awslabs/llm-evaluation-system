@@ -21,9 +21,26 @@ export default function MessageList() {
   const { messages, isLoading } = useChat();
   const navigate = useNavigate();
   const bottomRef = useRef<HTMLDivElement>(null);
+  // Id of the first message in the transcript we last scrolled for. When
+  // it changes, the whole transcript was REPLACED (a different
+  // conversation) rather than appended to.
+  const firstIdRef = useRef<string | null>(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const firstId = messages[0]?.id ?? null;
+    // Smooth is right for a conversation growing under you — a streaming
+    // token or a new turn — where the glide shows you what moved.
+    //
+    // It is wrong for OPENING a conversation. `scrollIntoView` animates
+    // from wherever the pane happens to be, so switching to a long
+    // transcript raced from 0 to ~3900px over ~720ms: measured on a
+    // 30-message chat, and the "bizarre scrolling" in the bug report.
+    // A replaced transcript should simply START at the bottom.
+    const replaced = firstId !== firstIdRef.current;
+    firstIdRef.current = firstId;
+    bottomRef.current?.scrollIntoView({
+      behavior: replaced ? "auto" : "smooth",
+    });
   }, [messages]);
 
   const showEmpty = messages.length === 0 && !isLoading;

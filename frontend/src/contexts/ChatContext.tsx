@@ -31,7 +31,7 @@ interface ChatContextType {
   cancelRequest: () => Promise<void>;
   handleDocumentsUploaded: (result: UploadResult) => void;
   createNewChat: () => void;
-  loadChat: (sessionId: string) => void;
+  loadChat: (sessionId: string) => Promise<void>;
   // If `sessionId` is still streaming on the backend (e.g. after a page
   // refresh mid-response), reattach to the live SSE stream. Returns true if a
   // reconnect happened. No-op if the session already finished.
@@ -58,6 +58,9 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // "network error" in the UI.
   const cancelledAtRef = useRef<number | null>(null);
   const POST_CANCEL_COOLDOWN_MS = 2000;
+  // Session ids with a reconnect attempt in flight — see
+  // reconnectIfRunning.
+  const reconnectingRef = useRef<Set<string>>(new Set());
 
   const loadUserSessions = async () => {
     if (!user?.name) return;
@@ -82,13 +85,44 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   }, [authLoading, user?.name]);
 
 
-  const loadChat = useCallback((sessionId: string) => {
-    const session = chatSessions.find((s) => s.id === sessionId);
-    if (session) {
+  // Show `sessionId`'s transcript. Falls back to fetching when the
+  // session isn't in the local cache.
+  //
+  // It used to silently no-op in that case, and the cache goes stale
+  // easily: it's populated once at mount, while /history fetches its own
+  // fresh list. So clicking a conversation created after mount (or in
+  // another tab) switched the URL but left the PREVIOUS conversation's
+  // messages on screen — the reported "shows several things", and it also
+  // stranded currentSessionId on the old session, which let the
+  // URL-sync effect in Chat.tsx rewrite ?session back and bounce the user
+  // out of the chat they clicked.
+  const loadChat = useCallback(async (sessionId: string) => {
+    const cached = chatSessions.find((s) => s.id === sessionId);
+    if (cached) {
       setCurrentSessionId(sessionId);
-      setMessages(session.messages);
+      setMessages(cached.messages);
+      return;
     }
-  }, [chatSessions]);
+
+    // Not cached — switch immediately so currentSessionId and the URL
+    // agree (otherwise the URL-sync effect fights this navigation), then
+    // fill in the transcript.
+    setCurrentSessionId(sessionId);
+    setMessages([]);
+    try {
+      const response = await fetch(
+        `/api/sessions?user_id=${encodeURIComponent(user?.name ?? "")}`,
+      );
+      if (!response.ok) return;
+      const data = await response.json();
+      const sessions: ChatSession[] = data.sessions || [];
+      setChatSessions(sessions);
+      const found = sessions.find((s) => s.id === sessionId);
+      if (found) setMessages(found.messages);
+    } catch (error) {
+      console.error("Failed to load chat:", error);
+    }
+  }, [chatSessions, user?.name]);
 
   const createNewChat = useCallback(() => {
     const newSession: ChatSession = {
@@ -167,79 +201,101 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             }
             if (line.startsWith("data: ")) {
               const jsonData = line.slice(6);
+              // Only the parse is guarded. Event handling used to live
+              // inside this try too, which meant the `error` event's
+              // `throw` was caught by the parse handler below and merely
+              // console.logged — so a backend failure left the bubble
+              // frozen on "💭 Thinking…" forever instead of surfacing.
+              // That's the visible symptom of the empty-message
+              // ValidationException this commit also fixes.
+              let data: Record<string, unknown> & {
+                session_id?: string;
+                message?: string;
+                content?: string;
+                tool?: string;
+                response?: string;
+                error?: string;
+              };
               try {
-                const data = JSON.parse(jsonData);
-
-                if (currentEventType === "session") {
-                  if (data.session_id) {
-                    streamSessionId = data.session_id;
-                    setCurrentSessionId(data.session_id);
-                    setChatSessions((prev) => {
-                      if (prev.some((s) => s.id === data.session_id)) {
-                        return prev;
-                      }
-                      return [
-                        {
-                          id: data.session_id,
-                          title: "New Chat",
-                          createdAt: new Date().toISOString(),
-                          messages: [],
-                        },
-                        ...prev,
-                      ];
-                    });
-                  }
-                } else if (currentEventType === "progress" || currentEventType === "status") {
-                  statusContent = data.message || data.content || "";
-                  patchAssistant({
-                    content: assistantContent || statusContent,
-                    metadata: { isStreaming: true, progress: statusContent },
-                  });
-                } else if (currentEventType === "tool_call") {
-                  const toolText = `🔧 ${data.tool}`;
-                  statusHistory.push(toolText);
-                  statusContent = statusHistory.join(' → ');
-                  patchAssistant({
-                    content: assistantContent || statusContent,
-                    metadata: { isStreaming: true, tool: data.tool, progress: statusContent },
-                  });
-                } else if (currentEventType === "tool_result") {
-                  statusContent = `✓ Tool ${data.tool} completed`;
-                  patchAssistant({
-                    content: assistantContent || statusContent,
-                    metadata: { isStreaming: true, progress: statusContent },
-                  });
-                } else if (currentEventType === "text") {
-                  assistantContent += data.content || "";
-                  patchAssistant({
-                    content: assistantContent,
-                    metadata: { isStreaming: true },
-                  });
-                } else if (currentEventType === "thinking") {
-                  const thinkingText = `💭 ${data.message?.slice(0, 100) || 'Thinking'}${data.message?.length > 100 ? '...' : ''}`;
-                  statusHistory.push(thinkingText);
-                  statusContent = statusHistory.join(' → ');
-                  patchAssistant({
-                    content: assistantContent || statusContent,
-                    metadata: { isStreaming: true, progress: statusContent },
-                  });
-                } else if (currentEventType === "complete") {
-                  assistantContent = data.response;
-                  patchAssistant({
-                    content: assistantContent,
-                    metadata: { isStreaming: false },
-                  });
-                } else if (currentEventType === "cancelled") {
-                  assistantContent += "\n\n*[Request cancelled]*";
-                  patchAssistant({
-                    content: assistantContent,
-                    metadata: { isStreaming: false },
-                  });
-                } else if (currentEventType === "error") {
-                  throw new Error(data.error || data.message || "Unknown error");
-                }
+                data = JSON.parse(jsonData);
               } catch (e) {
-                console.error("Error parsing SSE data:", e);
+                console.error("Error parsing SSE data:", e, jsonData);
+                continue;
+              }
+
+              if (currentEventType === "session") {
+                // Bound to a local so it stays narrowed to `string`
+                // inside the setState closure below.
+                const newSessionId = data.session_id;
+                if (newSessionId) {
+                  streamSessionId = newSessionId;
+                  setCurrentSessionId(newSessionId);
+                  setChatSessions((prev) => {
+                    if (prev.some((s) => s.id === newSessionId)) {
+                      return prev;
+                    }
+                    return [
+                      {
+                        id: newSessionId,
+                        title: "New Chat",
+                        createdAt: new Date().toISOString(),
+                        messages: [],
+                      },
+                      ...prev,
+                    ];
+                  });
+                }
+              } else if (currentEventType === "progress" || currentEventType === "status") {
+                statusContent = data.message || data.content || "";
+                patchAssistant({
+                  content: assistantContent || statusContent,
+                  metadata: { isStreaming: true, progress: statusContent },
+                });
+              } else if (currentEventType === "tool_call") {
+                const toolText = `🔧 ${data.tool}`;
+                statusHistory.push(toolText);
+                statusContent = statusHistory.join(' → ');
+                patchAssistant({
+                  content: assistantContent || statusContent,
+                  metadata: { isStreaming: true, tool: data.tool, progress: statusContent },
+                });
+              } else if (currentEventType === "tool_result") {
+                statusContent = `✓ Tool ${data.tool} completed`;
+                patchAssistant({
+                  content: assistantContent || statusContent,
+                  metadata: { isStreaming: true, progress: statusContent },
+                });
+              } else if (currentEventType === "text") {
+                assistantContent += data.content || "";
+                patchAssistant({
+                  content: assistantContent,
+                  metadata: { isStreaming: true },
+                });
+              } else if (currentEventType === "thinking") {
+                const raw = data.message ?? "";
+                const thinkingText = `💭 ${raw.slice(0, 100) || 'Thinking'}${raw.length > 100 ? '...' : ''}`;
+                statusHistory.push(thinkingText);
+                statusContent = statusHistory.join(' → ');
+                patchAssistant({
+                  content: assistantContent || statusContent,
+                  metadata: { isStreaming: true, progress: statusContent },
+                });
+              } else if (currentEventType === "complete") {
+                // Keep whatever streamed if the terminal event carries no
+                // text — assigning undefined would blank the bubble.
+                assistantContent = data.response ?? assistantContent;
+                patchAssistant({
+                  content: assistantContent,
+                  metadata: { isStreaming: false },
+                });
+              } else if (currentEventType === "cancelled") {
+                assistantContent += "\n\n*[Request cancelled]*";
+                patchAssistant({
+                  content: assistantContent,
+                  metadata: { isStreaming: false },
+                });
+              } else if (currentEventType === "error") {
+                throw new Error(data.error || data.message || "Unknown error");
               }
             }
           }
@@ -256,7 +312,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // After a page refresh mid-response, the backend keeps the agent running
   // (the SSE client just disconnected). Re-POST with an empty message to
   // reattach to the live queue and show tokens as they continue to arrive.
-  const reconnectIfRunning = useCallback(
+  const runReconnect = useCallback(
     async (sessionId: string): Promise<boolean> => {
       let running = false;
       try {
@@ -290,7 +346,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (!response.ok || !response.headers.get("content-type")?.includes("text/event-stream")) {
           throw new Error("reconnect failed");
         }
-        await consumeStream(response, assistantMessageId);
+        const { content } = await consumeStream(response, assistantMessageId);
+        // Nothing arrived — the run had already finished by the time this
+        // POST landed (or the "running" flag was stale debris from a pod
+        // that died mid-turn). The backend closes the stream without
+        // starting a turn in that case, so there's no answer coming.
+        // Drop the placeholder instead of leaving a dead "Reconnecting…"
+        // bubble in the transcript: visiting /history and coming back used
+        // to stack one of these per visit.
+        if (!content.trim()) {
+          setMessages((prev) => prev.filter((m) => m.id !== assistantMessageId));
+          return false;
+        }
         // Pull the now-complete transcript from the DB so the cached session
         // (used by loadChat on later navigation) is consistent.
         await loadUserSessions();
@@ -304,6 +371,26 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       }
     },
     [consumeStream, user?.id],
+  );
+
+  // One reconnect per session at a time. Chat.tsx's effect re-fires
+  // whenever chatSessions or currentSessionId changes, so without this a
+  // single visit fans out into a burst of concurrent reconnects — the
+  // deployed DB shows 9 landing inside the same second, each having
+  // started its own turn and written its own empty row. A ref, not
+  // state: concurrent callers have to observe the flag synchronously,
+  // and a setState wouldn't have applied yet.
+  const reconnectIfRunning = useCallback(
+    async (sessionId: string): Promise<boolean> => {
+      if (reconnectingRef.current.has(sessionId)) return false;
+      reconnectingRef.current.add(sessionId);
+      try {
+        return await runReconnect(sessionId);
+      } finally {
+        reconnectingRef.current.delete(sessionId);
+      }
+    },
+    [runReconnect],
   );
 
   const sendMessage = useCallback(

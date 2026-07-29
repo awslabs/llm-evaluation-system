@@ -167,79 +167,101 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
             }
             if (line.startsWith("data: ")) {
               const jsonData = line.slice(6);
+              // Only the parse is guarded. Event handling used to live
+              // inside this try too, which meant the `error` event's
+              // `throw` was caught by the parse handler below and merely
+              // console.logged — so a backend failure left the bubble
+              // frozen on "💭 Thinking…" forever instead of surfacing.
+              // That's the visible symptom of the empty-message
+              // ValidationException this commit also fixes.
+              let data: Record<string, unknown> & {
+                session_id?: string;
+                message?: string;
+                content?: string;
+                tool?: string;
+                response?: string;
+                error?: string;
+              };
               try {
-                const data = JSON.parse(jsonData);
-
-                if (currentEventType === "session") {
-                  if (data.session_id) {
-                    streamSessionId = data.session_id;
-                    setCurrentSessionId(data.session_id);
-                    setChatSessions((prev) => {
-                      if (prev.some((s) => s.id === data.session_id)) {
-                        return prev;
-                      }
-                      return [
-                        {
-                          id: data.session_id,
-                          title: "New Chat",
-                          createdAt: new Date().toISOString(),
-                          messages: [],
-                        },
-                        ...prev,
-                      ];
-                    });
-                  }
-                } else if (currentEventType === "progress" || currentEventType === "status") {
-                  statusContent = data.message || data.content || "";
-                  patchAssistant({
-                    content: assistantContent || statusContent,
-                    metadata: { isStreaming: true, progress: statusContent },
-                  });
-                } else if (currentEventType === "tool_call") {
-                  const toolText = `🔧 ${data.tool}`;
-                  statusHistory.push(toolText);
-                  statusContent = statusHistory.join(' → ');
-                  patchAssistant({
-                    content: assistantContent || statusContent,
-                    metadata: { isStreaming: true, tool: data.tool, progress: statusContent },
-                  });
-                } else if (currentEventType === "tool_result") {
-                  statusContent = `✓ Tool ${data.tool} completed`;
-                  patchAssistant({
-                    content: assistantContent || statusContent,
-                    metadata: { isStreaming: true, progress: statusContent },
-                  });
-                } else if (currentEventType === "text") {
-                  assistantContent += data.content || "";
-                  patchAssistant({
-                    content: assistantContent,
-                    metadata: { isStreaming: true },
-                  });
-                } else if (currentEventType === "thinking") {
-                  const thinkingText = `💭 ${data.message?.slice(0, 100) || 'Thinking'}${data.message?.length > 100 ? '...' : ''}`;
-                  statusHistory.push(thinkingText);
-                  statusContent = statusHistory.join(' → ');
-                  patchAssistant({
-                    content: assistantContent || statusContent,
-                    metadata: { isStreaming: true, progress: statusContent },
-                  });
-                } else if (currentEventType === "complete") {
-                  assistantContent = data.response;
-                  patchAssistant({
-                    content: assistantContent,
-                    metadata: { isStreaming: false },
-                  });
-                } else if (currentEventType === "cancelled") {
-                  assistantContent += "\n\n*[Request cancelled]*";
-                  patchAssistant({
-                    content: assistantContent,
-                    metadata: { isStreaming: false },
-                  });
-                } else if (currentEventType === "error") {
-                  throw new Error(data.error || data.message || "Unknown error");
-                }
+                data = JSON.parse(jsonData);
               } catch (e) {
-                console.error("Error parsing SSE data:", e);
+                console.error("Error parsing SSE data:", e, jsonData);
+                continue;
+              }
+
+              if (currentEventType === "session") {
+                // Bound to a local so it stays narrowed to `string`
+                // inside the setState closure below.
+                const newSessionId = data.session_id;
+                if (newSessionId) {
+                  streamSessionId = newSessionId;
+                  setCurrentSessionId(newSessionId);
+                  setChatSessions((prev) => {
+                    if (prev.some((s) => s.id === newSessionId)) {
+                      return prev;
+                    }
+                    return [
+                      {
+                        id: newSessionId,
+                        title: "New Chat",
+                        createdAt: new Date().toISOString(),
+                        messages: [],
+                      },
+                      ...prev,
+                    ];
+                  });
+                }
+              } else if (currentEventType === "progress" || currentEventType === "status") {
+                statusContent = data.message || data.content || "";
+                patchAssistant({
+                  content: assistantContent || statusContent,
+                  metadata: { isStreaming: true, progress: statusContent },
+                });
+              } else if (currentEventType === "tool_call") {
+                const toolText = `🔧 ${data.tool}`;
+                statusHistory.push(toolText);
+                statusContent = statusHistory.join(' → ');
+                patchAssistant({
+                  content: assistantContent || statusContent,
+                  metadata: { isStreaming: true, tool: data.tool, progress: statusContent },
+                });
+              } else if (currentEventType === "tool_result") {
+                statusContent = `✓ Tool ${data.tool} completed`;
+                patchAssistant({
+                  content: assistantContent || statusContent,
+                  metadata: { isStreaming: true, progress: statusContent },
+                });
+              } else if (currentEventType === "text") {
+                assistantContent += data.content || "";
+                patchAssistant({
+                  content: assistantContent,
+                  metadata: { isStreaming: true },
+                });
+              } else if (currentEventType === "thinking") {
+                const raw = data.message ?? "";
+                const thinkingText = `💭 ${raw.slice(0, 100) || 'Thinking'}${raw.length > 100 ? '...' : ''}`;
+                statusHistory.push(thinkingText);
+                statusContent = statusHistory.join(' → ');
+                patchAssistant({
+                  content: assistantContent || statusContent,
+                  metadata: { isStreaming: true, progress: statusContent },
+                });
+              } else if (currentEventType === "complete") {
+                // Keep whatever streamed if the terminal event carries no
+                // text — assigning undefined would blank the bubble.
+                assistantContent = data.response ?? assistantContent;
+                patchAssistant({
+                  content: assistantContent,
+                  metadata: { isStreaming: false },
+                });
+              } else if (currentEventType === "cancelled") {
+                assistantContent += "\n\n*[Request cancelled]*";
+                patchAssistant({
+                  content: assistantContent,
+                  metadata: { isStreaming: false },
+                });
+              } else if (currentEventType === "error") {
+                throw new Error(data.error || data.message || "Unknown error");
               }
             }
           }
@@ -290,7 +312,18 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         if (!response.ok || !response.headers.get("content-type")?.includes("text/event-stream")) {
           throw new Error("reconnect failed");
         }
-        await consumeStream(response, assistantMessageId);
+        const { content } = await consumeStream(response, assistantMessageId);
+        // Nothing arrived — the run had already finished by the time this
+        // POST landed (or the "running" flag was stale debris from a pod
+        // that died mid-turn). The backend closes the stream without
+        // starting a turn in that case, so there's no answer coming.
+        // Drop the placeholder instead of leaving a dead "Reconnecting…"
+        // bubble in the transcript: visiting /history and coming back used
+        // to stack one of these per visit.
+        if (!content.trim()) {
+          setMessages((prev) => prev.filter((m) => m.id !== assistantMessageId));
+          return false;
+        }
         // Pull the now-complete transcript from the DB so the cached session
         // (used by loadChat on later navigation) is consistent.
         await loadUserSessions();

@@ -12,7 +12,7 @@ import logging
 import os
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 
 import asyncpg
@@ -40,6 +40,15 @@ def _require_env(name: str) -> str:
 class Database:
     # IAM tokens are valid for 15 minutes, refresh at 10 minutes to be safe
     TOKEN_REFRESH_SECONDS = 600
+
+    # How long a `session_active` row stays believable. Rows are deleted
+    # when a turn ends, so a row older than this means the pod died
+    # without running its cleanup. See get_session_active().
+    #
+    # A timedelta, not a string: asyncpg maps Postgres `interval` to
+    # datetime.timedelta and rejects a str with the very unhelpful
+    # "'str' object has no attribute 'days'".
+    SESSION_ACTIVE_TTL = timedelta(hours=6)
 
     def __init__(self):
         # Get connection parameters from environment (all required)
@@ -468,11 +477,30 @@ class Database:
             return sessions
 
     async def get_session_messages(self, session_id: str) -> List[Dict[str, Any]]:
-        """Get all messages for a session."""
+        """Get all messages for a session, skipping empty ones.
+
+        Blank-content rows are never written any more (`chat_stream`
+        refuses to start a turn on an empty message), but sessions that
+        were poisoned before that guard existed still carry one. Bedrock
+        rejects the whole request if history contains an empty user
+        message —
+
+            ValidationException: messages.N: user messages must have
+            non-empty content
+
+        — so a single legacy row makes the conversation permanently
+        unusable: every turn re-hydrates it and fails again. Filtering on
+        read heals those sessions without a migration, and covers every
+        consumer at once (agent hydration, /api/sessions, the
+        first-turn title check). An empty message carries no information,
+        so dropping it loses nothing.
+        """
         await self._ensure_pool_fresh()
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
-                "SELECT id, role, content, timestamp FROM messages WHERE session_id = $1 ORDER BY timestamp ASC",
+                "SELECT id, role, content, timestamp FROM messages "
+                "WHERE session_id = $1 AND btrim(coalesce(content, '')) <> '' "
+                "ORDER BY timestamp ASC",
                 session_id,
             )
 
@@ -623,17 +651,33 @@ class Database:
             logger.warning(f"Failed to clear session_active for {session_id}: {e}")
 
     async def get_session_active(self, session_id: str) -> bool:
-        """Return True if the session has an active row in session_active.
+        """Return True if the session has a *recent* active row.
 
         Used by chat_status as the cross-pod fallback when the session
         is not found in the local in-memory active_tasks dict.
+
+        Rows are cleared in `run_agent_background`'s finally block, but
+        that only runs if the pod survives. A pod OOM-killed, evicted or
+        rescheduled mid-turn leaves its row behind forever — nothing else
+        ever deletes it. The frontend then believes the session is live
+        on every visit and fires a reconnect that can't succeed, which
+        used to poison the session (see the empty-message guard in
+        `chat_stream`).
+
+        The `started_at` cutoff makes the flag self-healing: a row older
+        than the longest plausible turn is treated as debris. The window
+        is generous because a turn can legitimately run a long eval, and
+        being wrong in the "still running" direction only costs a
+        harmless reconnect attempt — whereas being wrong the other way
+        would cut off a live stream.
         """
         await self._ensure_pool_fresh()
         try:
             async with self._pool.acquire() as conn:
                 row = await conn.fetchrow(
-                    "SELECT 1 FROM session_active WHERE session_id = $1",
-                    session_id,
+                    "SELECT 1 FROM session_active "
+                    "WHERE session_id = $1 AND started_at > NOW() - $2::interval",
+                    session_id, self.SESSION_ACTIVE_TTL,
                 )
                 return row is not None
         except asyncpg.PostgresError as e:

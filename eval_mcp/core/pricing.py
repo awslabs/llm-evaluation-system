@@ -273,6 +273,29 @@ def get_model_cost(model_id: str) -> Optional[dict]:
     }
 
 
+def get_max_output_tokens(model_id: str) -> Optional[int]:
+    """Model's maximum output tokens, or None if unknown.
+
+    Same LiteLLM dataset that backs pricing, so it needs no extra fetch and
+    inherits the ID-normalisation in ``_candidates`` (which is what makes
+    region-prefixed and Mantle IDs resolve).
+
+    Used to set a per-model ceiling on generation instead of one hardcoded
+    number. There is no way to discover this from AWS: Bedrock's
+    ``GetFoundationModel`` doesn't report output limits, and exceeding one is a
+    hard ValidationException ("The maximum tokens you requested exceeds the
+    model limit of 10000"), not a clamp. Verified against the live API — at the
+    advertised value every model accepts the request and one above it is
+    rejected, for Nova Pro (10000), Claude Haiku 4.5 (64000) and gpt-oss-20b
+    (128000).
+    """
+    entry = _lookup(model_id)
+    if entry is None:
+        return None
+    v = entry.get("max_output_tokens")
+    return int(v) if isinstance(v, (int, float)) and v > 0 else None
+
+
 def calculate_cost(
     model_id: str,
     input_tokens: int,

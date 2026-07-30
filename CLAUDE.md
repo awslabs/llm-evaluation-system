@@ -121,6 +121,47 @@ Data-layer outputs flow into platform-layer via `-var=` flags (NOT `terraform_re
 
 `infra/eval-logs-bucket/` is a third, unrelated Terraform root — it's the optional S3 bucket for MCP team sharing, surfaced through `eval-mcp init`. Has its own provider block and account-ID-suffixed naming.
 
+### Token ceilings are per model — don't reintroduce a constant
+
+`--max-tokens` is resolved per model by `run_eval._max_tokens_for_run()`, shared
+by `optimize_prompt` and `benchmarks`. A single number cannot work, because the
+two endpoints fail in *opposite* directions:
+
+- **Mantle (`openai/bedrock/*`) wants no ceiling.** Omit the flag and the model
+  runs to its own limit — measured, `gpt-5.6-sol` produced 8,413 tokens on a
+  long-form prompt that the old hardcoded 8192 truncated. Passing a cap is what
+  *created* the empty/truncated completions this design removes.
+- **Converse (`bedrock/*`) requires one.** Inspect's Bedrock provider falls back
+  to `DEFAULT_MAX_TOKENS = 2048` (`inspect_ai/_util/constants.py`) and silently
+  truncates.
+
+And no high constant is safe either: exceeding a model's limit is a hard
+`ValidationException` ("The maximum tokens you requested exceeds the model limit
+of 10000"), **not** a clamp. Verified live — Nova Pro caps at 10,000, Claude
+Haiku 4.5 at 64,000, gpt-oss-20b at 128,000; each accepts exactly its advertised
+value and rejects one above it.
+
+Consequences worth knowing:
+
+- Limits come from LiteLLM's dataset via `pricing.get_max_output_tokens()` — the
+  same feed that backs pricing, so no extra fetch. AWS does **not** expose
+  output limits (`GetFoundationModel` has no such field), so there is nothing to
+  query instead.
+- A mixed run takes the **smallest** limit present, because `--max-tokens` is
+  global (targets share one `--model` flag). Never clamp that minimum *up* to
+  the fallback — that pushes the value above a real API bound and turns a
+  graceful truncation into a hard rejection that kills every sample for the
+  smaller-limit model.
+- The jury scorer flags both shapes: `truncated_no_output` (empty completion,
+  scored 0 with a TRUNCATED explanation) and `truncated_partial_output` (answer
+  cut off mid-stream — still scored, since partial output carries signal, but
+  marked because completeness criteria necessarily fail on a severed answer).
+
+**Mantle frontier models are Responses-API-only.** AWS's docs recommend
+`/v1/chat/completions`, but GPT-5.6 rejects it: *"The model
+'openai.gpt-5.6-terra' does not support the '/v1/chat/completions' API"*. Only
+`/openai/v1/responses` works for inference; the catalog stays at `/v1/models`.
+
 ### Adding a model
 
 Nothing to do. There is no allowlist and no hand-maintained price table — a newly

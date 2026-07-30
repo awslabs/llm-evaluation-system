@@ -390,13 +390,31 @@ def jury_scorer():
                     explanation=(
                         "TRUNCATED: the model hit its max_tokens limit before emitting "
                         "any answer (all output tokens went to the reasoning channel). "
-                        "This is a token-budget problem, NOT a quality result — raise "
-                        "max_tokens (e.g. --max-tokens 8192) and re-run before comparing "
-                        "this model against others."
+                        "This is a token-budget problem, NOT a quality result — do not "
+                        "compare this model against others on this run. The ceiling is "
+                        "resolved per model from its advertised maximum, so hitting it "
+                        "means either the model's own limit is genuinely too small for "
+                        "this task, or a lower-limit model in the same run pulled the "
+                        "shared ceiling down (a mixed run uses the smallest limit "
+                        "present) — re-run this model on its own."
                     ),
                     metadata={"truncated_no_output": True, "stop_reason": stop_reason},
                 )
             return Score(value=0.0, answer="", explanation="No output generated")
+
+        # Output exists but was cut off mid-answer. Unlike the empty case above
+        # this still gets scored — a partial answer carries real signal, and
+        # discarding it would throw away every long response. But the score is
+        # depressed by the truncation, not only by quality (criteria like
+        # completeness necessarily fail on a severed answer), so flag it: a
+        # reader comparing models needs to know this number is a floor, not a
+        # measurement. Recorded in metadata rather than the score so it can't
+        # silently pass as a clean result.
+        truncated_partial = (
+            getattr(state.output, "stop_reason", None) == "max_tokens"
+            if state.output
+            else False
+        )
 
         question = str(state.input)
         golden = target.text if target else ""
@@ -466,11 +484,22 @@ def jury_scorer():
         if errors:
             lines += ["", "Errors:"] + errors
 
+        if truncated_partial:
+            lines.append(
+                "NOTE: the answer was cut off at the token ceiling "
+                "(stop_reason=max_tokens), so this score is a floor — criteria "
+                "like completeness fail on a severed answer regardless of quality."
+            )
+
         return Score(
             value=jury_score,
             answer=output[:200],
             explanation="\\n".join(lines),
-            metadata={"jury_score": jury_score, "criteria_results": results},
+            metadata={
+                "jury_score": jury_score,
+                "criteria_results": results,
+                "truncated_partial_output": truncated_partial,
+            },
         )
 
     return score

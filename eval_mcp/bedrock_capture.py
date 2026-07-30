@@ -127,6 +127,18 @@ class _InspectLogExporter(LogExporter):
     def shutdown(self):
         pass
 
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        """Required by LogExporter as of opentelemetry-sdk 1.44.
+
+        It became an abstractmethod there, so without it the class can't be
+        instantiated at all: "Can't instantiate abstract class
+        _InspectLogExporter without an implementation for abstract method
+        'force_flush'". Our `export` is fully synchronous — records are turned
+        into Inspect events inline, nothing is buffered here — so there is
+        nothing to flush and True (success) is the honest answer.
+        """
+        return True
+
     def _process_record(self, record):
         event_name = getattr(record.log_record, "event_name", None) or ""
         body = record.log_record.body

@@ -29,7 +29,7 @@ dependencies = [
     # `MCPServer`, whose __init__ and `.tool()` decorator are close enough that
     # migration is tractable (tracked separately). Keeping the cap until that
     # lands means users get a working server today instead of waiting on it.
-    "mcp>=1.0.0,<2",
+    "mcp>=2.0.0",
     # Floor (no upper cap) is intentional: we import several private inspect-ai
     # modules (._view.common, .tool._tool_info, .log._samples, .event._model),
     # so the floor guarantees those paths exist. The deployed image and local

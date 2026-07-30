@@ -3,7 +3,7 @@
 
 import asyncio
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
 
 
 async def main():
@@ -12,7 +12,7 @@ async def main():
     print("=" * 80)
 
     # Connect to HTTP server
-    async with streamablehttp_client("http://localhost:8002/mcp") as (
+    async with streamable_http_client("http://localhost:8002/mcp") as (
         read_stream,
         write_stream,
         _,

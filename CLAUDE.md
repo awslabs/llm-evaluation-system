@@ -195,10 +195,12 @@ and `gpt-5.4` are also in us-west-2. Consequences worth knowing:
 - **`version=` is passed explicitly.** v1 derived it; 2.x defaults to `""`
   and would report a blank `serverInfo.version` to every client. It comes
   from installed package metadata because setuptools-scm owns the version.
-- **`streamable_http_app(max_request_body_size=...)` is deliberate.** 2.x
-  caps bodies at 4 MiB (HTTP 413); v1 had no cap. `save_dataset` accepts a
-  dataset inline via `file_content`, so the default would newly reject
-  uploads that used to work. Override with `EVAL_MCP_MAX_BODY_BYTES`.
+- **The 4 MiB Streamable HTTP body cap is kept.** 2.x added it (v1 had
+  none), and nothing here sends a large body: the web app truncates to ~11
+  rows before `analyze_dataset` and writes datasets in-process via
+  `save_dataset_to_db`, so files never cross the wire. If a client ever
+  needs more, pass `max_request_body_size=` to `streamable_http_app()`
+  rather than dropping the bound.
 - **Annotations are camelCase in constructors, snake_case on attributes.**
   `ToolAnnotations(readOnlyHint=True)` is still correct, but *reading* it is
   `.read_only_hint`. The wire format stays camelCase, so clients are

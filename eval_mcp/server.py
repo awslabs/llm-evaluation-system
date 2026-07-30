@@ -1673,21 +1673,18 @@ def main():
                     )
                 return await call_next(request)
 
-        # mcp 2.x added a 4 MiB cap on Streamable HTTP request bodies
-        # (HTTP 413 past it). That's a sane default for most servers but
-        # too tight here: `save_dataset` accepts the dataset inline via
-        # `file_content` for callers whose data isn't on the local
-        # filesystem, and a mid-size CSV clears 4 MiB easily. v1 had no
-        # cap, so keeping the default would newly reject uploads that
-        # work today — a silent regression for existing users.
+        # mcp 2.x caps Streamable HTTP request bodies at 4 MiB (HTTP 413
+        # past it); v1 had no cap. We keep the default deliberately: no
+        # caller here sends a large body. The web app truncates to ~11
+        # rows before calling analyze_dataset (see
+        # _sample_content_for_analysis) and writes the full dataset
+        # in-process via save_dataset_to_db, so the file itself never
+        # crosses the wire. `save_dataset`'s inline `file_content`
+        # parameter is an unused fallback for out-of-tree clients.
         #
-        # 64 MiB is a deliberate compromise, not a measured limit: the
-        # layers in front of this impose none (nginx runs
-        # `client_max_body_size 0`, the backend sets no ceiling), so the
-        # alternative to a number here is no protection at all. Raise it
-        # with EVAL_MCP_MAX_BODY_BYTES if a real dataset ever exceeds it.
-        max_body = int(os.environ.get("EVAL_MCP_MAX_BODY_BYTES", 64 * 1024 * 1024))
-        app = mcp.streamable_http_app(max_request_body_size=max_body)
+        # If a client ever does need to POST something bigger, pass
+        # max_request_body_size= here rather than removing the bound.
+        app = mcp.streamable_http_app()
         app.add_middleware(OriginValidationMiddleware)
         app.routes.insert(0, Route("/eval-info/{user_id}", eval_info_handler, methods=["GET"]))
         app.routes.insert(0, Route("/cancel/{user_id}", cancel_handler, methods=["POST"]))

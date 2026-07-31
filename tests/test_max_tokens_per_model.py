@@ -140,3 +140,119 @@ def test_partial_truncation_is_flagged_in_the_generated_scorer():
     assert "truncated_partial_output" in JURY_SCORER_BLOCK, (
         "the metadata flag is what downstream readers filter on"
     )
+
+
+# ---------------------------------------------------------------------------
+# The per-model solver (eval_mcp/solvers/model_limit.py)
+#
+# This is the primary path: it resolves the ceiling from the ACTIVE model at
+# solve time, so several models share one subprocess (Inspect runs targets
+# concurrently — splitting per model would serialise them) while each still gets
+# its own limit. `_max_tokens_for_run` above is only for `benchmarks`, whose
+# upstream inspect_evals tasks we don't generate and therefore can't give a
+# solver to.
+# ---------------------------------------------------------------------------
+
+
+def test_solver_leaves_mantle_unbounded():
+    """Mantle models must get no ceiling at all.
+
+    Inspect's OpenAI provider has no max_tokens() override, so omitting the
+    value lets the model run to its own limit — measured, gpt-5.6-sol produced
+    9,052 output tokens on a prompt that a hardcoded 8192 truncated.
+    """
+    from eval_mcp.solvers.model_limit import resolve_max_tokens
+
+    assert resolve_max_tokens("openai/bedrock/gpt-5.6-terra") is None
+    assert resolve_max_tokens("openai/bedrock/gpt-5.6-sol") is None
+
+
+def test_solver_resolves_converse_models_own_limit():
+    """Converse needs a value or Inspect injects 2048; it must be the model's
+    real maximum, not a constant."""
+    from eval_mcp.solvers.model_limit import resolve_max_tokens
+
+    assert resolve_max_tokens(NOVA) == 10_000
+    assert resolve_max_tokens(HAIKU) == 64_000
+    # llama3.3-70b is the low end of the range and the reason a single shared
+    # constant can't work: it would cap haiku at a twelfth of its capability.
+    assert resolve_max_tokens("bedrock/us.meta.llama3-3-70b-instruct-v1:0") == 4_096
+
+
+def test_solver_falls_back_for_unknown_models():
+    """Unknown means "can't reason about it", not "unlimited" — returning None
+    would hand the model Inspect's 2048."""
+    from eval_mcp.solvers.model_limit import FALLBACK_MAX_TOKENS, resolve_max_tokens
+
+    assert resolve_max_tokens(UNKNOWN) == FALLBACK_MAX_TOKENS
+    assert FALLBACK_MAX_TOKENS > 2048, "must beat Inspect's default"
+
+
+def test_generated_config_uses_the_per_model_solver():
+    """The task file must actually wire the solver in — this is what makes the
+    per-model ceiling reach a real eval, and it's easy to lose in a template
+    edit since the file is emitted as source text."""
+    from eval_mcp.core.judge_config import JudgeConfig
+    from eval_mcp.tools.create_config import create_inspect_task_file
+
+    jc = JudgeConfig(criteria=[{"name": "acc", "description": "right?", "weight": 1.0}])
+    code, _ = create_inspect_task_file(
+        dataset_path="/tmp/x.json",
+        providers=[NOVA, MANTLE],
+        config_name="probe",
+        config_dir="/tmp",
+        judge_config=jc,
+        prompts=["{question}"],
+        scorers=["jury"],
+    )
+    assert "from eval_mcp.solvers.model_limit import generate_at_model_limit" in code
+    assert "generate_at_model_limit()" in code
+
+
+def test_generated_config_parses_in_every_mode():
+    """The task file reaches evals as SOURCE TEXT, so a template break fails at
+    eval time rather than in CI. Parse all three solver-chain variants."""
+    import ast
+
+    from eval_mcp.core.judge_config import JudgeConfig
+    from eval_mcp.tools.create_config import create_inspect_task_file
+
+    jc = JudgeConfig(criteria=[{"name": "acc", "description": "right?", "weight": 1.0}])
+    variants = [
+        {"scorers": ["jury"]},
+        {"scorers": ["jury"], "score_only": True},
+        {"scorers": ["faithfulness"]},
+    ]
+    for kwargs in variants:
+        code, _ = create_inspect_task_file(
+            dataset_path="/tmp/x.json",
+            providers=[NOVA],
+            config_name="probe",
+            config_dir="/tmp",
+            judge_config=jc,
+            prompts=["{question}"],
+            **kwargs,
+        )
+        ast.parse(code)
+
+
+def test_run_eval_does_not_pass_a_global_max_tokens():
+    """A global --max-tokens would defeat the solver by forcing every model to
+    the same ceiling. Assert on the parsed source so a mention in a comment
+    doesn't trip it — only a real argument counts.
+    """
+    import ast
+    import inspect
+
+    from eval_mcp.tools import run_eval
+
+    tree = ast.parse(inspect.getsource(run_eval))
+    literals = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+    assert "--max-tokens" not in literals, (
+        "run_eval must not build a global --max-tokens argument; the generated "
+        "task file's solver resolves the ceiling per model"
+    )

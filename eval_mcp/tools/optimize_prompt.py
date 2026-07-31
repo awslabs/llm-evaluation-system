@@ -81,7 +81,6 @@ from eval_mcp.tools.create_config import (
 )
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 from eval_mcp.tools.run_eval import (
-    _max_tokens_for_run,
     _running_evaluations,
     _terminate_process_gracefully,
 )
@@ -396,12 +395,10 @@ async def _spawn_inspect_eval(
         "--no-fail-on-error",
         "--log-shared", "10",
     ]
-    # Per-model token ceiling, same rules as run_eval: None for a Mantle-only
-    # run (let the model use its own limit), otherwise the smallest advertised
-    # limit among the Converse targets.
-    _mt = _max_tokens_for_run(providers or [])
-    if _mt is not None:
-        cmd.extend(["--max-tokens", str(_mt)])
+    # No --max-tokens: the task file this builds comes from
+    # create_inspect_task_file, whose solver (generate_at_model_limit) resolves
+    # the ceiling per model at solve time. A global flag would cap every model
+    # at the lowest limit in the run.
     if providers:
         cmd.extend(["--model", ",".join(providers)])
 

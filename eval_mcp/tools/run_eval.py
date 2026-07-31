@@ -155,7 +155,14 @@ def _summarize_failure(stderr_str: str, stdout_str: str) -> str:
 
 
 def _max_tokens_for_run(models: List[str]) -> Optional[int]:
-    """Value for ``--max-tokens``, or None to omit the flag entirely.
+    """Value for a global ``--max-tokens`` flag, or None to omit it.
+
+    Only for tasks whose solver we do NOT generate — i.e. ``benchmarks``, which
+    runs upstream ``inspect_evals/*`` tasks. Everything built by
+    ``create_inspect_task_file`` uses ``generate_at_model_limit()`` instead,
+    which resolves the ceiling per model and needs no flag. Prefer that path;
+    this one has to compromise (see below) precisely because a CLI flag is
+    global.
 
     Returns None when every target is a Mantle model (``openai/bedrock/*``).
     Those need no ceiling — the OpenAI provider Inspect routes them through has
@@ -709,16 +716,11 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             "--log-shared", "10",
         ]
 
-        # Per-model token ceiling. `--max-tokens` is global (targets arrive on a
-        # single `--model` flag, so there is no per-model CLI slot), so with a
-        # mixed run we take the LOWEST limit among the models present: anything
-        # higher is a hard ValidationException from whichever model has the
-        # smaller cap, which kills that model's samples outright. A ceiling
-        # below what a model would have produced only truncates the tail, so
-        # erring low degrades gracefully while erring high does not.
-        max_tokens = _max_tokens_for_run(models if not score_only else [])
-        if max_tokens is not None:
-            cmd.extend(["--max-tokens", str(max_tokens)])
+        # No --max-tokens here on purpose. The generated task file's solver
+        # (generate_at_model_limit) resolves the ceiling from whichever model a
+        # sample is running against, so each target gets its own limit inside
+        # this one subprocess. A CLI flag is global and would force every model
+        # down to the lowest limit in the run.
 
         # Pass models to inspect eval (comma-separated for multiple).
         # Score-only configs invoke no model — Inspect AI supports running

@@ -269,6 +269,8 @@ from pathlib import Path
 from inspect_ai import Task, task
 from inspect_ai.dataset import json_dataset, FieldSpec
 from inspect_ai.solver import generate, prompt_template
+
+from eval_mcp.solvers.model_limit import generate_at_model_limit
 {extra_imports}
 _config_path = Path(__file__).with_suffix(".json")
 CONFIG = json.loads(_config_path.read_text())
@@ -596,12 +598,16 @@ def create_inspect_task_file(
     #   and skipped even when RAG scorers are selected.
     # - RAG (live model): inject chunks via rag_prompt_solver, then generate.
     # - default: plain generate.
+    # generate_at_model_limit() replaces plain generate() so each target runs at
+    # its OWN output-token limit. Inspect's Bedrock provider otherwise injects a
+    # constant 2048, which makes reasoning models return empty completions that
+    # score 0 — see eval_mcp/solvers/model_limit.py for the full reasoning.
     if score_only:
         solver_chain = "static_output_solver()"
     elif rag_enabled:
-        solver_chain = "rag_prompt_solver(), generate()"
+        solver_chain = "rag_prompt_solver(), generate_at_model_limit()"
     else:
-        solver_chain = "generate()"
+        solver_chain = "generate_at_model_limit()"
 
     mode_doc = ""
     if score_only:

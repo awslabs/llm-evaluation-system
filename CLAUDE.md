@@ -121,6 +121,71 @@ Data-layer outputs flow into platform-layer via `-var=` flags (NOT `terraform_re
 
 `infra/eval-logs-bucket/` is a third, unrelated Terraform root — it's the optional S3 bucket for MCP team sharing, surfaced through `eval-mcp init`. Has its own provider block and account-ID-suffixed naming.
 
+### Token ceilings are per model — don't reintroduce a constant
+
+**This is a workaround for an upstream Inspect AI gap.** Inspect's Bedrock
+provider supplies a *constant* default when the caller passes no `max_tokens`:
+`DEFAULT_MAX_TOKENS = 2048` (`inspect_ai/_util/constants.py`), routed through a
+hand-coded family table in `_providers/bedrock.py`. Verified against Inspect
+`main` as of 2026-07-30 — still a constant, still no per-model resolution, and
+no truncation warning (PR #3933 proposed one and was closed unmerged). On stock
+Inspect with nothing set, gpt-oss-20b returns 2048 output tokens and **zero
+visible characters**. When upstream resolves real limits, delete
+`eval_mcp/solvers/model_limit.py` and go back to plain `generate()`.
+
+The ceiling is resolved **inside the generated task file's solver**
+(`generate_at_model_limit`), where `get_model()` returns the model that sample is
+running against. That keeps every target in ONE subprocess — Inspect already
+runs targets concurrently, so splitting per model would serialise what is
+currently parallel — while giving each its own limit. Verified live: llama
+4096 / haiku 64000 / gpt-5.6-terra unbounded, in a single run.
+
+`run_eval` therefore passes **no** `--max-tokens` at all (a global flag would
+force every model down to the lowest limit in the run), and `optimize_prompt`
+inherits the solver because it builds its task with `create_inspect_task_file`.
+The one exception is `benchmarks`: it runs upstream `inspect_evals/*` tasks whose
+solvers we don't generate, so it keeps `run_eval._max_tokens_for_run()` and its
+lowest-limit-wins compromise.
+
+A single number cannot work, because the two endpoints fail in *opposite*
+directions:
+
+- **Mantle (`openai/bedrock/*`) wants no ceiling.** Inspect's OpenAI provider
+  has no `max_tokens()` override, so omitting the value lets the model run to
+  its own limit — measured, `gpt-5.6-sol` produced 9,052 tokens on a long-form
+  prompt that the old hardcoded 8192 truncated. Passing a cap is what *created*
+  the empty/truncated completions this design removes.
+- **Converse (`bedrock/*`) requires one.** Inspect's Bedrock provider falls back
+  to `DEFAULT_MAX_TOKENS = 2048` (`inspect_ai/_util/constants.py`) and silently
+  truncates.
+
+And no high constant is safe either: exceeding a model's limit is a hard
+`ValidationException` ("The maximum tokens you requested exceeds the model limit
+of 10000"), **not** a clamp. Verified live — Nova Pro caps at 10,000, Claude
+Haiku 4.5 at 64,000, gpt-oss-20b at 128,000; each accepts exactly its advertised
+value and rejects one above it.
+
+Consequences worth knowing:
+
+- Limits come from LiteLLM's dataset via `pricing.get_max_output_tokens()` — the
+  same feed that backs pricing, so no extra fetch. AWS does **not** expose
+  output limits (`GetFoundationModel` has no such field), so there is nothing to
+  query instead.
+- In `benchmarks` (the CLI-flag path) a mixed run takes the **smallest** limit
+  present, because `--max-tokens` is global. Never clamp that minimum *up* to
+  the fallback — that pushes the value above a real API bound and turns a
+  graceful truncation into a hard rejection that kills every sample for the
+  smaller-limit model. The solver path has no such compromise.
+- The jury scorer flags both shapes: `truncated_no_output` (empty completion,
+  scored 0 with a TRUNCATED explanation) and `truncated_partial_output` (answer
+  cut off mid-stream — still scored, since partial output carries signal, but
+  marked because completeness criteria necessarily fail on a severed answer).
+
+**Mantle frontier models are Responses-API-only.** AWS's docs recommend
+`/v1/chat/completions`, but GPT-5.6 rejects it: *"The model
+'openai.gpt-5.6-terra' does not support the '/v1/chat/completions' API"*. Only
+`/openai/v1/responses` works for inference; the catalog stays at `/v1/models`.
+
 ### Adding a model
 
 Nothing to do. There is no allowlist and no hand-maintained price table — a newly

@@ -18,6 +18,7 @@ from eval_mcp.core.bedrock_client import (
     raise_if_autodetect_error,
     resolve_region,
 )
+from eval_mcp.core.pricing import get_max_output_tokens
 from eval_mcp.core.user_storage import get_user_dir, get_user_log_dir
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 
@@ -38,18 +39,30 @@ _VALID_EVAL_ID_PATTERN = re.compile(r'^[a-zA-Z0-9_:-]+$')
 
 # Output-token ceiling for every eval we launch.
 #
-# Inspect's Bedrock provider defaults to 2048, which is too low for reasoning
-# models and biases comparisons in a way that is easy to miss: gpt-5.6-luna,
-# gpt-5.6-sol and gpt-oss-20b can spend the WHOLE budget on their reasoning
-# channel and return an empty completion (stop_reason="max_tokens"). The sample
-# still "completes", so it scores 0 and the run reports success — the model that
-# reasoned hardest looks like the worst model. Measured on a hard proof task:
-# luna and sol both consumed 2048/2048 reasoning tokens with 0 visible output.
+# Ceiling on generated tokens, resolved PER MODEL to that model's own maximum.
 #
-# 8192 clears the observed worst case with headroom. It's a ceiling, not a
-# target — models that answer briefly are unaffected and cost nothing extra,
-# since Bedrock bills actual tokens generated.
-_DEFAULT_MAX_TOKENS = 8192
+# Why not a single number: the two endpoints fail in opposite directions when
+# you pick one.
+#
+#   * Converse (`bedrock/<id>`) needs a value. Inspect's global default is 2048
+#     (inspect_ai/_util/constants.py), which truncates real answers — and for
+#     reasoning models it's worse than truncation: gpt-oss and the GPT-5.6
+#     family can spend the entire budget on the reasoning channel and return an
+#     EMPTY completion (stop_reason="max_tokens"). The sample still "completes",
+#     so it scores 0 and the run reports success — the model that reasoned
+#     hardest looks like the worst model.
+#   * Mantle (`openai/bedrock/<id>`) needs NO value. Omit it and the model runs
+#     to its own limit; measured, gpt-5.6-sol produced 10,816 tokens on a
+#     long-form prompt. Any cap below that truncates it.
+#
+# And no single high number works either, because exceeding a model's limit is a
+# hard ValidationException, not a clamp: Nova Pro caps at 10,000 while
+# gpt-oss-20b allows 128,000. A value safe for one rejects the other outright.
+#
+# So we ask what each model actually supports (LiteLLM's dataset — the same one
+# that backs pricing, no extra fetch) and pass that. `None` means "unknown
+# model", in which case we fall back rather than guess.
+_MAX_TOKENS_FALLBACK = 8192
 
 # Model IDs to pull out of a config for pre-flight validation. Covers both
 # Bedrock endpoints: `bedrock/<id>` (Converse) and `openai/bedrock/<id>`
@@ -139,6 +152,54 @@ def _summarize_failure(stderr_str: str, stdout_str: str) -> str:
                 if marker in line and line:
                     return line[:500]
     return ""
+
+
+def _max_tokens_for_run(models: List[str]) -> Optional[int]:
+    """Value for a global ``--max-tokens`` flag, or None to omit it.
+
+    Only for tasks whose solver we do NOT generate — i.e. ``benchmarks``, which
+    runs upstream ``inspect_evals/*`` tasks. Everything built by
+    ``create_inspect_task_file`` uses ``generate_at_model_limit()`` instead,
+    which resolves the ceiling per model and needs no flag. Prefer that path;
+    this one has to compromise (see below) precisely because a CLI flag is
+    global.
+
+    Returns None when every target is a Mantle model (``openai/bedrock/*``).
+    Those need no ceiling — the OpenAI provider Inspect routes them through has
+    no default, so omitting the flag lets the model run to its own limit.
+    Passing one only creates the truncation we're trying to avoid.
+
+    Otherwise a value is required, because Inspect's Bedrock provider falls back
+    to 2048 and silently truncates. We use the smallest advertised limit among
+    the models in the run (see the note at ``_MAX_TOKENS_FALLBACK`` for why
+    lowest, not highest), and fall back to a fixed value if the dataset doesn't
+    know a model — unknown means "can't reason about it", not "unlimited".
+    """
+    if not models:
+        return None
+
+    converse = [m for m in models if not m.startswith("openai/bedrock/")]
+    if not converse:
+        # Mantle-only run: no ceiling is the correct answer.
+        return None
+
+    limits: List[int] = []
+    for model_id in converse:
+        try:
+            limit = get_max_output_tokens(model_id)
+        except Exception:
+            limit = None
+        if limit:
+            limits.append(limit)
+
+    if not limits:
+        return _MAX_TOKENS_FALLBACK
+
+    # A mixed run is bounded by its most restrictive model. Deliberately NOT
+    # clamped up to the fallback: an advertised limit is a hard API bound, and
+    # raising a value above it turns a graceful truncation into a
+    # ValidationException that kills every sample for that model.
+    return min(limits)
 
 
 def _region_for_run(config_data: Optional[Dict[str, Any]], models: List[str]) -> str:
@@ -653,8 +714,13 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
             "--no-log-images",
             "--no-fail-on-error",
             "--log-shared", "10",
-            "--max-tokens", str(_DEFAULT_MAX_TOKENS),
         ]
+
+        # No --max-tokens here on purpose. The generated task file's solver
+        # (generate_at_model_limit) resolves the ceiling from whichever model a
+        # sample is running against, so each target gets its own limit inside
+        # this one subprocess. A CLI flag is global and would force every model
+        # down to the lowest limit in the run.
 
         # Pass models to inspect eval (comma-separated for multiple).
         # Score-only configs invoke no model — Inspect AI supports running

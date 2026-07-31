@@ -299,17 +299,25 @@ def test_region_hint_survives_probe_failure():
 # ---------------------------------------------------------------------------
 
 
-def test_eval_launches_with_raised_max_tokens():
-    """Every eval must pass an explicit --max-tokens above Inspect's 2048.
+def test_converse_run_raises_max_tokens_above_inspect_default():
+    """A Converse run must pass a ceiling above Inspect's 2048.
 
     Inspect's Bedrock provider defaults to 2048, which reasoning models can
     consume entirely on their reasoning channel — producing an empty completion
     that scores 0 while the run reports success. Measured: gpt-5.6-luna and
     gpt-5.6-sol both hit 2048/2048 reasoning tokens with no visible output.
-    """
-    from eval_mcp.tools.run_eval import _DEFAULT_MAX_TOKENS
 
-    assert _DEFAULT_MAX_TOKENS > 2048, "must exceed Inspect's Bedrock default"
+    The value is now resolved per model from its advertised maximum rather than
+    a single constant (see _max_tokens_for_run), but the invariant that matters
+    to this failure — a Converse run never inherits the 2048 default — still
+    holds and is what this guards.
+    """
+    from eval_mcp.tools.run_eval import _MAX_TOKENS_FALLBACK, _max_tokens_for_run
+
+    assert _MAX_TOKENS_FALLBACK > 2048, "fallback must exceed Inspect's default"
+    # A known Converse model resolves to its real limit, which is far above 2048.
+    resolved = _max_tokens_for_run(["bedrock/us.amazon.nova-pro-v1:0"])
+    assert resolved is not None and resolved > 2048
 
 
 # ---------------------------------------------------------------------------

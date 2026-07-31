@@ -81,7 +81,6 @@ from eval_mcp.tools.create_config import (
 )
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 from eval_mcp.tools.run_eval import (
-    _DEFAULT_MAX_TOKENS,
     _running_evaluations,
     _terminate_process_gracefully,
 )
@@ -395,9 +394,11 @@ async def _spawn_inspect_eval(
         "--no-log-images",
         "--no-fail-on-error",
         "--log-shared", "10",
-        # Same reasoning-model truncation guard as run_eval.
-        "--max-tokens", str(_DEFAULT_MAX_TOKENS),
     ]
+    # No --max-tokens: the task file this builds comes from
+    # create_inspect_task_file, whose solver (generate_at_model_limit) resolves
+    # the ceiling per model at solve time. A global flag would cap every model
+    # at the lowest limit in the run.
     if providers:
         cmd.extend(["--model", ",".join(providers)])
 

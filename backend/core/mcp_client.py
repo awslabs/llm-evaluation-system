@@ -7,6 +7,8 @@ import os
 from contextlib import AsyncExitStack
 from typing import Any, Dict, List, Optional
 
+import httpx2
+
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 
@@ -106,12 +108,34 @@ class MultiMCPClient:
                 exit_stack = AsyncExitStack()
 
                 if server_config["type"] == "http":
-                    # Connect via HTTP with extended timeout for long-running evaluations
-                    read, write, _ = await exit_stack.enter_async_context(
+                    # Extended timeouts for long-running evaluations. mcp 2.x
+                    # removed the `timeout`/`sse_read_timeout` arguments — the
+                    # transport now takes a preconfigured client instead, so the
+                    # values live on the httpx timeout object. Passing the old
+                    # kwargs raises "streamable_http_client() got an unexpected
+                    # keyword argument 'timeout'", which surfaced only in the
+                    # deployed pod (the backend crash-looped, unable to reach its
+                    # own MCP sidecar).
+                    #
+                    # NOTE: httpx2, not httpx — mcp 2.x depends on httpx2 and the
+                    # transport type-checks against httpx2.AsyncClient. Our own
+                    # code elsewhere still uses plain httpx; they coexist as
+                    # separate modules.
+                    # Two values, not three: mcp 2.x dropped the trailing
+                    # get_session_id callback from the yielded tuple, so the old
+                    # `read, write, _ = ...` raises "not enough values to unpack
+                    # (expected 3, got 2)".
+                    read, write = await exit_stack.enter_async_context(
                         streamable_http_client(
                             server_config["url"],
-                            timeout=3600.0,  # 1 hour for connection/request
-                            sse_read_timeout=7200.0  # 2 hours for SSE streaming
+                            http_client=await exit_stack.enter_async_context(
+                                httpx2.AsyncClient(
+                                    timeout=httpx2.Timeout(
+                                        3600.0,      # 1 hour connect/write/pool
+                                        read=7200.0,  # 2 hours for SSE streaming
+                                    )
+                                )
+                            ),
                         )
                     )
                 else:
@@ -323,7 +347,12 @@ class MultiMCPClient:
 
                 # Convert Tool objects to dicts and tag with server name
                 for tool in result.tools:
-                    input_schema = tool.inputSchema
+                    # snake_case: mcp 2.x renamed the camelCase wire-model
+                    # attributes (inputSchema -> input_schema). The wire format
+                    # is unchanged — only Python attribute access moved — and
+                    # this loop swallows exceptions into a warning, so getting it
+                    # wrong showed up as a silent "0 tools" rather than an error.
+                    input_schema = tool.input_schema
 
                     # Hide backend-injected params from the model. (The unified
                     # server registers as "eval"; the older split names are kept

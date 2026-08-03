@@ -141,10 +141,10 @@ def test_rag_scorer_renders_solver_and_metadata(jc: JudgeConfig) -> None:
     )
     # FieldSpec carries retrieval_context onto Sample.metadata
     assert 'metadata=["retrieval_context"]' in code
-    # Solver chain prepends the RAG solver before generation.
-    # generate_at_model_limit() replaces plain generate() so each target runs at
-    # its own output-token limit (see eval_mcp/solvers/model_limit.py).
-    assert "solver=[rag_prompt_solver(), generate_at_model_limit()]" in code
+    # Solver chain prepends the RAG solver before plain generate(). The
+    # per-model token ceiling is handled by importing eval_mcp.inspect_patches
+    # (Bedrock omits max_tokens), not by a custom solver.
+    assert "solver=[rag_prompt_solver(), generate()]" in code
     # Wires the judge model at task-file import time
     assert "_rag_configure_judge(next(iter(CONFIG[\"judge_models\"].values())))" in code
     # Scorer call site
@@ -288,14 +288,14 @@ def test_score_only_with_prompts(jc: JudgeConfig) -> None:
 
 
 def test_non_score_only_unchanged(jc: JudgeConfig) -> None:
-    # Sanity: backward-compat path. Default mode generates normally — no static
-    # solver, no metadata field, no score_only flag. The generation step is
-    # generate_at_model_limit() rather than plain generate() so each target runs
-    # at its own output-token limit instead of Inspect's constant 2048 default
-    # (see eval_mcp/solvers/model_limit.py).
+    # Sanity: backward-compat path. Default mode uses plain generate() — no
+    # static solver, no metadata field, no score_only flag. The token ceiling is
+    # handled by importing eval_mcp.inspect_patches (Bedrock omits max_tokens so
+    # the model's own default applies instead of Inspect's constant 2048), not by
+    # a custom solver.
     code, cfg = _render(jc, scorers=["f1"])
-    assert "solver=[generate_at_model_limit()]" in code
-    assert "from eval_mcp.solvers.model_limit import generate_at_model_limit" in code
+    assert "solver=[generate()]" in code
+    assert "import eval_mcp.inspect_patches" in code
     assert "static_output_solver" not in code
     assert 'metadata=["actual_output"]' not in code
     assert "score_only" not in cfg

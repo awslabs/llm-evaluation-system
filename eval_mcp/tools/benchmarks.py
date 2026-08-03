@@ -42,7 +42,6 @@ from eval_mcp.core.bedrock_client import raise_if_autodetect_error, resolve_regi
 from eval_mcp.core.user_storage import get_user_dir, get_user_log_dir
 from eval_mcp.tools.external_providers import _refresh_keys_from_file
 from eval_mcp.tools.run_eval import (
-    _max_tokens_for_run,
     _INSPECT_CMD,
     _running_evaluations,
     _terminate_process_gracefully,
@@ -408,12 +407,11 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
             "--no-fail-on-error",
             "--log-shared", "10",
         ]
-        # Per-model token ceiling, same rules as run_eval: omit for a
-        # Mantle-only run (model uses its own limit), else the smallest
-        # advertised limit among the Converse targets.
-        _mt = _max_tokens_for_run(providers)
-        if _mt is not None:
-            cmd.extend(["--max-tokens", str(_mt)])
+        # No --max-tokens: _INSPECT_CMD runs through eval_mcp._inspect_main,
+        # which patches Inspect's Bedrock provider to omit max_tokens so Bedrock
+        # applies the model's own default instead of the constant 2048. Covers
+        # these upstream inspect_evals/* tasks even though we don't generate
+        # their solver.
         if limit:
             cmd.extend(["--limit", str(int(limit))])
         # Inject the resolved sandbox type for code-execution benchmarks (unless

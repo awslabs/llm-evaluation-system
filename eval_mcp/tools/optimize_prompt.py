@@ -54,7 +54,6 @@ import os
 import random
 import re
 import shlex
-import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -279,7 +278,9 @@ def _pass_rate(rows: List[Dict[str, Any]]) -> float:
 # ---------------------------------------------------------------------------
 
 
-_INSPECT_CMD = [sys.executable, "-m", "inspect_ai"]
+# Same patched wrapper as run_eval — launches Inspect with
+# eval_mcp.inspect_patches applied so Bedrock omits the constant max_tokens.
+from eval_mcp.tools.run_eval import _INSPECT_CMD
 
 
 def _safe_name_fragment(s: str) -> str:

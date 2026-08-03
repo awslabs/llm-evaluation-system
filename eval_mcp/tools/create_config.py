@@ -270,7 +270,10 @@ from inspect_ai import Task, task
 from inspect_ai.dataset import json_dataset, FieldSpec
 from inspect_ai.solver import generate, prompt_template
 
-from eval_mcp.solvers.model_limit import generate_at_model_limit
+# Import for its side effect: stops Inspect's Bedrock provider injecting a
+# constant max_tokens (2048), so Bedrock applies the model's own default and
+# reasoning models stop returning empty completions. See eval_mcp/inspect_patches.py.
+import eval_mcp.inspect_patches  # noqa: F401
 {extra_imports}
 _config_path = Path(__file__).with_suffix(".json")
 CONFIG = json.loads(_config_path.read_text())
@@ -393,12 +396,11 @@ def jury_scorer():
                         "TRUNCATED: the model hit its max_tokens limit before emitting "
                         "any answer (all output tokens went to the reasoning channel). "
                         "This is a token-budget problem, NOT a quality result — do not "
-                        "compare this model against others on this run. The ceiling is "
-                        "resolved per model from its advertised maximum, so hitting it "
-                        "means either the model's own limit is genuinely too small for "
-                        "this task, or a lower-limit model in the same run pulled the "
-                        "shared ceiling down (a mixed run uses the smallest limit "
-                        "present) — re-run this model on its own."
+                        "compare this model against others on this run. We pass no "
+                        "max_tokens, so the ceiling is Bedrock's own default for this "
+                        "model, which for some reasoning models is smaller than the task "
+                        "needs. This is a known limitation of the model/endpoint, not a "
+                        "measure of answer quality."
                     ),
                     metadata={"truncated_no_output": True, "stop_reason": stop_reason},
                 )
@@ -598,16 +600,15 @@ def create_inspect_task_file(
     #   and skipped even when RAG scorers are selected.
     # - RAG (live model): inject chunks via rag_prompt_solver, then generate.
     # - default: plain generate.
-    # generate_at_model_limit() replaces plain generate() so each target runs at
-    # its OWN output-token limit. Inspect's Bedrock provider otherwise injects a
-    # constant 2048, which makes reasoning models return empty completions that
-    # score 0 — see eval_mcp/solvers/model_limit.py for the full reasoning.
+    # Plain generate(). The per-model token ceiling is handled by importing
+    # eval_mcp.inspect_patches above (Bedrock omits max_tokens → model default),
+    # not by a custom solver.
     if score_only:
         solver_chain = "static_output_solver()"
     elif rag_enabled:
-        solver_chain = "rag_prompt_solver(), generate_at_model_limit()"
+        solver_chain = "rag_prompt_solver(), generate()"
     else:
-        solver_chain = "generate_at_model_limit()"
+        solver_chain = "generate()"
 
     mode_doc = ""
     if score_only:

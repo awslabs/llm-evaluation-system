@@ -299,25 +299,22 @@ def test_region_hint_survives_probe_failure():
 # ---------------------------------------------------------------------------
 
 
-def test_converse_run_raises_max_tokens_above_inspect_default():
-    """A Converse run must pass a ceiling above Inspect's 2048.
+def test_converse_run_escapes_inspect_2048_default():
+    """A Converse run must not inherit Inspect's 2048 default.
 
-    Inspect's Bedrock provider defaults to 2048, which reasoning models can
-    consume entirely on their reasoning channel — producing an empty completion
+    That default, applied by Inspect's Bedrock provider, is consumed entirely on
+    the reasoning channel by reasoning models — producing an empty completion
     that scores 0 while the run reports success. Measured: gpt-5.6-luna and
     gpt-5.6-sol both hit 2048/2048 reasoning tokens with no visible output.
 
-    The value is now resolved per model from its advertised maximum rather than
-    a single constant (see _max_tokens_for_run), but the invariant that matters
-    to this failure — a Converse run never inherits the 2048 default — still
-    holds and is what this guards.
+    We escape it not by passing a bigger number but by making the provider omit
+    max_tokens (eval_mcp.inspect_patches), so Bedrock applies the model's own
+    default. This guards that the patch neutralises the provider default.
     """
-    from eval_mcp.tools.run_eval import _MAX_TOKENS_FALLBACK, _max_tokens_for_run
+    import eval_mcp.inspect_patches  # noqa: F401 — applies on import
+    from inspect_ai.model import get_model
 
-    assert _MAX_TOKENS_FALLBACK > 2048, "fallback must exceed Inspect's default"
-    # A known Converse model resolves to its real limit, which is far above 2048.
-    resolved = _max_tokens_for_run(["bedrock/us.amazon.nova-pro-v1:0"])
-    assert resolved is not None and resolved > 2048
+    assert get_model("bedrock/us.amazon.nova-pro-v1:0").api.max_tokens() is None
 
 
 # ---------------------------------------------------------------------------

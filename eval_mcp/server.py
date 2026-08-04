@@ -48,10 +48,7 @@ from eval_mcp.tools.benchmarks import (
     handle_get_benchmark_details,
     handle_run_benchmark,
 )
-from eval_mcp.tools.multiturn_benchmarks import (
-    handle_list_multiturn_benchmarks,
-    handle_run_multiturn_benchmark,
-)
+from eval_mcp.tools.multiturn_benchmarks import handle_list_multiturn_benchmarks
 
 # Configuration
 port = int(os.environ.get("EVAL_MCP_PORT", "8002"))
@@ -249,16 +246,6 @@ BenchmarkTaskName = Annotated[
     Field(
         description="Runnable task name (or a benchmark id with a single task).",
         examples=["gsm8k", "mmlu_0_shot", "arc_easy"],
-    ),
-]
-MultiturnBenchmarkTask = Annotated[
-    str,
-    Field(
-        description=(
-            "Bundled multi-turn benchmark task name, from "
-            "list_multiturn_benchmarks."
-        ),
-        examples=["aiwf_medium_context", "aiwf_long_context"],
     ),
 ]
 
@@ -1188,8 +1175,13 @@ async def list_benchmarks(
     user_id: str = None,
 ) -> str:
     """
-    Discover premade benchmarks from the UK AISI `inspect_evals` suite
-    (MMLU, GPQA, GSM8K, ARC, HumanEval, TruthfulQA, and ~120 more).
+    Discover every premade benchmark: the ones bundled with this package plus
+    the UK AISI `inspect_evals` suite (MMLU, GPQA, GSM8K, ARC, HumanEval,
+    TruthfulQA, and ~120 more).
+
+    Bundled entries are flagged `bundled: true` and sort first — they ship with
+    the package, so they need no HuggingFace download, no optional dependency
+    group and no sandbox. Run anything listed here with `run_benchmark`.
 
     This is the entry point for running a STANDARD benchmark instead of a
     generated QA dataset. Returns a COMPACT, filtered, paginated list — call
@@ -1246,14 +1238,20 @@ async def run_benchmark(
     providers: ProvidersList,
     limit: int = None,
     task_args: dict = None,
+    judge_model: str = None,
+    max_turns: int = None,
     user_id: str = None,
 ) -> str:
     """
-    Run a premade `inspect_evals` benchmark against one or more models.
+    Run a premade benchmark against one or more models — bundled or `inspect_evals`.
 
-    Runs `inspect_evals/<task>` via Inspect AI (same subprocess + viewer path
-    as run_evaluation). Datasets download from HuggingFace at run time, so the
-    environment needs outbound network to huggingface.co.
+    One entry point for both catalogs; pass any task name from
+    `list_benchmarks` and this dispatches correctly. Same subprocess + viewer
+    path as run_evaluation either way.
+
+    `inspect_evals` datasets download from HuggingFace at run time, so those
+    need outbound network to huggingface.co. Bundled benchmarks ship with the
+    package and need nothing.
 
     `task` accepts a runnable task name (from get_benchmark_details) OR a
     benchmark id that has a single task. Multi-variant benchmarks must be run
@@ -1262,10 +1260,17 @@ async def run_benchmark(
     error (with the fix) instead of running, unless the requirement is met.
 
     Args:
-        task: Task name or single-task benchmark id (e.g. "gsm8k", "mmlu_0_shot").
-        providers: Model ids to evaluate (from list_available_models).
-        limit: Optional cap on number of samples (good for a fast check).
+        task: Task name or single-task benchmark id (e.g. "gsm8k", "mmlu_0_shot",
+            "aiwf_medium_context").
+        providers: Model ids to evaluate (from list_available_models). Pass
+            several to compare them on identical inputs in one run.
+        limit: Optional cap on number of samples (`inspect_evals` only).
         task_args: Optional benchmark parameters, passed as `-T key=value`.
+        judge_model: Judge override for judge-scored bundled benchmarks. Hold it
+            fixed when comparing target models — the judge is part of the
+            measurement.
+        max_turns: Cap the conversation for a cheap smoke run of a multi-turn
+            bundled benchmark. Those scores are NOT comparable to a full run.
 
     Returns:
         JSON with success, task, runId, viewerUrl, and a scores summary.
@@ -1275,6 +1280,8 @@ async def run_benchmark(
         "providers": providers,
         "limit": limit,
         "task_args": task_args,
+        "judge_model": judge_model,
+        "max_turns": max_turns,
         "user_id": _user(user_id),
     }
     result = await handle_run_benchmark(args)
@@ -1282,70 +1289,25 @@ async def run_benchmark(
 
 
 @mcp.tool(annotations=READ_LOCAL)
-async def list_multiturn_benchmarks(user_id: str = None) -> str:
+async def list_bundled_benchmarks(user_id: str = None) -> str:
     """
-    Discover the bundled MULTI-TURN conversation benchmarks.
+    Full metadata for the benchmarks bundled with this package.
 
-    Separate from `list_benchmarks` (the ~130 single-turn `inspect_evals` Q&A
-    benchmarks). These measure something those can't: whether a model holds up
-    over a long scripted conversation — calling the right tool at the right
-    moment, following its system prompt, and staying factually grounded — as the
-    context grows turn after turn.
+    These also appear in `list_benchmarks` (flagged `bundled: true`) and run via
+    `run_benchmark` like anything else — this tool is the drill-down that returns
+    each one's complete `eval.yaml` without paging through ~130 `inspect_evals`
+    entries.
 
-    Currently the AI Engineer World's Fair benchmark (30 turns, 5 tools, a
-    conference knowledge base) in two sizes. Text mode only.
+    Per benchmark you get: every runnable task with its turn count and
+    approximate input-token cost per model, every metric the scorer reports
+    (first is the headline), the default judge, upstream provenance (repo,
+    license, pinned commit), and caveats that affect how a score should be read.
 
     Returns:
-        JSON: {total, benchmarks: [{id, turns, toolTurns, dimensions,
-        approxContextTokens, ...}], costNote}.
+        JSON: {total, benchmarks: [{id, title, tasks, metrics, judge, source,
+        caveats, runHint}]}.
     """
     result = await handle_list_multiturn_benchmarks({"user_id": _user(user_id)})
-    return result[0].text
-
-
-@mcp.tool(annotations=RUN_REMOTE)
-async def run_multiturn_benchmark(
-    task: MultiturnBenchmarkTask,
-    providers: ProvidersList,
-    judge_model: str = None,
-    max_turns: int = None,
-    user_id: str = None,
-) -> str:
-    """
-    Run a bundled multi-turn conversation benchmark against one or more models.
-
-    Each model replays the same scripted conversation, so results are directly
-    comparable. One sample per model = the whole conversation. The headline
-    metric is `pass_rate`: the fraction of turns where ALL THREE judged
-    dimensions hold on that turn (tool_use_correct, instruction_following,
-    kb_grounding), which is stricter than any single dimension.
-
-    Cost scales with the square of the turn count, since context accumulates:
-    roughly 0.5M input tokens per model on `aiwf_medium_context` and ~3M on
-    `aiwf_long_context`. Start with medium; use `max_turns` for a cheap smoke
-    run (whose scores are NOT comparable to a full one — the tool-call turns
-    cluster late in the conversation).
-
-    Args:
-        task: Benchmark task name (from list_multiturn_benchmarks).
-        providers: Model ids to evaluate (from list_available_models).
-        judge_model: Override the judge (defaults to Claude Sonnet). One judge
-            grades the whole conversation in a single call, which is what lets
-            it credit a tool call made a turn early or late.
-        max_turns: Cap the conversation for a smoke run. Omit for the real thing.
-
-    Returns:
-        JSON with success, task, evalId, and where to read results. Per-turn
-        verdicts land in the score metadata; see the viewer.
-    """
-    args = {
-        "task": task,
-        "providers": providers,
-        "judge_model": judge_model,
-        "max_turns": max_turns,
-        "user_id": _user(user_id),
-    }
-    result = await handle_run_multiturn_benchmark(args)
     return result[0].text
 
 

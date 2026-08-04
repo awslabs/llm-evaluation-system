@@ -143,8 +143,11 @@ include = ["backend*", "eval_mcp*"]
 [tool.setuptools.package-data]
 eval_mcp = ["viewer_static/**/*", "INSTALL.md"]
 "eval_mcp.core" = ["litellm_pricing_snapshot.json"]
-# Vendored benchmark data (turns, knowledge bases, prompt blocks). Without this
-# the aiwf tasks import fine and then fail at run time with a missing file.
+# Bundled benchmarks: every benchmark's eval.yaml (the registry globs these to
+# build the catalog) plus its vendored data. Without the data entry the tasks
+# import fine and then fail at run time with a missing file; without eval.yaml
+# the benchmark is invisible in an installed wheel.
+"eval_mcp.benchmarks" = ["README.md", "*/eval.yaml", "*/NOTICE.md"]
 "eval_mcp.benchmarks.aiwf" = ["data/*.json", "data/*.txt"]
 
 [tool.black]

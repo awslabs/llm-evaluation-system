@@ -39,70 +39,30 @@ logger = logging.getLogger(__name__)
 _TIMEOUT_SECONDS = 2 * 60 * 60
 
 
-def _task_file() -> Path:
-    """Absolute path to the vendored aiwf task file."""
-    from eval_mcp.benchmarks.aiwf import task as aiwf_task
-
-    return Path(aiwf_task.__file__).resolve()
-
-
-def _catalog() -> Dict[str, Dict[str, Any]]:
-    """The bundled multi-turn benchmarks, keyed by task name."""
-    from eval_mcp.benchmarks.aiwf import AIWF_TASKS, turns
-    from eval_mcp.benchmarks.aiwf.data_loader import knowledge_base
-
-    n_turns = len(turns())
-    n_tool_turns = sum(1 for t in turns() if t.expected_tool)
-    catalog: Dict[str, Dict[str, Any]] = {}
-    for name in AIWF_TASKS:
-        kb_chars = len(knowledge_base(name))
-        catalog[name] = {
-            "id": name,
-            "title": (
-                "AI Engineer World's Fair multi-turn conversation "
-                f"({'~12K' if 'medium' in name else '~40K'}-token knowledge base)"
-            ),
-            "category": "Multi-turn",
-            "turns": n_turns,
-            "toolTurns": n_tool_turns,
-            "knowledgeBaseChars": kb_chars,
-            "approxContextTokens": kb_chars // 4,
-            "dimensions": ["tool_use_correct", "instruction_following", "kb_grounding"],
-            "headlineMetric": "turn_pass rate (all 3 dimensions pass on the same turn)",
-            "source": "https://github.com/kwindla/aiewf-eval",
-            "license": "MIT",
-            "mode": "text",
-        }
-    return catalog
-
-
 async def handle_list_multiturn_benchmarks(args: Dict[str, Any]) -> List[TextContent]:
-    """List the bundled multi-turn benchmarks."""
+    """List the bundled benchmarks, with their per-task cost and caveats.
+
+    ``list_benchmarks`` also surfaces these (flagged ``bundled: true``) mixed in
+    with the inspect_evals catalog; this tool is the drill-down that returns the
+    full ``eval.yaml`` for each without paging through 130 upstream entries.
+    """
     try:
-        catalog = _catalog()
+        from eval_mcp.benchmarks.registry import discover
+
+        benches = discover()
         return [
             TextContent(
                 type="text",
                 text=json.dumps(
                     {
                         "success": True,
-                        "total": len(catalog),
-                        "benchmarks": list(catalog.values()),
-                        "note": (
-                            "Text-mode port of kwindla/aiewf-eval. Each run is ONE "
-                            "sample per model: a scripted 30-turn conversation where "
-                            "context accumulates. Upstream's speech-to-speech "
-                            "pipelines and its audio-derived turn_taking dimension "
-                            "are not ported."
-                        ),
-                        "costNote": (
-                            "Context grows every turn, so one 30-turn run costs "
-                            "roughly 0.5M input tokens on aiwf_medium_context and "
-                            "~3M on aiwf_long_context, per model. Start with medium."
-                        ),
+                        "total": len(benches),
+                        "benchmarks": [b.details() for b in benches.values()],
                         "hint": (
-                            "run_multiturn_benchmark(task='aiwf_medium_context', "
-                            "providers=[...]) — use max_turns for a cheap smoke run."
+                            "run_benchmark(task=<task name>, providers=[...]). "
+                            "Pass max_turns for a cheap smoke run, judge_model to "
+                            "override the judge. These need no HuggingFace "
+                            "download, optional extra or sandbox."
                         ),
                     },
                     indent=2,
@@ -110,7 +70,7 @@ async def handle_list_multiturn_benchmarks(args: Dict[str, Any]) -> List[TextCon
             )
         ]
     except Exception as e:
-        logger.exception("Failed to list multi-turn benchmarks")
+        logger.exception("Failed to list bundled benchmarks")
         return [
             TextContent(
                 type="text",
@@ -143,16 +103,19 @@ async def handle_run_multiturn_benchmark(args: Dict[str, Any]) -> List[TextConte
                 )
             ]
 
-        catalog = _catalog()
-        if task not in catalog:
+        from eval_mcp.benchmarks.registry import all_task_names, resolve
+
+        hit = resolve(task)
+        if hit is None:
             return [
                 _err(
-                    f"Unknown multi-turn benchmark '{task}'. Available: "
-                    f"{sorted(catalog)}. For the inspect_evals catalog use "
-                    f"run_benchmark instead.",
+                    f"Unknown bundled benchmark '{task}'. Available: "
+                    f"{sorted(all_task_names())}. For the inspect_evals catalog, "
+                    f"run_benchmark handles those too.",
                     eval_id,
                 )
             ]
+        bench, task = hit
 
         if max_turns is not None:
             try:
@@ -204,7 +167,7 @@ async def handle_run_multiturn_benchmark(args: Dict[str, Any]) -> List[TextConte
         cmd: List[str] = [
             *_INSPECT_CMD,
             "eval",
-            f"{_task_file()}@{task}",
+            f"{bench.task_file}@{task}",
             "--model",
             ",".join(providers),
             "--adaptive-connections",
@@ -291,10 +254,10 @@ async def handle_run_multiturn_benchmark(args: Dict[str, Any]) -> List[TextConte
                         "task": task,
                         "models": providers,
                         "message": (
-                            f"Multi-turn benchmark {task} completed. Headline metric "
-                            f"is turn_pass (fraction of turns where all 3 dimensions "
-                            f"pass). Call get_viewer_url or list_evaluations for "
-                            f"results; per-turn detail is in the score metadata."
+                            f"Benchmark {task} completed. Headline metric is "
+                            f"{bench.headline_metric or 'the first reported metric'}. "
+                            f"Call get_viewer_url or list_evaluations for results; "
+                            f"per-sample detail is in the score metadata."
                         ),
                     },
                     indent=2,

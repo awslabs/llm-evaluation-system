@@ -176,21 +176,32 @@ of rejecting), delete `inspect_patches.py` + `_inspect_main.py`, point
 'openai.gpt-5.6-terra' does not support the '/v1/chat/completions' API"*. Only
 `/openai/v1/responses` works for inference; the catalog stays at `/v1/models`.
 
-### Two kinds of benchmark — don't merge the two tools
+### Two benchmark sources, one set of tools
 
-There are two separate benchmark paths, and they are not interchangeable:
+Benchmarks come from two places, but callers use the **same tools** for both —
+`list_benchmarks` / `get_benchmark_details` / `run_benchmark`. Don't split them
+back apart; a separate tool pair meant an agent calling `list_benchmarks` never
+saw the bundled ones.
 
-- **`eval_mcp/tools/benchmarks.py`** (`list_benchmarks` / `run_benchmark`) is a
-  thin wrapper over the installed **`inspect_evals`** catalog (~130 single-turn
-  Q&A benchmarks: MMLU, GPQA, HumanEval…). It runs `inspect_evals/<task>` by
-  registry name, so it can only run what that package registers.
-- **`eval_mcp/benchmarks/`** (`list_multiturn_benchmarks` /
-  `run_multiturn_benchmark`) holds benchmarks we **vendor and run ourselves**,
-  for shapes `inspect_evals` doesn't cover. Currently `aiwf_medium_context` and
-  `aiwf_long_context` — a 30-turn scripted conversation with 5 tools, ported
-  from [kwindla/aiewf-eval](https://github.com/kwindla/aiewf-eval) (MIT).
-  Launched by **absolute path** (`<task_file>@<task_name>`), which works from
-  any cwd.
+- **`inspect_evals`** — the installed upstream catalog (~129 single-turn Q&A:
+  MMLU, GPQA, HumanEval…). Run by registry name, `inspect_evals/<task>`.
+- **`eval_mcp/benchmarks/`** — benchmarks we **vendor and run ourselves**, for
+  shapes `inspect_evals` doesn't cover. Launched by **absolute path**
+  (`<task_file>@<task_name>`), which works from any cwd. Currently `aiwf` (a
+  30-turn scripted conversation with 5 tools, ported from
+  [kwindla/aiewf-eval](https://github.com/kwindla/aiewf-eval), MIT).
+
+`eval_mcp/benchmarks/registry.py` discovers the bundled ones by globbing
+`*/eval.yaml` — the same mechanism `inspect_evals` uses. **Adding a benchmark
+means dropping in a directory (`eval.yaml` + `task.py` + `data/` + `NOTICE.md`)
+and editing no Python** — not the registry, not the tools, not `server.py`.
+`eval.yaml`'s schema mirrors `inspect_evals`' own so a port could later go to
+their register with little change. `run_benchmark` dispatches on
+`registry.resolve(task)`; bundled entries are flagged `bundled: true` and sort
+first in listings (no HuggingFace download, no extra, no sandbox).
+`list_bundled_benchmarks` is the drill-down that dumps every bundled
+`eval.yaml` without paging the upstream catalog. Full instructions:
+[`eval_mcp/benchmarks/README.md`](./eval_mcp/benchmarks/README.md).
 
 #### Porting a third-party benchmark: copy the instrument, adapt the plumbing
 

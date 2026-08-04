@@ -44,29 +44,12 @@ shape (which is what makes upstream's early/late tool-call realignment
 possible), and the rubric text follows upstream closely. Two differences:
 
 - Model: upstream uses `claude-opus-4-5` via the Claude Agent SDK; we use our
-  configured Bedrock judge (`claude-sonnet-5` by default, overridable per run).
+  configured Bedrock judge (Sonnet by default, overridable per run).
 - Upstream's two-phase output (`phase1_analysis` then `final_judgments`) is
   collapsed to a single forced tool call with per-turn verdicts.
 
 Consequence: **this reproduces the benchmark, not upstream's exact figures.**
 Relative model ordering should hold; absolute numbers will differ.
-
-Measured, judging the same benchmark with two different judges (target
-claude-haiku-4-5, full 30 turns, upstream publishes 98.0%):
-
-| Judge | pass_rate | Turns failed |
-|-------|----------:|--------------|
-| `claude-sonnet-5` | 96.7% | 9 |
-| `claude-sonnet-4-6` | 93.3% | 12, 18 |
-
-The judges disagree on *which* turns fail, not merely how many, which is worth
-knowing before comparing numbers across runs. Sonnet 5 failed turn 9 (the model
-deflected to external contacts where the golden answer offers to submit a
-suggestion — a real miss that Sonnet 4.6 passed) and cleared turn 18 (an
-out-of-scope weather question needing no tool, which Sonnet 4.6 wrongly failed).
-So the higher number came from *better* discrimination in both directions, not a
-softer grader. Judge choice is a real variable: hold it fixed when comparing
-targets, and record it — every run stores `judge_model` in score metadata.
 
 ## What was deliberately not ported
 

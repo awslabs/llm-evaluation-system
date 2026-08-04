@@ -61,7 +61,8 @@ async def handle_list_multiturn_benchmarks(args: Dict[str, Any]) -> List[TextCon
                         "hint": (
                             "run_benchmark(task=<task name>, providers=[...]). "
                             "Pass max_turns for a cheap smoke run, judge_model to "
-                            "override the judge. These need no HuggingFace "
+                            "override the judge, or judge_models=[...] for a "
+                            "majority-vote jury. These need no HuggingFace "
                             "download, optional extra or sandbox."
                         ),
                     },
@@ -88,7 +89,19 @@ async def handle_run_multiturn_benchmark(args: Dict[str, Any]) -> List[TextConte
         task = args.get("task")
         providers = args.get("providers") or []
         judge_model = args.get("judge_model")
+        judge_models = args.get("judge_models") or []
         max_turns = args.get("max_turns")
+
+        if isinstance(judge_models, str):
+            judge_models = [m.strip() for m in judge_models.split(",") if m.strip()]
+        if judge_model and judge_models:
+            return [
+                _err(
+                    "Pass judge_model (single judge, upstream-comparable) OR "
+                    "judge_models (jury, majority vote) — not both.",
+                    eval_id,
+                )
+            ]
 
         if not user_id:
             return [_err("user_id is required", eval_id)]
@@ -127,9 +140,17 @@ async def handle_run_multiturn_benchmark(args: Dict[str, Any]) -> List[TextConte
 
         # Fail fast on an unusable model rather than 30 turns deep. Same gate
         # run_evaluation uses, so the error text is identical and actionable.
-        if any(p.startswith(("bedrock/", "openai/bedrock/")) for p in providers):
+        # Judges are validated too: a typo'd judge otherwise surfaces only
+        # AFTER the full conversation has been generated and paid for, as a
+        # 0-score with judge_failed metadata.
+        to_validate = list(providers) + [
+            j
+            for j in ([judge_model] if judge_model else judge_models)
+            if j and j not in providers
+        ]
+        if any(p.startswith(("bedrock/", "openai/bedrock/")) for p in to_validate):
             raise_if_autodetect_error()
-            validation = await _validate_providers(providers)
+            validation = await _validate_providers(to_validate)
             if not validation.get("valid"):
                 return [
                     TextContent(
@@ -183,6 +204,10 @@ async def handle_run_multiturn_benchmark(args: Dict[str, Any]) -> List[TextConte
         # completions from reasoning models.
         if judge_model:
             cmd.extend(["-T", f"judge_model={judge_model}"])
+        elif judge_models:
+            # Comma-joined: -T passes one scalar; the task splits it back.
+            # Model ids never contain commas.
+            cmd.extend(["-T", f"judge_models={','.join(judge_models)}"])
 
         process = await asyncio.create_subprocess_exec(
             *cmd,

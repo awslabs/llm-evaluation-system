@@ -21,6 +21,7 @@ headline ``pass_rate = turn_pass / total_turns``, where a turn passes only if
 all three hold on that same turn.
 """
 
+import asyncio
 import json
 import os
 import re
@@ -451,6 +452,77 @@ def _extract_judgments(
     return by_turn, None
 
 
+def _split_judges(
+    judge_model: Optional[str], judge_models: Optional[Any]
+) -> List[str]:
+    """Normalize the two judge parameters into an ordered, deduped list.
+
+    ``judge_models`` wins when both are set (it's the superset form) and
+    accepts either a real list or a comma-separated string — the latter is how
+    it survives the ``-T judge_models=a,b`` CLI boundary, where Inspect parses
+    the value as one YAML scalar. Model ids never contain commas.
+    """
+    models: List[str] = []
+    if judge_models:
+        raw = (
+            judge_models.split(",")
+            if isinstance(judge_models, str)
+            else list(judge_models)
+        )
+        models = [str(m).strip() for m in raw if str(m).strip()]
+    elif judge_model:
+        models = [judge_model]
+    if not models:
+        models = [JUDGE_MODELS["claude"]]
+    seen = set()
+    deduped = []
+    for m in models:
+        if m not in seen:
+            seen.add(m)
+            deduped.append(m)
+    return deduped
+
+
+def _merge_judgments(
+    per_judge: Dict[str, Dict[int, Dict[str, Any]]],
+) -> tuple[Dict[int, Dict[str, Any]], Dict[int, Dict[str, str]]]:
+    """Majority-vote the per-judge verdicts into one judgment per turn.
+
+    A dimension passes a turn when STRICTLY more than half of the judges who
+    returned that turn said True — a tie fails, so an even jury is stricter,
+    not random. A turn counts as judged if at least one judge returned it;
+    judges that skipped it shrink that turn's denominator rather than voting
+    False, mirroring how the single-judge path excludes unjudged turns.
+
+    With one judge this is the identity (1/1 > 1/2), so the single-judge
+    fidelity path flows through unchanged. Returns ``(merged, votes)`` where
+    votes records the per-dimension tally (``"2/3"``) for the metadata.
+    """
+    merged: Dict[int, Dict[str, Any]] = {}
+    votes: Dict[int, Dict[str, str]] = {}
+    solo = len(per_judge) == 1
+    for turn in sorted({t for j in per_judge.values() for t in j}):
+        verdicts = {m: j[turn] for m, j in per_judge.items() if turn in j}
+        n = len(verdicts)
+        entry: Dict[str, Any] = {}
+        tally: Dict[str, str] = {}
+        for d in DIMENSIONS:
+            yes = sum(1 for v in verdicts.values() if v[d])
+            entry[d] = yes * 2 > n
+            tally[d] = f"{yes}/{n}"
+        if solo:
+            entry["reasoning"] = next(iter(verdicts.values()))["reasoning"]
+        else:
+            entry["reasoning"] = " | ".join(
+                f"{m}: {v['reasoning']}"
+                for m, v in verdicts.items()
+                if v.get("reasoning")
+            )
+        merged[turn] = entry
+        votes[turn] = tally
+    return merged, votes
+
+
 def _rate(numerator: int, denominator: int) -> float:
     return numerator / denominator if denominator else 0.0
 
@@ -532,13 +604,25 @@ def truncated_turns() -> Metric:
         truncated_turns(),
     ]
 )
-def aiwf_turn_judge(judge_model: Optional[str] = None):
-    """Judge the whole conversation in one call, score per turn.
+def aiwf_turn_judge(
+    judge_model: Optional[str] = None,
+    judge_models: Optional[Any] = None,
+):
+    """Judge the whole conversation, score per turn.
 
-    Single judge, not our usual jury: upstream uses one strong judge over the
-    full conversation, and the realignment logic depends on seeing every turn
-    together. Three jurors would each need the whole 30-turn transcript, and
-    majority-voting per turn would still not make the turns independent.
+    Default is a SINGLE judge, matching upstream: one strong judge over the
+    full conversation, whose realignment logic depends on seeing every turn
+    together. That stays the fidelity mode — its scores are the comparable
+    ones.
+
+    ``judge_models`` opts into a jury: each juror independently judges the
+    SAME verbatim prompt over the whole transcript (so each can realign), and
+    the per-turn, per-dimension verdicts are majority-voted (ties fail). This
+    trades upstream comparability for robustness to single-judge noise —
+    per-judge agreement lands in the score metadata so the disagreement is
+    visible, not averaged away. A judge that errors or returns unparseable
+    output is excluded from every vote (recorded in ``judge_errors``), not
+    counted as all-False.
     """
 
     async def score(state: TaskState, target: Target) -> Score:
@@ -551,40 +635,44 @@ def aiwf_turn_judge(judge_model: Optional[str] = None):
             )
 
         truncated = sum(1 for r in records if r.get("stop_reason") == "max_tokens")
-        model_id = judge_model or JUDGE_MODELS["claude"]
+        jury = _split_judges(judge_model, judge_models)
 
-        try:
-            judge = get_model(model_id)
-            output = await judge.generate(
-                [
-                    ChatMessageSystem(content=_JUDGE_SYSTEM_PROMPT),
-                    ChatMessageUser(content=_render_user_prompt(records)),
-                ],
-                tools=[_build_judgment_tool(len(records))],
-                tool_choice="any",
-            )
-        except Exception as e:  # judge failure is a measurement failure
+        messages = [
+            ChatMessageSystem(content=_JUDGE_SYSTEM_PROMPT),
+            ChatMessageUser(content=_render_user_prompt(records)),
+        ]
+        tools = [_build_judgment_tool(len(records))]
+
+        async def judge_one(model_id: str) -> tuple[str, Any, Optional[str]]:
+            try:
+                output = await get_model(model_id).generate(
+                    messages, tools=tools, tool_choice="any"
+                )
+            except Exception as e:
+                return model_id, None, f"judge_failed: {e}"
+            judgments, err = _extract_judgments(output, len(records))
+            if judgments is None:
+                return model_id, None, f"unparseable_judge_output: {err}"
+            return model_id, judgments, None
+
+        results = await asyncio.gather(*(judge_one(m) for m in jury))
+        per_judge = {m: j for m, j, err in results if j is not None}
+        judge_errors = {m: err for m, j, err in results if err is not None}
+
+        if not per_judge:  # every judge failed — a measurement failure
+            detail = "; ".join(f"{m}: {e}" for m, e in judge_errors.items())
             return Score(
                 value=0.0,
-                explanation=f"Judge call failed: {e}",
+                explanation=f"All {len(jury)} judge call(s) failed: {detail}",
                 metadata={
                     "turns_judged": 0,
                     "truncated_turns": truncated,
-                    "error": f"judge_failed: {e}",
+                    "error": f"judge_failed: {detail}",
+                    "judge_errors": judge_errors,
                 },
             )
 
-        judgments, err = _extract_judgments(output, len(records))
-        if judgments is None:
-            return Score(
-                value=0.0,
-                explanation=f"Could not parse judge output: {err}",
-                metadata={
-                    "turns_judged": 0,
-                    "truncated_turns": truncated,
-                    "error": f"unparseable_judge_output: {err}",
-                },
-            )
+        judgments, turn_votes = _merge_judgments(per_judge)
 
         # Only turns the judge actually returned count toward the denominator.
         # Silently scoring a skipped turn 0 would blame the model for the
@@ -600,18 +688,19 @@ def aiwf_turn_judge(judge_model: Optional[str] = None):
             turn_pass += int(passed)
             for d in DIMENSIONS:
                 counters[d] += int(j[d])
-            per_turn.append(
-                {
-                    "turn": r["turn"],
-                    **{d: j[d] for d in DIMENSIONS},
-                    "turn_pass": passed,
-                    "reasoning": j["reasoning"],
-                    "recovery_used": bool(r.get("recovery_used")),
-                    "tools_called": [c["name"] for c in (r.get("tool_calls") or [])],
-                    "expected_tool": (r.get("expected_function") or {}).get("name"),
-                    "response_seconds": r.get("response_seconds"),
-                }
-            )
+            entry = {
+                "turn": r["turn"],
+                **{d: j[d] for d in DIMENSIONS},
+                "turn_pass": passed,
+                "reasoning": j["reasoning"],
+                "recovery_used": bool(r.get("recovery_used")),
+                "tools_called": [c["name"] for c in (r.get("tool_calls") or [])],
+                "expected_tool": (r.get("expected_function") or {}).get("name"),
+                "response_seconds": r.get("response_seconds"),
+            }
+            if len(per_judge) > 1:
+                entry["votes"] = turn_votes.get(r["turn"], {})
+            per_turn.append(entry)
 
         judged = len(per_turn)
         unjudged = len(records) - judged
@@ -631,6 +720,20 @@ def aiwf_turn_judge(judge_model: Optional[str] = None):
             f"  instruction_following: {counters['instruction_following']}/{judged}",
             f"  kb_grounding:          {counters['kb_grounding']}/{judged}",
         ]
+        if len(jury) > 1:
+            lines += [
+                "",
+                f"Jury mode: {len(per_judge)} of {len(jury)} judges voted "
+                f"({', '.join(per_judge)}); per-dimension majority, ties fail. "
+                f"NOT comparable to single-judge (upstream-fidelity) runs.",
+            ]
+        if judge_errors:
+            lines += [
+                "",
+                f"WARNING: {len(judge_errors)} judge(s) failed and are excluded "
+                f"from every vote: "
+                + "; ".join(f"{m} ({e[:80]})" for m, e in judge_errors.items()),
+            ]
         recoveries = sum(1 for t in per_turn if t["recovery_used"])
         if recoveries:
             lines += [
@@ -686,7 +789,10 @@ def aiwf_turn_judge(judge_model: Optional[str] = None):
                 "truncated_turns": truncated,
                 "median_response_seconds": median_seconds,
                 "recoveries_used": recoveries,
-                "judge_model": model_id,
+                "judge_model": jury[0] if len(jury) == 1 else None,
+                "judge_models": jury,
+                "jury_mode": len(jury) > 1,
+                **({"judge_errors": judge_errors} if judge_errors else {}),
                 "task_version": TASK_VERSION,
                 "turn_cap": cap,
                 **counters,
@@ -697,7 +803,11 @@ def aiwf_turn_judge(judge_model: Optional[str] = None):
     return score
 
 
-def _aiwf_task(variant: str, judge_model: Optional[str]) -> Task:
+def _aiwf_task(
+    variant: str,
+    judge_model: Optional[str],
+    judge_models: Optional[Any] = None,
+) -> Task:
     n_turns = len(turns())
     return Task(
         name=variant,
@@ -712,21 +822,27 @@ def _aiwf_task(variant: str, judge_model: Optional[str]) -> Task:
             )
         ],
         solver=[aiwf_conversation(variant)],
-        scorer=aiwf_turn_judge(judge_model),
+        scorer=aiwf_turn_judge(judge_model, judge_models),
         version=TASK_VERSION,
     )
 
 
 @task
-def aiwf_medium_context(judge_model: Optional[str] = None) -> Task:
+def aiwf_medium_context(
+    judge_model: Optional[str] = None,
+    judge_models: Optional[str] = None,
+) -> Task:
     """30-turn conference-assistant conversation, ~12K-token knowledge base."""
-    return _aiwf_task("aiwf_medium_context", judge_model)
+    return _aiwf_task("aiwf_medium_context", judge_model, judge_models)
 
 
 @task
-def aiwf_long_context(judge_model: Optional[str] = None) -> Task:
+def aiwf_long_context(
+    judge_model: Optional[str] = None,
+    judge_models: Optional[str] = None,
+) -> Task:
     """30-turn conference-assistant conversation, ~40K-token knowledge base."""
-    return _aiwf_task("aiwf_long_context", judge_model)
+    return _aiwf_task("aiwf_long_context", judge_model, judge_models)
 
 
 # Names exposed by run_multiturn_benchmark. Keys match the @task function names.

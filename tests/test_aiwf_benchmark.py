@@ -500,3 +500,115 @@ def test_turns_json_is_valid_and_has_no_audio_references():
     assert all("audio_file" not in t for t in raw)
     assert all(set(t) == {"index", "input", "golden_text", "required_function_call"}
                for t in raw)
+
+
+# --- Jury mode (judge_models) ---------------------------------------------
+#
+# Single judge stays the default and the upstream-faithful mode; the jury is
+# opt-in. These pin the deterministic half: parameter normalization and the
+# per-turn, per-dimension majority vote.
+
+from eval_mcp.benchmarks.aiwf.task import _merge_judgments, _split_judges
+
+
+def _verdict(tool=True, instr=True, kb=True, reasoning=""):
+    return {
+        "tool_use_correct": tool,
+        "instruction_following": instr,
+        "kb_grounding": kb,
+        "reasoning": reasoning,
+    }
+
+
+def test_split_judges_defaults_to_the_claude_judge():
+    from eval_mcp.core.judge_config import JUDGE_MODELS
+
+    assert _split_judges(None, None) == [JUDGE_MODELS["claude"]]
+
+
+def test_split_judges_single_judge_passthrough():
+    assert _split_judges("bedrock/j1", None) == ["bedrock/j1"]
+
+
+def test_split_judges_list_wins_over_single():
+    assert _split_judges("bedrock/j1", ["bedrock/a", "bedrock/b"]) == [
+        "bedrock/a",
+        "bedrock/b",
+    ]
+
+
+def test_split_judges_parses_the_comma_scalar_from_the_cli_boundary():
+    # -T judge_models=a,b arrives as ONE string; the task splits it back.
+    assert _split_judges(None, "bedrock/a, bedrock/b") == [
+        "bedrock/a",
+        "bedrock/b",
+    ]
+
+
+def test_split_judges_dedupes_preserving_order():
+    assert _split_judges(None, ["b", "a", "b"]) == ["b", "a"]
+
+
+def test_merge_single_judge_is_the_identity():
+    merged, votes = _merge_judgments(
+        {"j1": {0: _verdict(kb=False, reasoning="kb wrong")}}
+    )
+    assert merged[0]["kb_grounding"] is False
+    assert merged[0]["tool_use_correct"] is True
+    assert merged[0]["reasoning"] == "kb wrong"  # no judge prefix when solo
+    assert votes[0]["kb_grounding"] == "0/1"
+
+
+def test_merge_majority_vote_per_dimension():
+    merged, votes = _merge_judgments(
+        {
+            "j1": {0: _verdict(tool=True, instr=False)},
+            "j2": {0: _verdict(tool=True, instr=True)},
+            "j3": {0: _verdict(tool=False, instr=False)},
+        }
+    )
+    assert merged[0]["tool_use_correct"] is True  # 2/3
+    assert merged[0]["instruction_following"] is False  # 1/3
+    assert votes[0]["tool_use_correct"] == "2/3"
+
+
+def test_merge_tie_fails():
+    merged, _ = _merge_judgments(
+        {
+            "j1": {0: _verdict(kb=True)},
+            "j2": {0: _verdict(kb=False)},
+        }
+    )
+    assert merged[0]["kb_grounding"] is False
+
+
+def test_merge_a_turn_skipped_by_one_judge_uses_the_smaller_denominator():
+    # j2 never returned turn 1: it must not count as a False vote there.
+    merged, votes = _merge_judgments(
+        {
+            "j1": {0: _verdict(), 1: _verdict(kb=True)},
+            "j2": {0: _verdict()},
+        }
+    )
+    assert merged[1]["kb_grounding"] is True  # 1/1, not 1/2
+    assert votes[1]["kb_grounding"] == "1/1"
+
+
+def test_merge_jury_reasoning_is_attributed_per_judge():
+    merged, _ = _merge_judgments(
+        {
+            "j1": {0: _verdict(reasoning="fine")},
+            "j2": {0: _verdict(reasoning="also fine")},
+        }
+    )
+    assert "j1: fine" in merged[0]["reasoning"]
+    assert "j2: also fine" in merged[0]["reasoning"]
+
+
+def test_task_signature_accepts_judge_models():
+    import inspect as _inspect
+
+    for factory in (aiwf_medium_context, aiwf_long_context):
+        params = _inspect.signature(factory).parameters
+        assert "judge_models" in params
+        assert params["judge_models"].default is None

@@ -1239,6 +1239,7 @@ async def run_benchmark(
     limit: int = None,
     task_args: dict = None,
     judge_model: str = None,
+    judge_models: list = None,
     max_turns: int = None,
     user_id: str = None,
 ) -> str:
@@ -1269,6 +1270,12 @@ async def run_benchmark(
         judge_model: Judge override for judge-scored bundled benchmarks. Hold it
             fixed when comparing target models — the judge is part of the
             measurement.
+        judge_models: Opt into a multi-judge jury for judge-scored bundled
+            benchmarks: each judge scores the whole transcript independently
+            and verdicts are majority-voted per turn (ties fail). Mutually
+            exclusive with judge_model. Jury scores are NOT comparable to
+            single-judge (upstream-fidelity) runs — hold the jury fixed when
+            comparing target models.
         max_turns: Cap the conversation for a cheap smoke run of a multi-turn
             bundled benchmark. Those scores are NOT comparable to a full run.
 
@@ -1281,6 +1288,7 @@ async def run_benchmark(
         "limit": limit,
         "task_args": task_args,
         "judge_model": judge_model,
+        "judge_models": judge_models,
         "max_turns": max_turns,
         "user_id": _user(user_id),
     }

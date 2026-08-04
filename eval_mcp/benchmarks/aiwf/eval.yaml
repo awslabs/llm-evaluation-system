@@ -42,6 +42,10 @@ metrics:
 judge:
   default: bedrock/us.anthropic.claude-opus-5
   overridable: true
+  # judge_models=[...] opts into a jury: each judge scores the full transcript
+  # independently, verdicts are majority-voted per turn per dimension (ties
+  # fail). Single judge stays the default — it's the upstream-faithful mode.
+  jury_supported: true
 
 source:
   repository_url: https://github.com/kwindla/aiewf-eval
@@ -59,3 +63,7 @@ caveats:
     max_turns caps the conversation for a cheap smoke run; those scores are NOT
     comparable to a full run, since the tool-call turns cluster late (11, 12,
     15, 17, 24, 29).
+  - >-
+    judge_models (jury mode) scores are NOT comparable to single-judge runs or
+    to upstream's published numbers — the jury is a different measuring
+    instrument. Hold the jury fixed when comparing target models.

@@ -344,8 +344,12 @@ that scoring retrieval quality would require uploading their own retriever's chu
         mcp_tools = await self.mcp.list_tools()
 
         # Filter out legacy generation tools (we have our own)
-        # Also filter out developer debugging tools that confuse the agent workflow
-        HIDDEN_TOOLS = ["generate_dataset", "generate_test_cases", "compare_providers", "run_assertion"]
+        # Also filter out developer debugging tools that confuse the agent workflow.
+        # explore_eval_data runs arbitrary Python via exec(); it is a local-only
+        # developer tool and MUST NOT be reachable by the hosted multi-tenant
+        # agent, where the driver is untrusted chat input (would be RCE in the
+        # sidecar + cross-tenant data access).
+        HIDDEN_TOOLS = ["generate_dataset", "generate_test_cases", "compare_providers", "run_assertion", "explore_eval_data"]
         mcp_tools = [tool for tool in mcp_tools if tool["name"] not in HIDDEN_TOOLS]
 
         # Enrich tools with descriptions
@@ -391,8 +395,12 @@ that scoring retrieval quality would require uploading their own retriever's chu
         mcp_tools = await self.mcp.list_tools()
 
         # Filter out legacy generation tools (we have our own)
-        # Also filter out developer debugging tools that confuse the agent workflow
-        HIDDEN_TOOLS = ["generate_dataset", "generate_test_cases", "compare_providers", "run_assertion"]
+        # Also filter out developer debugging tools that confuse the agent workflow.
+        # explore_eval_data runs arbitrary Python via exec(); it is a local-only
+        # developer tool and MUST NOT be reachable by the hosted multi-tenant
+        # agent, where the driver is untrusted chat input (would be RCE in the
+        # sidecar + cross-tenant data access).
+        HIDDEN_TOOLS = ["generate_dataset", "generate_test_cases", "compare_providers", "run_assertion", "explore_eval_data"]
         mcp_tools = [tool for tool in mcp_tools if tool["name"] not in HIDDEN_TOOLS]
 
         # Enrich tools with descriptions

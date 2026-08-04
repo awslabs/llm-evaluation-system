@@ -310,12 +310,14 @@ async def generate_report_pdf(
     if not detail:
         raise HTTPException(status_code=404, detail="Evaluation group not found")
 
-    # Load chat transcript if session_id provided
+    # Load chat transcript if session_id provided. Gate on ownership: the
+    # session id is a client-supplied value, so a caller must not be able to
+    # embed another user's transcript into a report by passing their id.
     transcript = None
     if session_id:
         try:
             from backend.api.main import db
-            if db:
+            if db and await db.session_belongs_to_user(session_id, user_id):
                 messages = await db.get_session_messages(session_id)
                 transcript = messages
         except Exception as e:

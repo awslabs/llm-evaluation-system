@@ -456,6 +456,24 @@ class Database:
         except asyncpg.PostgresError as e:
             raise DatabaseError(f"Failed to create session {session_id}: {e}") from e
 
+    async def session_belongs_to_user(self, session_id: str, user_id: str) -> bool:
+        """Return True iff ``session_id`` exists and is owned by ``user_id``.
+
+        Every session-scoped route (transcript load, status, cancel, turn
+        hydration) must gate on this: ``chat_sessions.id`` is a client-supplied
+        value, so without an ownership check any authenticated caller who
+        learns another user's session id could read that user's transcript,
+        resume/poison their conversation, or cancel their in-flight run.
+        A missing session returns False (deny), which the callers map to 404.
+        """
+        await self._ensure_pool_fresh()
+        async with self._pool.acquire() as conn:
+            owner = await conn.fetchval(
+                "SELECT user_id FROM chat_sessions WHERE id = $1",
+                session_id,
+            )
+        return owner == user_id
+
     async def get_user_sessions(self, user_id: str) -> List[Dict[str, Any]]:
         """Get all chat sessions for a user."""
         await self._ensure_pool_fresh()

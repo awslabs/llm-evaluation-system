@@ -779,6 +779,10 @@ async def chat_status(session_id: str, user_id: str = Depends(get_current_user_i
     falls back to the session_active DB table so a reconnecting tab that
     lands on a different pod still gets the correct answer.
     """
+    # The session id is client-supplied — refuse to report on a session the
+    # caller doesn't own (prevents probing other users' chat activity).
+    if db and not await db.session_belongs_to_user(session_id, user_id):
+        raise HTTPException(status_code=404, detail="Session not found")
     if session_id in active_tasks and not active_tasks[session_id].done():
         return {"running": True}
     # Cross-pod fallback: the task may be running on another replica.
@@ -871,6 +875,11 @@ async def cancel_chat(session_id: str, user_id: str = Depends(get_current_user_i
     c222fee was meant to fix but didn't fully wire up.
     """
     global cancelled_sessions, active_tasks
+
+    # The session id is client-supplied — a caller must only be able to
+    # cancel their own session, never another user's in-flight run.
+    if db and not await db.session_belongs_to_user(session_id, user_id):
+        raise HTTPException(status_code=404, detail="Session not found")
 
     local_task: Optional[asyncio.Task] = active_tasks.get(session_id)
     local_task_runnable = local_task is not None and not local_task.done()
@@ -1326,8 +1335,17 @@ async def chat_stream(request: ChatRequest, user_id: str):
     # Ensure user exists
     await db.create_user(user_id, user_id)
 
-    # Create session if it doesn't exist
+    # Create session if it doesn't exist. create_session is ON CONFLICT DO
+    # NOTHING, so a session id already owned by another user is left intact;
+    # the ownership check below then rejects it, preventing a caller from
+    # hijacking or poisoning someone else's conversation via a guessed id.
     await db.create_session(session_id, user_id)
+    if not await db.session_belongs_to_user(session_id, user_id):
+        logger.warning(
+            f"[STREAM] Rejecting turn for session {session_id} not owned by caller"
+        )
+        yield f"event: error\ndata: {json.dumps({'error': 'Session not found'})}\n\n"
+        return
 
     # Build a fresh Agent for this turn, hydrated from DB-backed history.
     # The DB is the only cross-pod-coherent store in a multi-replica
@@ -1436,8 +1454,12 @@ async def chat_non_stream(request: ChatRequest, user_id: str) -> ChatResponse:
         # Ensure user exists
         await db.create_user(user_id, user_id)
 
-        # Create session if it doesn't exist
+        # Create session if it doesn't exist. ON CONFLICT DO NOTHING leaves a
+        # session owned by another user intact, so gate on ownership before
+        # loading history — otherwise a guessed id would hijack their chat.
         await db.create_session(session_id, user_id)
+        if not await db.session_belongs_to_user(session_id, user_id):
+            raise HTTPException(status_code=404, detail="Session not found")
 
         # Build a fresh Agent for this turn from DB-backed history —
         # see the streaming-path comment above for why we don't cache.
@@ -1470,6 +1492,10 @@ async def chat_non_stream(request: ChatRequest, user_id: str) -> ChatResponse:
             response=response,
             session_id=session_id,
         )
+    except HTTPException:
+        # Deliberate rejections (e.g. the ownership 404) must pass through
+        # unchanged rather than be masked as a generic 500.
+        raise
     except Exception:
         _, safe_msg = _user_safe_error("chat_non_stream endpoint")
         raise HTTPException(status_code=500, detail=safe_msg)

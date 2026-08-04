@@ -152,6 +152,7 @@ async def test_cross_pod_cancel_chat_writes_db_row_with_no_local_task(monkeypatc
 
     fake_db = MagicMock()
     fake_db.mark_session_cancelled = fake_mark_cancelled
+    fake_db.session_belongs_to_user = AsyncMock(return_value=True)
     monkeypatch.setattr(main, "db", fake_db)
 
     # The MCP /eval-info call would normally go to localhost:8002.

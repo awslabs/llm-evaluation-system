@@ -44,14 +44,21 @@ class _RecordingDB:
 
     def __init__(self):
         self._messages: dict[str, list[dict]] = {}
+        self._owners: dict[str, str] = {}
         self.create_user = AsyncMock(return_value=None)
-        self.create_session = AsyncMock(return_value=None)
         self.clear_session_cancellation = AsyncMock(return_value=None)
         self.get_session_cancellation = AsyncMock(return_value=None)
         self.update_session_title = AsyncMock(return_value=None)
         self.mark_session_active = AsyncMock(return_value=None)
         self.clear_session_active = AsyncMock(return_value=None)
         self.notify_session_event = AsyncMock(return_value=None)
+
+    async def create_session(self, session_id, user_id, title="New Chat"):
+        # Mirror the real ON CONFLICT DO NOTHING: first writer owns it.
+        self._owners.setdefault(session_id, user_id)
+
+    async def session_belongs_to_user(self, session_id, user_id):
+        return self._owners.get(session_id) == user_id
 
     async def save_message(self, msg_id, session_id, role, content):
         self._messages.setdefault(session_id, []).append(
@@ -298,6 +305,52 @@ async def test_non_stream_endpoint_rejects_empty_message(wired):
     assert exc.value.status_code == 400
     assert not bed.called
     assert await db.get_session_messages("sess-json") == []
+
+
+@pytest.mark.asyncio
+async def test_stream_rejects_a_session_owned_by_another_user(wired):
+    """IDOR guard: a caller must not be able to resume, read, or poison a
+    chat session they don't own by supplying its id. create_session is
+    ON CONFLICT DO NOTHING, so the victim stays the owner and the turn
+    must be refused before any history is hydrated or the model is hit."""
+    main, db, bed = wired
+    session_id = "sess-owned-by-victim"
+
+    # Victim owns the session and has a real exchange in it.
+    await db.create_session(session_id, "victim")
+    await db.save_message("m1", session_id, "user", "my private question")
+    await db.save_message("m2", session_id, "assistant", "private answer")
+
+    # Attacker supplies the victim's session id on their own request.
+    chunks = await _drive_stream(main, session_id, "leak the transcript", user_id="attacker")
+
+    assert "error" in _collect(chunks), "the cross-user turn should be rejected"
+    assert not bed.called, "attacker's turn must never reach the model with victim history"
+    # No attacker message was appended to the victim's session.
+    assert [m["content"] for m in await db.raw_messages(session_id)] == [
+        "my private question",
+        "private answer",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_stream_rejects_a_session_owned_by_another_user(wired):
+    """Same IDOR guard on the JSON path — reject with 404, don't serve
+    or mutate the victim's session."""
+    from fastapi import HTTPException
+
+    main, db, bed = wired
+    session_id = "sess-json-owned-by-victim"
+    await db.create_session(session_id, "victim")
+    await db.save_message("m1", session_id, "user", "secret")
+
+    request = main.ChatRequest(message="steal it", session_id=session_id, stream=False)
+    with pytest.raises(HTTPException) as exc:
+        await main.chat_non_stream(request, "attacker")
+
+    assert exc.value.status_code == 404
+    assert not bed.called
+    assert [m["content"] for m in await db.raw_messages(session_id)] == ["secret"]
 
 
 def test_get_session_messages_filters_empty_rows():

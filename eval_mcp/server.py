@@ -1621,6 +1621,23 @@ async def explore_eval_data(
     if not code:
         return json.dumps({"error": "code is required"})
 
+    # Fail closed in any hosted/networked mode. This tool runs arbitrary
+    # Python; a restricted-builtins exec is NOT a sandbox (attacker code can
+    # climb the object graph through any passed-in function's __globals__ to
+    # recover os/open), so the only sound boundary is refusing to run it when
+    # the driver could be untrusted. It stays available for the local, single-
+    # user stdio MCP — its actual purpose — where the operator already has a
+    # shell. The hosted EKS deployment runs the MCP with
+    # EVAL_MCP_TRANSPORT=http (see helm/eval/templates/deployment.yaml), and
+    # the multi-tenant backend agent also hides this tool (backend/core/
+    # agent.py HIDDEN_TOOLS) — this is the defense-in-depth second layer.
+    if os.environ.get("EVAL_MCP_TRANSPORT", "stdio") != "stdio":
+        return json.dumps({
+            "error": "explore_eval_data is disabled in hosted mode. It "
+                     "executes arbitrary code and is only available on the "
+                     "local stdio MCP."
+        })
+
     log_dir = get_user_log_dir(_user(user_id))
 
     async def _list_logs():
@@ -1661,6 +1678,9 @@ async def explore_eval_data(
             "read_sample": read_sample,
             "json": json,
         }
+        # Runs with full builtins on purpose: this path is reachable only on
+        # the local stdio MCP (guarded above), where the operator already has
+        # a shell. No pretense of sandboxing here — see the guard's comment.
         exec(code, {"__builtins__": __builtins__}, local_vars)
         result = local_vars.get("result", "No 'result' variable set")
         return json.dumps(result, indent=2, default=str)

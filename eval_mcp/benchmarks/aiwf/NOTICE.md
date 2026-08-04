@@ -51,6 +51,39 @@ possible), and the rubric text follows upstream closely. Two differences:
 Consequence: **this reproduces the benchmark, not upstream's exact figures.**
 Relative model ordering should hold; absolute numbers will differ.
 
+### Judge choice was measured, not assumed — two negative results
+
+Both were tried and rejected. Don't redo them without new evidence.
+
+**1. Sonnet 5 as judge — rejected, too unstable.** It looks better on a single
+run (96.7% vs 93.3% for the same target) but that comparison is invalid: the two
+runs had *different* model transcripts. Holding the transcript fixed and varying
+only the judge, 5 calls each:
+
+| Transcript | Judge | pass_rate spread over 5 calls | Turns failed (count of 5) |
+|---|---|---:|---|
+| T1 | sonnet-4-6 | **0.000** | 12×5, 18×5 |
+| T1 | sonnet-5 | 0.000 | 12×5, 13×5, 18×5 |
+| T2 | sonnet-4-6 | 0.033 | 9×5, 27×2 |
+| T2 | sonnet-5 | **0.100** | 9×5, 11×2, 12×1, 14×2, 16×2, 17×1, 24×1 |
+
+On T2 Sonnet 5 flip-flops on six different turns across identical inputs — a
+0.100 swing in the headline number from judge noise alone. It is also uniformly
+*stricter*, not better in both directions, and one of its extra failures is
+wrong: on T1 turn 13 it fails `kb_grounding` because the assistant scoped a
+correct answer to the one day the user said they were attending, which is an
+omission, not the "clear factual contradiction" the rubric requires.
+
+A benchmark needs a stable ruler more than a clever one. Sonnet 4.6 stays.
+
+**2. Upstream's closing "Remember" reminder block — rejected.** Upstream's judge
+prompt ends with a recap including *"Be generous with kb_grounding unless there's
+a clear factual error"*. Adding it verbatim did **not** fix the turn-13 false
+positive, and it traded determinism for leniency on the default judge (spread
+0.000 → 0.033 on both transcripts, mean 0.933 → 0.940/0.953). The rubric already
+states each rule once in its dimension section; repeating them only loosened
+grading. Not ported.
+
 ## What was deliberately not ported
 
 Everything speech-to-speech — roughly 5,900 lines upstream, versus ~2,800 for

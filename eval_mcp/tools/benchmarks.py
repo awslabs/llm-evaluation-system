@@ -140,41 +140,79 @@ def _matches(e: Any, search: Optional[str], category: Optional[str]) -> bool:
     return True
 
 
+def _bundled_summaries(search: Optional[str], category: Optional[str]) -> List[Dict[str, Any]]:
+    """Rows for our own bundled benchmarks (``eval_mcp/benchmarks/``).
+
+    Listed alongside the inspect_evals catalog so a caller discovers everything
+    runnable from ONE tool. They're flagged ``bundled: true`` and sort first —
+    they need no HuggingFace download, no optional extra and no sandbox, so
+    they're the cheapest thing to run.
+    """
+    from eval_mcp.benchmarks.registry import discover
+
+    rows = []
+    for bench in discover().values():
+        if category and bench.group.lower() != category.lower():
+            continue
+        if search:
+            hay = " ".join(
+                [bench.id, bench.title, bench.description, bench.group]
+                + bench.task_names
+            ).lower()
+            if search.lower() not in hay:
+                continue
+        rows.append(bench.summary())
+    return rows
+
+
 async def handle_list_benchmarks(args: Dict[str, Any]) -> List[TextContent]:
-    """List premade benchmarks, filtered + paginated."""
+    """List premade benchmarks, filtered + paginated.
+
+    Covers BOTH sources: our bundled benchmarks and the installed
+    ``inspect_evals`` catalog. One entry point, so nothing is invisible to a
+    caller who doesn't already know it exists.
+    """
     try:
         search = args.get("search")
         category = args.get("category")
         limit = int(args.get("limit", 20))
         offset = int(args.get("offset", 0))
 
+        bundled = _bundled_summaries(search, category)
+
         evals = _load_evals()
         matched = [e for e in evals if _matches(e, search, category)]
         matched.sort(key=lambda e: ((e.group or "~"), e.id or ""))
 
-        page = matched[offset : offset + limit]
-        rows = [_entry_summary(e) for e in page]
+        # Bundled first, then the upstream catalog, paginated as one list.
+        combined: List[Dict[str, Any]] = bundled + [_entry_summary(e) for e in matched]
+        rows = combined[offset : offset + limit]
 
         # Category histogram helps the agent narrow a follow-up call instead
         # of paging blindly through everything.
         categories: Dict[str, int] = {}
         for e in evals:
             categories[e.group or "Uncategorized"] = categories.get(e.group or "Uncategorized", 0) + 1
+        from eval_mcp.benchmarks.registry import discover
+
+        for bench in discover().values():
+            categories[bench.group] = categories.get(bench.group, 0) + 1
 
         payload = {
             "success": True,
-            "total": len(matched),
-            "totalCatalog": len(evals),
+            "total": len(combined),
+            "totalCatalog": len(evals) + len(discover()),
             "offset": offset,
             "limit": limit,
-            "hasMore": offset + limit < len(matched),
-            "nextOffset": offset + limit if offset + limit < len(matched) else None,
+            "hasMore": offset + limit < len(combined),
+            "nextOffset": offset + limit if offset + limit < len(combined) else None,
             "categories": dict(sorted(categories.items(), key=lambda x: -x[1])),
             "benchmarks": rows,
             "hint": (
                 "Call get_benchmark_details(benchmark_id) for one benchmark's "
                 "task variants and requirements, then run_benchmark(task=...). "
-                "needsExtra/needsSandbox benchmarks require extra setup."
+                "needsExtra/needsSandbox benchmarks require extra setup; "
+                "`bundled: true` ones ship with this package and need none."
             ),
         }
         return [TextContent(type="text", text=json.dumps(payload, indent=2))]
@@ -197,6 +235,18 @@ async def handle_get_benchmark_details(args: Dict[str, Any]) -> List[TextContent
             return [TextContent(type="text", text=json.dumps({
                 "success": False, "error": "benchmark_id is required",
             }))]
+
+        # Bundled benchmarks first — they carry their own metadata (eval.yaml),
+        # including per-task cost and the caveats that make a score readable.
+        from eval_mcp.benchmarks.registry import discover, resolve as resolve_bundled
+
+        bundled = discover().get(benchmark_id)
+        if bundled is None:
+            hit = resolve_bundled(benchmark_id)   # allow a task name too
+            bundled = hit[0] if hit else None
+        if bundled is not None:
+            payload = {"success": True, **bundled.details()}
+            return [TextContent(type="text", text=json.dumps(payload, indent=2))]
 
         evals = _load_evals()
         e = next((x for x in evals if x.id == benchmark_id), None)
@@ -328,6 +378,17 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
                 "success": False,
                 "error": "At least one provider is required (e.g. ['bedrock/us.anthropic.claude-sonnet-4-6']).",
             }))]
+
+        # Bundled benchmark? Hand off to its runner. Callers use ONE tool for
+        # both catalogs; which source a task came from isn't their problem.
+        from eval_mcp.benchmarks.registry import resolve as resolve_bundled
+
+        if resolve_bundled(task) is not None:
+            from eval_mcp.tools.multiturn_benchmarks import (
+                handle_run_multiturn_benchmark,
+            )
+
+            return await handle_run_multiturn_benchmark(args)
 
         # Resolve id-or-task → runnable task name, and pick up its flags.
         try:

@@ -10,8 +10,22 @@ from typing import Dict, List
 
 # Judge models for multi-judge evaluation
 # Model IDs use Inspect AI provider format (bedrock/ prefix)
+#
+# The "claude" entry is the most load-bearing: it's the jury's strongest voice
+# AND the default single judge for the multi-turn benchmarks. Before changing
+# it, measure — a judge is the measuring instrument, so "newer model" is not by
+# itself a reason. Two things to check, both of which have bitten us:
+#   1. Accuracy against hand-adjudicated verdicts, not against another judge's
+#      output (comparing two judges across two different eval RUNS measures the
+#      target model's variance, not the judge's).
+#   2. Stability across repeated calls on the SAME input. Sonnet 5 was rejected
+#      here for swinging 0.100 in the headline metric on identical input.
+# Scored that way over 16 calls on two fixed transcripts, Opus 5 made 2 errors
+# vs Sonnet 4.6's 9 (mostly false positives — it failed a factually correct
+# answer that merely added detail). Details in
+# eval_mcp/benchmarks/aiwf/NOTICE.md.
 JUDGE_MODELS: Dict[str, str] = {
-    "claude": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "claude": "bedrock/us.anthropic.claude-opus-5",
     "nova": "bedrock/us.amazon.nova-pro-v1:0",
     "nemotron": "bedrock/nvidia.nemotron-super-3-120b",
 }

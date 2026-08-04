@@ -1,0 +1,61 @@
+# Metadata for the bundled aiwf benchmark. Schema mirrors inspect_evals'
+# eval.yaml (see its src/inspect_evals/*/eval.yaml) so this stays familiar and
+# could be submitted to their register later with little change.
+#
+# Discovered automatically by eval_mcp/benchmarks/registry.py — adding a
+# benchmark means dropping a directory with one of these in it, NOT editing any
+# Python.
+title: "AI Engineer World's Fair multi-turn conversation"
+description: |
+  A 30-turn scripted conversation with a conference assistant, measuring whether
+  a model holds up as context accumulates: calling the right tool at the right
+  moment, following its system prompt, and staying factually grounded in a
+  knowledge base. Text mode only.
+group: Multi-turn
+version: "1"
+
+# Every task exposed by task.py, and what running one costs.
+tasks:
+  - name: aiwf_medium_context
+    description: "~12K-token knowledge base"
+    turns: 30
+    approx_input_tokens_per_model: 500000
+  - name: aiwf_long_context
+    description: "~40K-token knowledge base"
+    turns: 30
+    approx_input_tokens_per_model: 3000000
+
+# What the scorer reports. First entry is the headline.
+metrics:
+  - name: pass_rate
+    description: "Turns where all 3 judged dimensions pass (upstream's headline)"
+  - name: tool_use_rate
+    description: "Turns where the expected tool call was made, or correctly absent"
+  - name: instruction_rate
+    description: "Turns where the assistant answered or advanced the task"
+  - name: kb_grounding_rate
+    description: "Turns free of explicit factual contradictions"
+  - name: truncated_turns
+    description: "Turns cut off at the token ceiling; non-zero means scores are a floor"
+
+# Judge-scored, so the judge is part of the measuring instrument.
+judge:
+  default: bedrock/us.anthropic.claude-opus-5
+  overridable: true
+
+source:
+  repository_url: https://github.com/kwindla/aiewf-eval
+  repository_commit: d0dabb6c473d8e8d5a84a5504af3f68ec50e9e70
+  license: MIT
+  notice: NOTICE.md
+
+# Anything about this port a caller should know before comparing numbers.
+caveats:
+  - "Text mode only — upstream's speech-to-speech pipelines are not ported."
+  - >-
+    Judge differs from upstream's (claude-opus-4-5 via the Claude Agent SDK),
+    so absolute scores are not directly comparable to their published table.
+  - >-
+    max_turns caps the conversation for a cheap smoke run; those scores are NOT
+    comparable to a full run, since the tool-call turns cluster late (11, 12,
+    15, 17, 24, 29).

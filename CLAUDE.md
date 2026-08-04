@@ -176,6 +176,50 @@ of rejecting), delete `inspect_patches.py` + `_inspect_main.py`, point
 'openai.gpt-5.6-terra' does not support the '/v1/chat/completions' API"*. Only
 `/openai/v1/responses` works for inference; the catalog stays at `/v1/models`.
 
+### Two kinds of benchmark — don't merge the two tools
+
+There are two separate benchmark paths, and they are not interchangeable:
+
+- **`eval_mcp/tools/benchmarks.py`** (`list_benchmarks` / `run_benchmark`) is a
+  thin wrapper over the installed **`inspect_evals`** catalog (~130 single-turn
+  Q&A benchmarks: MMLU, GPQA, HumanEval…). It runs `inspect_evals/<task>` by
+  registry name, so it can only run what that package registers.
+- **`eval_mcp/benchmarks/`** (`list_multiturn_benchmarks` /
+  `run_multiturn_benchmark`) holds benchmarks we **vendor and run ourselves**,
+  for shapes `inspect_evals` doesn't cover. Currently `aiwf_medium_context` and
+  `aiwf_long_context` — a 30-turn scripted conversation with 5 tools, ported
+  from [kwindla/aiewf-eval](https://github.com/kwindla/aiewf-eval) (MIT).
+  Launched by **absolute path** (`<task_file>@<task_name>`), which works from
+  any cwd.
+
+**Why not add new benchmarks to `inspect_evals` instead:** as of 2026-05-08 it
+stopped accepting new eval code (its `EVAL_REGISTER.md` — a dependency-isolation
+decision, not a quality one). New evals now live in the author's own repo and get
+*listed* upstream via the register. Register entries are **not shipped in the
+`inspect_evals` wheel** (`load_listing()` resolves the register dir as
+`package_dir.parent.parent / "register"`, a source-checkout path, and packaging
+only includes `inspect_evals/*/eval.yaml`), so nothing in the register is
+runnable through `run_benchmark` — verified: `internal: 129, external: 0` on the
+installed wheel. Bundling here is the only path that actually runs.
+
+Two things to know before touching `eval_mcp/benchmarks/aiwf/`:
+
+- **Multi-turn scoring is per-TURN, not per-sample.** One sample *is* the whole
+  conversation, so the metrics (`pass_rate`, `tool_use_rate`, …) are custom
+  `@metric`s that pool turn counters out of score metadata. `accuracy()` cannot
+  express this. Each rate needs its own decorated function — `@metric` fixes the
+  display name at decoration time, so one parameterised factory reports four
+  metrics all called `turn_metric`.
+- **Two upstream behaviours are load-bearing; don't "simplify" them away.**
+  (1) A turn *ends at the tool call* — no second generate after the tool result
+  (upstream's `default_tool_result_run_llm = False`); generating again hands the
+  model a free retry. (2) The **recovery nudge**: when a turn expected a tool
+  call and none came, upstream injects one synthetic `"Please go ahead."` turn
+  and merges that attempt into the same turn. Measured on claude-haiku-4-5 over
+  18 turns: pass_rate **0.833 without it, 0.944 with**. Full fidelity notes and
+  what was deliberately not ported (all speech-to-speech) in
+  `eval_mcp/benchmarks/aiwf/NOTICE.md`.
+
 ### Adding a model
 
 Nothing to do. There is no allowlist and no hand-maintained price table — a newly

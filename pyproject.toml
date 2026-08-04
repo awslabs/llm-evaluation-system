@@ -143,6 +143,9 @@ include = ["backend*", "eval_mcp*"]
 [tool.setuptools.package-data]
 eval_mcp = ["viewer_static/**/*", "INSTALL.md"]
 "eval_mcp.core" = ["litellm_pricing_snapshot.json"]
+# Vendored benchmark data (turns, knowledge bases, prompt blocks). Without this
+# the aiwf tasks import fine and then fail at run time with a missing file.
+"eval_mcp.benchmarks.aiwf" = ["data/*.json", "data/*.txt"]
 
 [tool.black]
 line-length = 100

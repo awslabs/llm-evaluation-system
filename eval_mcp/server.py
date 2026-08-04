@@ -48,6 +48,10 @@ from eval_mcp.tools.benchmarks import (
     handle_get_benchmark_details,
     handle_run_benchmark,
 )
+from eval_mcp.tools.multiturn_benchmarks import (
+    handle_list_multiturn_benchmarks,
+    handle_run_multiturn_benchmark,
+)
 
 # Configuration
 port = int(os.environ.get("EVAL_MCP_PORT", "8002"))
@@ -245,6 +249,16 @@ BenchmarkTaskName = Annotated[
     Field(
         description="Runnable task name (or a benchmark id with a single task).",
         examples=["gsm8k", "mmlu_0_shot", "arc_easy"],
+    ),
+]
+MultiturnBenchmarkTask = Annotated[
+    str,
+    Field(
+        description=(
+            "Bundled multi-turn benchmark task name, from "
+            "list_multiturn_benchmarks."
+        ),
+        examples=["aiwf_medium_context", "aiwf_long_context"],
     ),
 ]
 
@@ -1264,6 +1278,74 @@ async def run_benchmark(
         "user_id": _user(user_id),
     }
     result = await handle_run_benchmark(args)
+    return result[0].text
+
+
+@mcp.tool(annotations=READ_LOCAL)
+async def list_multiturn_benchmarks(user_id: str = None) -> str:
+    """
+    Discover the bundled MULTI-TURN conversation benchmarks.
+
+    Separate from `list_benchmarks` (the ~130 single-turn `inspect_evals` Q&A
+    benchmarks). These measure something those can't: whether a model holds up
+    over a long scripted conversation — calling the right tool at the right
+    moment, following its system prompt, and staying factually grounded — as the
+    context grows turn after turn.
+
+    Currently the AI Engineer World's Fair benchmark (30 turns, 5 tools, a
+    conference knowledge base) in two sizes. Text mode only.
+
+    Returns:
+        JSON: {total, benchmarks: [{id, turns, toolTurns, dimensions,
+        approxContextTokens, ...}], costNote}.
+    """
+    result = await handle_list_multiturn_benchmarks({"user_id": _user(user_id)})
+    return result[0].text
+
+
+@mcp.tool(annotations=RUN_REMOTE)
+async def run_multiturn_benchmark(
+    task: MultiturnBenchmarkTask,
+    providers: ProvidersList,
+    judge_model: str = None,
+    max_turns: int = None,
+    user_id: str = None,
+) -> str:
+    """
+    Run a bundled multi-turn conversation benchmark against one or more models.
+
+    Each model replays the same scripted conversation, so results are directly
+    comparable. One sample per model = the whole conversation. The headline
+    metric is `pass_rate`: the fraction of turns where ALL THREE judged
+    dimensions hold on that turn (tool_use_correct, instruction_following,
+    kb_grounding), which is stricter than any single dimension.
+
+    Cost scales with the square of the turn count, since context accumulates:
+    roughly 0.5M input tokens per model on `aiwf_medium_context` and ~3M on
+    `aiwf_long_context`. Start with medium; use `max_turns` for a cheap smoke
+    run (whose scores are NOT comparable to a full one — the tool-call turns
+    cluster late in the conversation).
+
+    Args:
+        task: Benchmark task name (from list_multiturn_benchmarks).
+        providers: Model ids to evaluate (from list_available_models).
+        judge_model: Override the judge (defaults to Claude Sonnet). One judge
+            grades the whole conversation in a single call, which is what lets
+            it credit a tool call made a turn early or late.
+        max_turns: Cap the conversation for a smoke run. Omit for the real thing.
+
+    Returns:
+        JSON with success, task, evalId, and where to read results. Per-turn
+        verdicts land in the score metadata; see the viewer.
+    """
+    args = {
+        "task": task,
+        "providers": providers,
+        "judge_model": judge_model,
+        "max_turns": max_turns,
+        "user_id": _user(user_id),
+    }
+    result = await handle_run_multiturn_benchmark(args)
     return result[0].text
 
 

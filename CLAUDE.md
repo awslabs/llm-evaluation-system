@@ -192,6 +192,54 @@ There are two separate benchmark paths, and they are not interchangeable:
   Launched by **absolute path** (`<task_file>@<task_name>`), which works from
   any cwd.
 
+#### Porting a third-party benchmark: copy the instrument, adapt the plumbing
+
+<EXTREMELY_IMPORTANT>
+When porting ANY external benchmark or eval into this repo, **prompts are data,
+not code.** Copy every prompt, rubric, dataset, golden answer, tool schema,
+threshold and scoring rule **byte-for-byte**. Adapt only the plumbing (runner →
+Inspect task, their client → `get_model()`, their CLI → an MCP tool). If you're
+unsure which category something falls in, it is data — copy it.
+
+**Never rewrite, condense, reformat or "clean up" a prompt you are porting**, and
+never hand-edit a vendored copy. If an edit is genuinely required (e.g. dropping
+a dimension that needs inputs we don't have), load the verbatim original and
+transform it **in code**, then pin it with a test that diffs the result against
+the original and fails on any unjustified difference.
+</EXTREMELY_IMPORTANT>
+
+This is not a style preference. A ported benchmark's only job is to reproduce the
+original's *measurement*; a port that runs cleanly while measuring something
+subtly different is worse than none, because the numbers look authoritative and
+nobody can tell they're wrong. The rubric's wording **is** the measuring
+instrument — paraphrasing it recalibrates the scale.
+
+Two traps worth naming, because both are easy to walk into:
+
+- A prompt in a Python string literal *looks* like code, so it feels adaptable.
+  It isn't. Vendor it as a data file and load it.
+- A legitimate small edit (dropping a dimension whose inputs we don't have) must
+  not license a general tidy-up of the surrounding text. Transform in code, diff
+  the result, justify every changed line.
+
+And note that **a green test suite is not evidence of fidelity** — the suite
+exercises the plumbing, not whether the instrument still reads true.
+
+Full workflow, verification steps and the anti-pattern table:
+[port-a-benchmark skill](./.claude/skills/port-a-benchmark/SKILL.md). Invoke it
+for any "add benchmark X" / "port this eval" / "can we run \<repo\> here" task.
+The non-negotiables from it:
+
+- Read upstream's runner, scorer **and** recorder end to end before coding —
+  turn boundaries and what the scorer *skips* are never in the README.
+- Byte-compare the target-facing prompt against upstream's own assembly.
+- Compare against upstream's published score for the same model. A gap means a
+  behaviour wasn't ported; find it rather than attributing it to "a different
+  judge".
+- Hand-adjudicate failing samples against the golden answers.
+- Write a `NOTICE.md`: upstream, license, pinned SHA, what was copied / adapted /
+  not ported, and every intentional deviation with its measured impact.
+
 **Why not add new benchmarks to `inspect_evals` instead:** as of 2026-05-08 it
 stopped accepting new eval code (its `EVAL_REGISTER.md` — a dependency-isolation
 decision, not a quality one). New evals now live in the author's own repo and get

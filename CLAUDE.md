@@ -214,11 +214,18 @@ Two things to know before touching `eval_mcp/benchmarks/aiwf/`:
   (1) A turn *ends at the tool call* — no second generate after the tool result
   (upstream's `default_tool_result_run_llm = False`); generating again hands the
   model a free retry. (2) The **recovery nudge**: when a turn expected a tool
-  call and none came, upstream injects one synthetic `"Please go ahead."` turn
-  and merges that attempt into the same turn. Measured on claude-haiku-4-5 over
-  18 turns: pass_rate **0.833 without it, 0.944 with**. Full fidelity notes and
-  what was deliberately not ported (all speech-to-speech) in
-  `eval_mcp/benchmarks/aiwf/NOTICE.md`.
+  call and none came, upstream injects one synthetic `"Please go ahead."` turn —
+  and does **not** score that attempt (its judge skips `recovery_turn` records).
+  The nudge unblocks the conversation; it earns the turn no credit. Merging it
+  into the turn, as an earlier version did, lets a model that only complied when
+  prodded score as if it complied immediately.
+- **The judge prompt is upstream's verbatim, not a paraphrase.** It's vendored at
+  `data/upstream_judge_system_prompt.txt` and the audio-only `turn_taking`
+  dimension is stripped programmatically at load time, with a test diffing the
+  result against the original so nothing else can drift. Rewriting the rubric for
+  readability silently changes what the benchmark measures — that already
+  happened once. Full fidelity notes, and what was deliberately not ported (all
+  speech-to-speech), in `eval_mcp/benchmarks/aiwf/NOTICE.md`.
 
 ### Adding a model
 

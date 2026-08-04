@@ -19,10 +19,13 @@ from eval_mcp.benchmarks.aiwf.data_loader import (
 )
 from eval_mcp.benchmarks.aiwf.task import (
     DIMENSIONS,
+    _JUDGE_SYSTEM_PROMPT,
+    _UPSTREAM_JUDGE_PROMPT,
     _extract_judgments,
     _max_turns,
     _rate,
     _render_transcript,
+    _render_user_prompt,
     _turn_rate,
     aiwf_long_context,
     aiwf_medium_context,
@@ -349,20 +352,136 @@ def test_transcript_flags_truncation():
     assert "TRUNCATED" in rendered
 
 
-def test_transcript_flags_a_recovery_nudge():
-    """The judge must know two replies belong to one turn, or it reads the
-    concatenation as rambling."""
-    rendered = _render_transcript([_record(recovery_used=True)])
-    assert "Please go ahead." in rendered
-    assert "combines both replies" in rendered
-
-
-def test_transcript_renders_empty_assistant_text():
-    """A tool-call-only turn is valid; it must not render as a blank field."""
+def test_transcript_hides_the_recovery_attempt():
+    """Upstream's judge SKIPS recovery records, so the nudge reply must not
+    reach the judge — crediting it would let a model that only complied after
+    being prodded look like it complied immediately."""
     rendered = _render_transcript(
-        [_record(assistant_text="", tool_calls=[{"name": "end_session", "args": {}}])]
+        [
+            _record(
+                recovery_used=True,
+                recovery_assistant_text="Sure, submitting that now.",
+                recovery_tool_calls=[{"name": "submit_dietary_request", "args": {}}],
+            )
+        ]
     )
-    assert "(no text)" in rendered
+    assert "Please go ahead." not in rendered
+    assert "Sure, submitting that now." not in rendered
+    assert "submit_dietary_request" not in rendered
+
+
+def test_transcript_leads_with_the_expected_calls_summary():
+    """Upstream's format_turns_for_claude opens with this header."""
+    rendered = _render_transcript(
+        [
+            _record(
+                turn=24,
+                expected_function={
+                    "name": "vote_for_session",
+                    "args": {"name": "Jennifer Smith", "session_id": "936902"},
+                },
+            )
+        ]
+    )
+    assert rendered.startswith("# Expected Function Calls Summary")
+    assert '- Turn 24: vote_for_session({"name": "Jennifer Smith"' in rendered
+    assert "# Conversation Turns" in rendered
+
+
+def test_user_prompt_carries_upstream_closing_instructions():
+    """The two-phase instructions and "Remember" recap are part of upstream's
+    rubric, not decoration — an earlier version of this port dropped them."""
+    prompt = _render_user_prompt([_record(), _record(turn=1)])
+    assert "Please perform your two-phase evaluation:" in prompt
+    assert "MUST contain exactly 2 entries" in prompt
+    assert "Be generous with kb_grounding unless there's a clear factual error" in prompt
+
+
+# --- Judge prompt fidelity vs upstream -----------------------------------
+
+
+def test_judge_prompt_differs_from_upstream_only_by_the_audio_dimension():
+    """The judge prompt IS upstream's, minus the audio-only turn_taking
+    dimension. Pinned line-by-line: paraphrasing the rubric silently changes
+    what the benchmark measures, which happened once already."""
+    import difflib
+
+    # The turn_taking dimension block, verbatim from upstream — every line of
+    # it is expected to disappear.
+    up_lines = _UPSTREAM_JUDGE_PROMPT.splitlines()
+    start = next(i for i, l in enumerate(up_lines)
+                 if l.strip().startswith("1. **turn_taking**"))
+    end = next(i for i in range(start + 1, len(up_lines))
+               if up_lines[i].strip().startswith("2. **"))
+    audio_block = {l.strip() for l in up_lines[start:end] if l.strip()}
+
+    removed, added = [], []
+    for line in difflib.unified_diff(
+        up_lines, _JUDGE_SYSTEM_PROMPT.splitlines(), lineterm="", n=0,
+    ):
+        if line.startswith(("---", "+++", "@@")):
+            continue
+        (removed if line.startswith("-") else added).append(line[1:])
+
+    # Every removed line is either part of that block, mentions audio/
+    # turn_taking, or is a renumbering artefact.
+    for line in removed:
+        s = line.strip()
+        assert (
+            s in audio_block
+            or "turn_taking" in s
+            or "turn-taking" in s.lower()
+            or "audio" in s.lower()
+            or s == "For each turn, evaluate FOUR dimensions:"
+            or s.startswith(("2. **tool_use_correct**",
+                             "3. **instruction_following**",
+                             "4. **kb_grounding**"))
+            or not s
+        ), f"unexpected removal from upstream prompt: {line!r}"
+
+    # Every added line is a renumbering or the THREE-dimensions count.
+    for line in added:
+        assert line.strip().startswith(("1. **tool_use_correct**",
+                                        "2. **instruction_following**",
+                                        "3. **kb_grounding**",
+                                        '{"turn": 0, "reasoning"')) or line.strip() == (
+            "For each turn, evaluate THREE dimensions:"
+        ), f"unexpected addition to upstream prompt: {line!r}"
+
+
+def test_judge_prompt_keeps_upstream_structure():
+    """Sections an earlier rewrite had dropped."""
+    for expected in (
+        "# Two-Phase Evaluation Process",
+        "## PHASE 1: Initial Turn-by-Turn Analysis",
+        "## PHASE 2: Realignment Analysis",
+        "# Critical: Detecting Words-Actions Mismatch",
+        "# Critical: Handling Early Function Calls",
+        "# Critical: Handling Late Function Calls",
+        "Example: If vote_for_session was expected at turn 24 but called at turn 25:",
+    ):
+        assert expected in _JUDGE_SYSTEM_PROMPT, expected
+
+
+def test_judge_prompt_has_no_audio_references():
+    lowered = _JUDGE_SYSTEM_PROMPT.lower()
+    assert "turn_taking" not in lowered
+    assert "audio" not in lowered
+    assert "THREE dimensions" in _JUDGE_SYSTEM_PROMPT
+    assert "FOUR dimensions" not in _JUDGE_SYSTEM_PROMPT
+
+
+def test_judge_dimensions_are_numbered_one_to_three():
+    for n, dim in enumerate(DIMENSIONS, start=1):
+        assert f"{n}. **{dim}** (bool):" in _JUDGE_SYSTEM_PROMPT
+
+
+def test_vendored_upstream_prompt_is_unmodified():
+    """The vendored file must stay byte-identical to upstream's literal, so the
+    diff above is meaningful. 5802 chars @ aiewf-eval d0dabb6."""
+    assert len(_UPSTREAM_JUDGE_PROMPT) == 5802
+    assert _UPSTREAM_JUDGE_PROMPT.startswith("# Role\n")
+    assert "turn_taking" in _UPSTREAM_JUDGE_PROMPT  # untouched copy
 
 
 # --- Vendored data files --------------------------------------------------

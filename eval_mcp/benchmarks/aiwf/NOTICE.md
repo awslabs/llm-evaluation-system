@@ -16,7 +16,23 @@ Vendored from commit `d0dabb6c473d8e8d5a84a5504af3f68ec50e9e70` (2026-06-14).
 | `data/system_preamble.txt` | `_PREAMBLE` in `benchmarks/*/prompts/system.py` (verbatim) |
 | `data/system_tools_section.txt` | `_TOOLS_SECTION` in the same file (verbatim) |
 | tool schemas in `data_loader.py` | `benchmarks/_shared/tools.py`, transcribed from Pipecat `FunctionSchema` to Inspect `ToolDef` |
-| judge rubric in `task.py` | `src/multi_turn_eval/judging/claude_judge.py`, adapted (see below) |
+| `data/upstream_judge_system_prompt.txt` | `JUDGE_SYSTEM_PROMPT` in `src/multi_turn_eval/judging/claude_judge.py` (verbatim, 5802 chars) |
+| judge user prompt in `task.py` | `format_turns_for_claude` + the closing instructions in `judge_with_claude` (verbatim) |
+
+**The judge prompt is upstream's, not a paraphrase.** It's vendored verbatim and
+the audio-only `turn_taking` dimension is removed *programmatically* at load time
+(`_strip_audio_dimension`) rather than by hand-editing a copy, so the excision
+stays auditable and can't drift. A test diffs the two and fails if anything
+other than audio content differs. The complete diff is: `FOUR dimensions` →
+`THREE`, the `1. **turn_taking**` block deleted, the remaining three renumbered,
+the "be lenient if turn_taking=FALSE" sub-rule deleted, and `turn_taking`
+dropped from the JSON example plus its trailing note. Everything else — the
+two-phase structure, every scoring rule, the words-actions-mismatch section, the
+worked early/late examples, the "Remember" recap — is upstream's text.
+
+An earlier version of this port rewrote the rubric "more cleanly" (111 lines →
+51), dropping the two-phase framing and the worked examples. Don't do that: the
+wording *is* the measuring instrument.
 
 The two knowledge-base variants share identical turns, tools and prompt
 scaffolding — verified by test, and the reason one copy of each prompt block
@@ -32,16 +48,26 @@ deliberately, not incidentally:
   `default_tool_result_run_llm = False`, so a turn ends at the tool call. We do
   the same — the tool result enters the context for the next turn, but there is
   no second generate within the turn.
-- *Recovery nudge.* Upstream injects one synthetic `"Please go ahead."` turn
-  when a turn expected a tool call and none was made
-  (`_should_recover`/`MTE_ENABLE_RECOVERY`, default on), merging that attempt
-  into the same scripted turn. Ported. Measured on claude-haiku-4-5 over 18
-  turns: pass_rate 0.833 without it, 0.944 with — it is not optional if the
-  numbers are meant to resemble upstream's.
+- *Recovery nudge.* Upstream injects one synthetic `"Please go ahead."` turn when
+  a turn expected a tool call and none was made
+  (`_should_recover`/`MTE_ENABLE_RECOVERY`, default on). Ported — including the
+  subtle part: the nudge attempt is **not scored**. Upstream writes it as a
+  separate transcript record (`recovery_turn=True`) whose tool calls sit on that
+  record (`start_turn()` resets the recorder's `turn_calls` first), and its judge
+  skips those records outright — `if rec.get("recovery_turn"): continue`. So a
+  tool call that only happened *after* the prod earns the turn no credit; the
+  nudge's real effect is on the conversation, unblocking the workflow so later
+  turns aren't derailed by the missing call.
 
-**Judge.** Same three dimensions, same one-call-over-the-whole-conversation
-shape (which is what makes upstream's early/late tool-call realignment
-possible), and the rubric text follows upstream closely. Two differences:
+  An earlier version of this port merged the nudge's text and tool calls into the
+  scripted turn, which let a model that complied only when prodded score as if it
+  had complied immediately. We keep the recovery reply in
+  `recovery_assistant_text` / `recovery_tool_calls` for debugging, and never show
+  it to the judge.
+
+**Judge.** Upstream's prompt verbatim (see above), same three non-audio
+dimensions, same one-call-over-the-whole-conversation shape — which is what makes
+its early/late tool-call realignment possible. Remaining differences:
 
 - Model: upstream uses `claude-opus-4-5` via the Claude Agent SDK; we use our
   configured Bedrock judge (`claude-opus-5` by default, overridable per run —
@@ -96,13 +122,14 @@ difference between two target models. It is also uniformly stricter rather than
 more accurate, including the same T1-turn-13 false positive. A benchmark needs a
 stable ruler more than a clever one.
 
-### Rejected: upstream's closing "Remember" reminder block
+### On upstream's closing "Remember" recap — now included
 
-Upstream's judge prompt ends with a recap including *"Be generous with
-kb_grounding unless there's a clear factual error"*. Adding it verbatim did
-**not** fix the turn-13 false positive, and it traded determinism for leniency
-(spread 0.000 → 0.033 on both transcripts). The rubric already states each rule
-once in its dimension section; repeating them only loosened grading.
+This was briefly rejected, on the grounds that adding it to our *paraphrased*
+rubric traded determinism for leniency (spread 0.000 → 0.033) without fixing a
+false positive. That reasoning no longer applies: the judge prompt is now
+upstream's verbatim, and the recap is part of it — it belongs to the closing
+instructions in `judge_with_claude`, which `_render_user_prompt` reproduces.
+Fidelity wins over a marginal stability gain from a prompt upstream never wrote.
 
 ## What was deliberately not ported
 

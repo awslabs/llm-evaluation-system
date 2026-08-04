@@ -23,6 +23,8 @@ all three hold on that same turn.
 
 import json
 import os
+import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 # Omit max_tokens so Bedrock applies each model's own default rather than
@@ -130,6 +132,7 @@ def aiwf_conversation(variant: str):
                 state.messages.extend(result.messages)
 
             texts = [output.completion or ""]
+            recovery_calls: List[Any] = []
             recovered = False
             if turn.expected_tool and not any(
                 c.function == turn.expected_tool for c in calls
@@ -139,23 +142,46 @@ def aiwf_conversation(variant: str):
                 state.messages.append(ChatMessageUser(content=_RECOVERY_UTTERANCE))
                 retry = await model.generate(state.messages, tools=state.tools)
                 state.messages.append(retry.message)
-                retry_calls = list(retry.message.tool_calls or [])
-                if retry_calls:
+                recovery_calls = list(retry.message.tool_calls or [])
+                if recovery_calls:
                     retry_result = await execute_tools([retry.message], state.tools)
                     state.messages.extend(retry_result.messages)
-                calls.extend(retry_calls)
                 texts.append(retry.completion or "")
+                # NOTE: recovery_calls are deliberately NOT merged into `calls`.
+                # Upstream records the nudge attempt as a separate transcript
+                # entry (recovery_turn=True) whose tool calls sit on that entry —
+                # start_turn() resets the recorder's turn_calls first — and its
+                # judge skips those entries. So a call that only happened after
+                # the nudge is not credited to the scripted turn. The nudge's
+                # real effect is on the CONVERSATION: it unblocks the workflow so
+                # later turns aren't derailed by the missing call.
                 output = retry
 
             records.append(
                 {
                     "turn": turn.index,
                     "user_text": turn.input,
-                    # Both attempts' text, so the judge sees what the model
-                    # actually said across the turn.
-                    "assistant_text": "\n".join(t for t in texts if t),
+                    # Upstream writes the recovery attempt as a SEPARATE
+                    # transcript record flagged recovery_turn=True, and its judge
+                    # skips those records entirely
+                    # (``if rec.get("recovery_turn"): continue``) — only the
+                    # scripted turn is scored. So the judge sees the FIRST
+                    # attempt's text, not the nudge reply. We match that: the
+                    # recovery attempt's text is kept in
+                    # ``recovery_assistant_text`` for debugging but is not shown
+                    # to the judge. Concatenating both (an earlier version of
+                    # this file) let a model that only complied after the nudge
+                    # look like it complied immediately.
+                    "assistant_text": texts[0],
+                    "recovery_assistant_text": texts[1] if len(texts) > 1 else None,
                     "tool_calls": [
                         {"name": c.function, "args": c.arguments} for c in calls
+                    ],
+                    # Recorded for debugging + the recoveries_used metric, and
+                    # deliberately not shown to the judge (see above).
+                    "recovery_tool_calls": [
+                        {"name": c.function, "args": c.arguments}
+                        for c in recovery_calls
                     ],
                     "expected_function": turn.required_function_call,
                     "golden_text": turn.golden_text,
@@ -172,7 +198,7 @@ def aiwf_conversation(variant: str):
             state.output = output
 
             if turn.expected_tool == "end_session" and any(
-                c.function == "end_session" for c in calls
+                c.function == "end_session" for c in (calls + recovery_calls)
             ):
                 # Upstream terminates the run here. It's the last turn anyway;
                 # break rather than relying on that.
@@ -197,113 +223,114 @@ def aiwf_conversation(variant: str):
 # time couldn't know a function was already called two turns earlier. We keep
 # that, so we keep its consequence — the per-turn judgments are not
 # independent.
-_JUDGE_SYSTEM_PROMPT = """You are an expert evaluator for conversational AI \
-systems. You will judge a multi-turn conversation between a user and an AI \
-assistant for the AI Engineer World's Fair 2025.
+#
+# The prompt is upstream's, VERBATIM, loaded from the vendored copy of its
+# JUDGE_SYSTEM_PROMPT. Do not paraphrase it: the wording is the measuring
+# instrument, and an earlier version of this file rewrote it "more cleanly",
+# which silently changed what the benchmark measures. The only edit is the
+# mechanical removal of the audio-only `turn_taking` dimension, done by
+# transforming upstream's text at load time (rather than hand-editing a copy)
+# so the excision stays auditable and can't drift — see _strip_audio_dimension
+# and the tests that pin it.
 
-# CRITICAL: Evaluate ALL turns
 
-You MUST output a judgment for EVERY turn provided in the input. Do not stop \
-early or skip turns. Even if the conversation went off-track, continue \
-evaluating all remaining turns.
+def _strip_audio_dimension(prompt: str) -> str:
+    """Remove upstream's audio-only ``turn_taking`` dimension from its prompt.
 
-# Evaluation dimensions
+    We have no audio, so that dimension is undefined. Everything else — the
+    two-phase structure, every scoring rule, the worked examples, the output
+    schema — is left exactly as upstream wrote it.
 
-For each turn, evaluate THREE dimensions:
+    Four mechanical edits:
+      1. drop the ``1. **turn_taking**`` block
+      2. renumber the remaining dimensions 1..3 and say THREE, not FOUR
+      3. drop the "be lenient if turn_taking=FALSE" sub-rule
+      4. drop ``turn_taking`` from the output example + its trailing note
+    """
+    lines = prompt.splitlines()
+    out: List[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
 
-1. **tool_use_correct** (bool):
-   - TRUE if the assistant called the expected function with semantically \
-equivalent arguments
-   - TRUE if no function call was expected and none was made
-   - TRUE if a function call was expected but was already made in an earlier \
-turn (realignment case)
-   - TRUE if a late function call is made at this turn (the call eventually \
-happened, credit this turn)
-   - FALSE if a function call was expected, not made, and NOT already made \
-earlier
-   - FALSE if the assistant's words imply waiting for confirmation but it acts \
-without waiting
-   - FALSE if the assistant asks for unnecessary confirmation instead of \
-making the expected function call
-   - For argument matching, use semantic equivalence (not verbatim). Session \
-IDs must match exactly.
+        # 1. the whole "1. **turn_taking** (bool):" block, up to the next
+        #    numbered dimension.
+        if line.strip().startswith("1. **turn_taking**"):
+            i += 1
+            while i < len(lines) and not re.match(r"^\d+\. \*\*", lines[i].strip()):
+                i += 1
+            continue
 
-2. **instruction_following** (bool):
-   - TRUE if the assistant directly answers the question OR advances the task
-   - TRUE if the assistant properly deflects out-of-scope questions
-   - TRUE if the turn is part of a realigned workflow that still accomplishes \
-the goal
-   - FALSE if the assistant's words contradict its actions (says "Does that \
-work?" but doesn't wait)
-   - FALSE if the assistant neither answers nor advances the workflow
-   - FALSE if the assistant asks for unnecessary confirmation when it already \
-has all needed information
+        # 3. the audio-conditional leniency sub-rule.
+        if "If a turn has turn_taking=FALSE" in line:
+            i += 1
+            continue
 
-3. **kb_grounding** (bool):
-   - TRUE unless the assistant states an explicit factual error
-   - TRUE if the assistant provides additional correct information
-   - FALSE only for clear factual contradictions (wrong dates, times, \
-locations, speakers)
-   - Judge against the Golden Response shown for each turn. You do NOT have \
-the knowledge base; do not penalise detail you cannot verify.
+        # 4. the trailing note about the turn_taking field.
+        if line.startswith("Note: The `turn_taking` field"):
+            i += 1
+            # also swallow the blank line that followed it
+            if i < len(lines) and not lines[i].strip():
+                i += 1
+            continue
 
-# Handling early function calls
+        # 2. dimension count + renumbering (2,3,4 -> 1,2,3).
+        if line == "For each turn, evaluate FOUR dimensions:":
+            line = "For each turn, evaluate THREE dimensions:"
+        else:
+            m = re.match(r"^([234])\. \*\*(\w+)\*\* \(bool\):$", line.strip())
+            if m:
+                line = f"{int(m.group(1)) - 1}. **{m.group(2)}** (bool):"
 
-When you detect an early function call: note which function and at which turn. \
-In subsequent turns, if that same function was "expected", mark \
-tool_use_correct TRUE (already satisfied) and explain the realignment.
+        # 4. turn_taking key inside the JSON output example.
+        if '"turn_taking": true,' in line:
+            line = line.replace('"turn_taking": true, ', "")
 
-# Handling late function calls
+        out.append(line)
+        i += 1
+    return "\n".join(out)
 
-When the assistant asked for unnecessary confirmation instead of acting: \
-penalise the turn where the function SHOULD have been called \
-(tool_use_correct=FALSE, instruction_following=FALSE), credit the turn where \
-it WAS called (tool_use_correct=TRUE), and keep evaluating all later turns.
 
-# Empty assistant text with a tool call
+_UPSTREAM_JUDGE_PROMPT = (
+    Path(__file__).parent / "data" / "upstream_judge_system_prompt.txt"
+).read_text(encoding="utf-8")
 
-A turn with empty assistant text but a valid tool call is still valid. The \
-assistant may have called the function without speaking. Evaluate the tool \
-call normally.
-
-# Truncated turns
-
-A turn marked TRUNCATED hit the model's token ceiling before finishing. Judge \
-what is present; do not treat the truncation itself as a factual error.
-
-Submit your judgments with the submit_judgments tool. Provide exactly one \
-entry per turn, in order."""
+_JUDGE_SYSTEM_PROMPT = _strip_audio_dimension(_UPSTREAM_JUDGE_PROMPT)
 
 
 def _render_transcript(records: List[Dict[str, Any]]) -> str:
-    """Format the conversation for the judge.
+    """Format the conversation for the judge, following upstream exactly.
 
-    Mirrors upstream's ``build_judge_prompt``: user text, assistant text,
-    golden response, expected function, actual functions. The knowledge base is
-    deliberately NOT included — upstream's judge doesn't get it either, and
-    including it would change what kb_grounding measures (and add ~92K tokens
-    per judge call on the long variant).
+    Ports ``format_turns_for_claude``: an "Expected Function Calls Summary"
+    header listing every golden call up front, then per-turn User / Assistant /
+    Golden Response / Expected Function / Actual Functions. The knowledge base
+    is NOT included — upstream's judge doesn't get it either.
+
+    Upstream also emits ``**Turn-Taking**: OK (no audio analysis)`` per turn
+    even in text mode. That line is dropped here rather than hard-coded, since
+    the dimension it feeds doesn't exist for us.
     """
-    lines: List[str] = []
+    lines: List[str] = ["# Expected Function Calls Summary", ""]
+    for r in records:
+        fc = r.get("expected_function")
+        if fc:
+            lines.append(f"- Turn {r['turn']}: {fc['name']}({json.dumps(fc['args'])})")
+    lines += ["", "---", "", "# Conversation Turns", ""]
+
     for r in records:
         lines.append(f"## Turn {r['turn']}")
         lines.append(f"**User**: {r['user_text']}")
-        assistant = r["assistant_text"] or "(no text)"
+        assistant = r["assistant_text"] or ""
         if r.get("stop_reason") == "max_tokens":
-            assistant += "  [TRUNCATED: hit token ceiling]"
+            # Not upstream's — our runs can hit a token ceiling that its
+            # pipeline never surfaced. Marked so the judge doesn't read a
+            # severed answer as a factual error.
+            assistant += "  [TRUNCATED: hit the model's token ceiling]"
         lines.append(f"**Assistant**: {assistant}")
-        if r.get("recovery_used"):
-            # Upstream merges the nudge attempt into the same turn, so the judge
-            # must know both replies belong to one turn — otherwise it reads the
-            # concatenation as the assistant rambling or repeating itself.
-            lines.append(
-                "**Note**: the assistant did not act on the first attempt, so a "
-                'synthetic "Please go ahead." nudge was sent; the text above '
-                "combines both replies of this one turn."
-            )
         lines.append("")
-        if r.get("golden_text"):
-            lines.append(f"**Golden Response**: {r['golden_text']}")
+        golden = r.get("golden_text") or ""
+        if golden:
+            lines.append(f"**Golden Response**: {golden}")
             lines.append("")
         expected = r.get("expected_function")
         lines.append(
@@ -313,10 +340,36 @@ def _render_transcript(records: List[Dict[str, Any]]) -> str:
         lines.append(
             f"**Actual Functions**: {json.dumps(actual) if actual else 'none'}"
         )
-        lines.append("")
-        lines.append("---")
-        lines.append("")
+        lines += ["", "---", ""]
     return "\n".join(lines)
+
+
+def _render_user_prompt(records: List[Dict[str, Any]]) -> str:
+    """Upstream's user-turn prompt: formatted turns + its closing instructions.
+
+    The numbered two-phase instructions and the "Remember:" recap are quoted
+    verbatim from upstream's ``judge_with_claude``. An earlier version of this
+    port omitted them; they are part of the rubric, not decoration.
+    """
+    n = len(records)
+    return f"""{_render_transcript(records)}
+
+Please perform your two-phase evaluation:
+1. First, analyze each turn against its golden expectation
+2. Then, identify any turn misalignments (early/late function calls)
+3. Apply realignment adjustments to avoid double-penalizing
+4. Output the final judgments for ALL {n} turns
+
+CRITICAL: Your judgments array MUST contain exactly {n} entries.
+
+Remember:
+- If a function is called early (before expected turn), subsequent turns should not be penalized for the "missing" call
+- If a function is called late (after expected turn), penalize the turn that should have called it, credit the turn that did call it, then continue evaluating all remaining turns
+- If the assistant says "Does that work?" but doesn't wait for confirmation, that's an instruction_following failure
+- If the assistant asks for unnecessary confirmation when it has all needed info, that's a tool_use_correct AND instruction_following failure
+- Be generous with kb_grounding unless there's a clear factual error
+- Empty assistant_text with a valid tool call is still a valid turn - evaluate the tool call
+"""
 
 
 def _build_judgment_tool(n_turns: int) -> ToolInfo:
@@ -505,7 +558,7 @@ def aiwf_turn_judge(judge_model: Optional[str] = None):
             output = await judge.generate(
                 [
                     ChatMessageSystem(content=_JUDGE_SYSTEM_PROMPT),
-                    ChatMessageUser(content=_render_transcript(records)),
+                    ChatMessageUser(content=_render_user_prompt(records)),
                 ],
                 tools=[_build_judgment_tool(len(records))],
                 tool_choice="any",

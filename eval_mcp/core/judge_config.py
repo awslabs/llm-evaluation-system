@@ -10,8 +10,16 @@ from typing import Dict, List
 
 # Judge models for multi-judge evaluation
 # Model IDs use Inspect AI provider format (bedrock/ prefix)
+#
+# Keep these on current-generation models: a judge is the measuring instrument,
+# so an outdated one silently caps the quality of every score in the repo.
+# Sonnet 5 replaced Sonnet 4.6 here and is both stronger and cheaper
+# ($2/$10 per Mtok vs $3/$15). The "claude" entry is also the default single
+# judge for the multi-turn benchmarks, so it is the most load-bearing of the
+# three — verify a replacement can still make a *forced tool call* (that's how
+# every scorer here returns structured verdicts), not just answer prose.
 JUDGE_MODELS: Dict[str, str] = {
-    "claude": "bedrock/us.anthropic.claude-sonnet-4-6",
+    "claude": "bedrock/us.anthropic.claude-sonnet-5",
     "nova": "bedrock/us.amazon.nova-pro-v1:0",
     "nemotron": "bedrock/nvidia.nemotron-super-3-120b",
 }

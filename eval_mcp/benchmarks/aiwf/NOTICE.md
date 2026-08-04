@@ -44,45 +44,65 @@ shape (which is what makes upstream's early/late tool-call realignment
 possible), and the rubric text follows upstream closely. Two differences:
 
 - Model: upstream uses `claude-opus-4-5` via the Claude Agent SDK; we use our
-  configured Bedrock judge (Sonnet by default, overridable per run).
+  configured Bedrock judge (`claude-opus-5` by default, overridable per run —
+  see the bake-off below).
 - Upstream's two-phase output (`phase1_analysis` then `final_judgments`) is
   collapsed to a single forced tool call with per-turn verdicts.
 
 Consequence: **this reproduces the benchmark, not upstream's exact figures.**
 Relative model ordering should hold; absolute numbers will differ.
 
-### Judge choice was measured, not assumed — two negative results
+### Choosing the judge: measured against hand-adjudicated verdicts
 
-Both were tried and rejected. Don't redo them without new evidence.
+**How not to do this.** Comparing two judges by running the benchmark twice and
+diffing the scores is invalid — each run produces a *different* model transcript,
+so the delta measures the target model's variance, not the judge's. We made that
+mistake and it pointed the wrong way. The valid method: fix a transcript, run
+each candidate judge over it N times, and score them against verdicts adjudicated
+by hand from the transcript and knowledge base.
 
-**1. Sonnet 5 as judge — rejected, too unstable.** It looks better on a single
-run (96.7% vs 93.3% for the same target) but that comparison is invalid: the two
-runs had *different* model transcripts. Holding the transcript fixed and varying
-only the judge, 5 calls each:
+Ground truth used (2 transcripts, 30 turns each, contested turns read manually):
 
-| Transcript | Judge | pass_rate spread over 5 calls | Turns failed (count of 5) |
-|---|---|---:|---|
-| T1 | sonnet-4-6 | **0.000** | 12×5, 18×5 |
-| T1 | sonnet-5 | 0.000 | 12×5, 13×5, 18×5 |
-| T2 | sonnet-4-6 | 0.033 | 9×5, 27×2 |
-| T2 | sonnet-5 | **0.100** | 9×5, 11×2, 12×1, 14×2, 16×2, 17×1, 24×1 |
+| Turn | Verdict | Why |
+|---|---|---|
+| T1 12 | FAIL | expected `submit_session_suggestion`; model confirmed the *previous* suggestion, call only came after the nudge |
+| T1 18 | FAIL | user asked about SF weather (out of scope); model didn't deflect, it recapped the tech-support submission |
+| T1 13 | PASS | answer scoped to the user's stated day; all facts correct. Omission ≠ contradiction |
+| T2 9 | FAIL | golden offers to submit a suggestion; model deflected to external contacts |
+| T2 27 | PASS | correct time/place, and all 8 meetup topics it added are verifiably in the KB. Extra *correct* detail is allowed |
 
-On T2 Sonnet 5 flip-flops on six different turns across identical inputs — a
-0.100 swing in the headline number from judge noise alone. It is also uniformly
-*stricter*, not better in both directions, and one of its extra failures is
-wrong: on T1 turn 13 it fails `kb_grounding` because the assistant scoped a
-correct answer to the one day the user said they were attending, which is an
-omission, not the "clear factual contradiction" the rubric requires.
+Results, 16 calls per judge across both transcripts:
 
-A benchmark needs a stable ruler more than a clever one. Sonnet 4.6 stays.
+| Judge | Errors | False pos | False neg | Exact-match runs |
+|---|---:|---:|---:|---|
+| **`claude-opus-5`** | **2** | 2 | 0 | 14/16 |
+| `claude-opus-4-5` (upstream's) | 5 | 0 | 5 | 11/16 |
+| `claude-sonnet-4-6` (previous) | 9 | 8 | 1 | 7/16 |
 
-**2. Upstream's closing "Remember" reminder block — rejected.** Upstream's judge
-prompt ends with a recap including *"Be generous with kb_grounding unless there's
-a clear factual error"*. Adding it verbatim did **not** fix the turn-13 false
-positive, and it traded determinism for leniency on the default judge (spread
-0.000 → 0.033 on both transcripts, mean 0.933 → 0.940/0.953). The rubric already
-states each rule once in its dimension section; repeating them only loosened
-grading. Not ported.
+Opus 5 wins, and the failure modes differ in a way that matters: Sonnet 4.6's
+errors are almost all **false positives** — it failed T2 turn 27 on 8 of 8 calls,
+penalising an answer that is factually correct and merely more detailed than the
+golden text. That's the worst kind of judge error here, because it makes a good
+model look bad and the number still looks plausible. Opus 4.5 errs the other way
+(misses real failures). Cost is not a factor at this scale: ~$0.13 per
+benchmark run vs ~$0.08.
+
+### Rejected: Sonnet 5 as judge — too unstable
+
+Sonnet 5 swings **0.100 in `pass_rate` across repeated calls on identical
+input**, flip-flopping on six different turns (9, 11, 12, 14, 16, 17, 24 each
+failing 1–2 times out of 5). That's judge noise indistinguishable from a real
+difference between two target models. It is also uniformly stricter rather than
+more accurate, including the same T1-turn-13 false positive. A benchmark needs a
+stable ruler more than a clever one.
+
+### Rejected: upstream's closing "Remember" reminder block
+
+Upstream's judge prompt ends with a recap including *"Be generous with
+kb_grounding unless there's a clear factual error"*. Adding it verbatim did
+**not** fix the turn-13 false positive, and it traded determinism for leniency
+(spread 0.000 → 0.033 on both transcripts). The rubric already states each rule
+once in its dimension section; repeating them only loosened grading.
 
 ## What was deliberately not ported
 

@@ -297,6 +297,37 @@ def test_delete_judge_rejects_path_traversal(client):
         us.delete_judge_from_db(USER, "../../etc/passwd")
 
 
+def test_read_paths_reject_cross_tenant_traversal(client, tmp_path):
+    """The JSON-store READERS must reject a traversal id, not just the delete
+    paths. _load_json_file's containment barrier is the shared users *base*,
+    so an id like '../../victim/store/optimizations/opt-x' resolves under the
+    base and — without this guard — reads another tenant's record with no
+    grant. Pin all three readers (optimization/dataset/judge)."""
+    import eval_mcp.core.user_storage as us
+    import json as _json
+    import pytest
+
+    # Seed a victim optimization record on disk.
+    victim_dir = us._get_json_store_dir("victim", "optimizations")
+    victim_dir.mkdir(parents=True, exist_ok=True)
+    (victim_dir / "opt-secret.json").write_text(_json.dumps({
+        "id": "opt-secret", "type": "optimization",
+        "winner_prompt": "TOP SECRET", "created_at": 1700000000000,
+    }))
+
+    # An attacker in their own namespace tries to climb into victim's dir.
+    traversal = "../../victim/store/optimizations/opt-secret"
+    with pytest.raises(ValueError, match="invalid optimization_id"):
+        us.get_optimization_from_db("attacker", traversal)
+    with pytest.raises(ValueError, match="invalid dataset_id"):
+        us.get_dataset_from_db("attacker", "../../victim/store/datasets/ds-x")
+    with pytest.raises(ValueError, match="invalid judge_id"):
+        us.get_judge_from_db("attacker", "../../victim/store/judges/j-x")
+
+    # A well-formed id still works (the guard doesn't break normal reads).
+    assert us.get_optimization_from_db("victim", "opt-secret")["winner_prompt"] == "TOP SECRET"
+
+
 def test_legacy_dataset_without_source_defaults_imported(client, tmp_path):
     """Records saved before provenance existed should still surface a source
     in API responses (defaulting to 'imported')."""

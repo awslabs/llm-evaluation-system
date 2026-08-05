@@ -390,6 +390,23 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
 
             return await handle_run_multiturn_benchmark(args)
 
+        # These knobs only exist on the bundled (judge-scored) benchmarks.
+        # Silently ignoring them on the inspect_evals branch would let a caller
+        # believe a judge override took effect when it didn't — reject instead.
+        unsupported = [
+            k for k in ("judge_model", "judge_models", "max_turns") if args.get(k)
+        ]
+        if unsupported:
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": (
+                    f"{', '.join(unsupported)} only apply to bundled judge-scored "
+                    f"benchmarks; '{task}' is an inspect_evals task, which brings "
+                    f"its own scorer. Drop the parameter(s), or pass scorer "
+                    f"options via task_args if the benchmark exposes them."
+                ),
+            }))]
+
         # Resolve id-or-task → runnable task name, and pick up its flags.
         try:
             evals = _load_evals()

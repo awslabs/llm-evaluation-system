@@ -244,6 +244,25 @@ def _generate_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
 
+def _safe_store_id(kind: str, value: str) -> str:
+    """Reject a JSON-store record id that isn't a bare filename component.
+
+    The JSON-store readers build ``{store_dir}/{id}.json`` and hand it to
+    ``_load_json_file``, whose containment check is against the shared users
+    *base* dir — NOT the per-user dir. So an id like
+    ``../../victim/store/optimizations/opt-xyz`` still resolves under the base
+    and would read another tenant's record with no grant. Record ids are always
+    server-generated (`_generate_id`) or S3 keys where ``..`` doesn't normalize,
+    so a well-behaved caller never trips this; it exists to keep a
+    client-supplied id (e.g. the ``?id=`` query param on /detail routes) from
+    traversing on local-disk deployments. ``delete_*_from_db`` already enforces
+    the same invariant — this brings the read paths in line.
+    """
+    if not value or value in (".", "..") or os.path.basename(value) != value:
+        raise ValueError(f"invalid {kind}: {value!r}")
+    return value
+
+
 def _ensure_under_base(path: Path) -> Path:
     """Verify `path` stays within get_user_base_dir() using realpath+startswith."""
     base_real = os.path.realpath(str(get_user_base_dir()))
@@ -372,6 +391,7 @@ def save_judge_to_db(user_id: str, name: str, config: dict[str, Any]) -> str:
 
 
 def get_judge_from_db(user_id: str, judge_id: str) -> Optional[dict[str, Any]]:
+    judge_id = _safe_store_id("judge_id", judge_id)
     if _s3_enabled():
         data = _s3_load_json(user_id, "judges", f"{judge_id}.json")
     else:
@@ -544,6 +564,7 @@ def save_dataset_to_db(
 
 
 def get_dataset_from_db(user_id: str, dataset_id: str) -> Optional[dict[str, Any]]:
+    dataset_id = _safe_store_id("dataset_id", dataset_id)
     if _s3_enabled():
         data = _s3_load_json(user_id, "datasets", f"{dataset_id}.json")
     else:
@@ -688,6 +709,7 @@ def save_optimization_to_db(user_id: str, record: dict[str, Any]) -> str:
 def get_optimization_from_db(
     user_id: str, optimization_id: str
 ) -> Optional[dict[str, Any]]:
+    optimization_id = _safe_store_id("optimization_id", optimization_id)
     if _s3_enabled():
         data = _s3_load_json(user_id, "optimizations", f"{optimization_id}.json")
     else:

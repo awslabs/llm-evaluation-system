@@ -139,13 +139,6 @@ def test_generated_config_parses_in_every_mode():
         ast.parse(code)
 
 
-def test_generated_scorer_source_is_valid_python():
-    """JURY_SCORER_BLOCK ships as source text; a syntax error breaks every eval."""
-    from eval_mcp.tools.create_config import JURY_SCORER_BLOCK
-
-    ast.parse(JURY_SCORER_BLOCK)
-
-
 def test_scorer_flags_both_truncation_shapes():
     """The truncation guard is the part that survives from the earlier design and
     the reason omitting is acceptable: it surfaces the residual cases (Bedrock's
@@ -155,11 +148,17 @@ def test_scorer_flags_both_truncation_shapes():
       - fully empty completion    -> truncated_no_output, scored 0 + explanation
       - answer cut off mid-stream -> truncated_partial_output, still scored but
         flagged as a floor
-    """
-    from eval_mcp.tools.create_config import JURY_SCORER_BLOCK
 
-    assert "truncated_no_output" in JURY_SCORER_BLOCK
-    assert "truncated_partial_output" in JURY_SCORER_BLOCK
+    The scorer lives in eval_mcp.scorers.jury (imported by generated configs;
+    it was previously inlined as JURY_SCORER_BLOCK source text).
+    """
+    import inspect as _inspect
+
+    from eval_mcp.scorers import jury as jury_module
+
+    src = _inspect.getsource(jury_module)
+    assert "truncated_no_output" in src
+    assert "truncated_partial_output" in src
 
 
 def test_pricing_no_longer_exposes_a_token_lookup():

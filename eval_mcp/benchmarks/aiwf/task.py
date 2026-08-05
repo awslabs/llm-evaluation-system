@@ -21,7 +21,6 @@ headline ``pass_rate = turn_pass / total_turns``, where a turn passes only if
 all three hold on that same turn.
 """
 
-import asyncio
 import json
 import os
 import re
@@ -52,7 +51,7 @@ from eval_mcp.benchmarks.aiwf.data_loader import (
     tool_defs,
     turns,
 )
-from eval_mcp.core.judge_config import JUDGE_MODELS
+from eval_mcp.core.jury import collect_verdicts, majority_passes, normalize_judges
 
 # Bump when a change could move scores (upstream's convention, see
 # inspect_evals TASK_VERSIONING.md). 1 = initial port of aiewf-eval @ 2c9ae4e.
@@ -452,37 +451,6 @@ def _extract_judgments(
     return by_turn, None
 
 
-def _split_judges(
-    judge_model: Optional[str], judge_models: Optional[Any]
-) -> List[str]:
-    """Normalize the two judge parameters into an ordered, deduped list.
-
-    ``judge_models`` wins when both are set (it's the superset form) and
-    accepts either a real list or a comma-separated string — the latter is how
-    it survives the ``-T judge_models=a,b`` CLI boundary, where Inspect parses
-    the value as one YAML scalar. Model ids never contain commas.
-    """
-    models: List[str] = []
-    if judge_models:
-        raw = (
-            judge_models.split(",")
-            if isinstance(judge_models, str)
-            else list(judge_models)
-        )
-        models = [str(m).strip() for m in raw if str(m).strip()]
-    elif judge_model:
-        models = [judge_model]
-    if not models:
-        models = [JUDGE_MODELS["claude"]]
-    seen = set()
-    deduped = []
-    for m in models:
-        if m not in seen:
-            seen.add(m)
-            deduped.append(m)
-    return deduped
-
-
 def _merge_judgments(
     per_judge: Dict[str, Dict[int, Dict[str, Any]]],
 ) -> tuple[Dict[int, Dict[str, Any]], Dict[int, Dict[str, str]]]:
@@ -508,7 +476,7 @@ def _merge_judgments(
         tally: Dict[str, str] = {}
         for d in DIMENSIONS:
             yes = sum(1 for v in verdicts.values() if v[d])
-            entry[d] = yes * 2 > n
+            entry[d] = majority_passes(yes, n)
             tally[d] = f"{yes}/{n}"
         if solo:
             entry["reasoning"] = next(iter(verdicts.values()))["reasoning"]
@@ -635,7 +603,7 @@ def aiwf_turn_judge(
             )
 
         truncated = sum(1 for r in records if r.get("stop_reason") == "max_tokens")
-        jury = _split_judges(judge_model, judge_models)
+        jury = normalize_judges(judge_model, judge_models)
 
         messages = [
             ChatMessageSystem(content=_JUDGE_SYSTEM_PROMPT),
@@ -643,21 +611,23 @@ def aiwf_turn_judge(
         ]
         tools = [_build_judgment_tool(len(records))]
 
-        async def judge_one(model_id: str) -> tuple[str, Any, Optional[str]]:
-            try:
-                output = await get_model(model_id).generate(
-                    messages, tools=tools, tool_choice="any"
-                )
-            except Exception as e:
-                return model_id, None, f"judge_failed: {e}"
-            judgments, err = _extract_judgments(output, len(records))
-            if judgments is None:
-                return model_id, None, f"unparseable_judge_output: {err}"
-            return model_id, judgments, None
+        async def call(label: str, model_id: str):
+            output = await get_model(model_id).generate(
+                messages, tools=tools, tool_choice="any"
+            )
+            return _extract_judgments(output, len(records))
 
-        results = await asyncio.gather(*(judge_one(m) for m in jury))
-        per_judge = {m: j for m, j, err in results if j is not None}
-        judge_errors = {m: err for m, j, err in results if err is not None}
+        # Parallel fan-out: one call per judge over the whole conversation —
+        # a handful of concurrent calls, nothing like a per-sample burst.
+        per_judge, raw_errors = await collect_verdicts(
+            {m: m for m in jury}, call, parallel=True
+        )
+        # Keep the error strings this scorer has always written to metadata.
+        judge_errors = {
+            m: (f"judge_failed: {e}" if kind == "exception"
+                else f"unparseable_judge_output: {e}")
+            for m, (kind, e) in raw_errors.items()
+        }
 
         if not per_judge:  # every judge failed — a measurement failure
             detail = "; ".join(f"{m}: {e}" for m, e in judge_errors.items())

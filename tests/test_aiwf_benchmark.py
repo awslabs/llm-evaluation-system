@@ -508,7 +508,8 @@ def test_turns_json_is_valid_and_has_no_audio_references():
 # opt-in. These pin the deterministic half: parameter normalization and the
 # per-turn, per-dimension majority vote.
 
-from eval_mcp.benchmarks.aiwf.task import _merge_judgments, _split_judges
+from eval_mcp.benchmarks.aiwf.task import _merge_judgments
+from eval_mcp.core.jury import normalize_judges
 
 
 def _verdict(tool=True, instr=True, kb=True, reasoning=""):
@@ -520,33 +521,33 @@ def _verdict(tool=True, instr=True, kb=True, reasoning=""):
     }
 
 
-def test_split_judges_defaults_to_the_claude_judge():
+def test_normalize_judges_defaults_to_the_claude_judge():
     from eval_mcp.core.judge_config import JUDGE_MODELS
 
-    assert _split_judges(None, None) == [JUDGE_MODELS["claude"]]
+    assert normalize_judges(None, None) == [JUDGE_MODELS["claude"]]
 
 
-def test_split_judges_single_judge_passthrough():
-    assert _split_judges("bedrock/j1", None) == ["bedrock/j1"]
+def test_normalize_judges_single_judge_passthrough():
+    assert normalize_judges("bedrock/j1", None) == ["bedrock/j1"]
 
 
-def test_split_judges_list_wins_over_single():
-    assert _split_judges("bedrock/j1", ["bedrock/a", "bedrock/b"]) == [
+def test_normalize_judges_list_wins_over_single():
+    assert normalize_judges("bedrock/j1", ["bedrock/a", "bedrock/b"]) == [
         "bedrock/a",
         "bedrock/b",
     ]
 
 
-def test_split_judges_parses_the_comma_scalar_from_the_cli_boundary():
+def test_normalize_judges_parses_the_comma_scalar_from_the_cli_boundary():
     # -T judge_models=a,b arrives as ONE string; the task splits it back.
-    assert _split_judges(None, "bedrock/a, bedrock/b") == [
+    assert normalize_judges(None, "bedrock/a, bedrock/b") == [
         "bedrock/a",
         "bedrock/b",
     ]
 
 
-def test_split_judges_dedupes_preserving_order():
-    assert _split_judges(None, ["b", "a", "b"]) == ["b", "a"]
+def test_normalize_judges_dedupes_preserving_order():
+    assert normalize_judges(None, ["b", "a", "b"]) == ["b", "a"]
 
 
 def test_merge_single_judge_is_the_identity():

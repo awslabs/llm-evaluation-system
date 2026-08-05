@@ -42,8 +42,8 @@ def _render(jc: JudgeConfig, scorers=None) -> tuple[str, dict]:
 
 def test_default_is_jury(jc: JudgeConfig) -> None:
     code, cfg = _render(jc)
-    assert "scorer=jury_scorer()" in code
-    assert "def jury_scorer" in code
+    assert 'scorer=jury_scorer(CONFIG["criteria"], CONFIG["judge_models"], CONFIG["system_prompt"], CONFIG.get("mantle_regions"))' in code
+    assert "from eval_mcp.scorers.jury import jury_scorer" in code
     assert cfg["scorers"] == ["jury"]
 
 
@@ -56,17 +56,15 @@ def test_f1_only_skips_jury_block(jc: JudgeConfig) -> None:
     code, cfg = _render(jc, scorers=["f1"])
     assert "from inspect_ai.scorer import f1" in code
     assert "scorer=f1()" in code
-    assert "def jury_scorer" not in code
-    assert "JUDGE_MODELS" not in code
-    assert "_build_scoring_tool" not in code
+    assert "jury_scorer" not in code
     assert cfg["scorers"] == ["f1"]
     ast.parse(code)
 
 
 def test_composition_produces_list_scorer(jc: JudgeConfig) -> None:
     code, cfg = _render(jc, scorers=["jury", "f1"])
-    assert "scorer=[jury_scorer(), f1()]" in code
-    assert "def jury_scorer" in code
+    assert 'scorer=[jury_scorer(CONFIG["criteria"], CONFIG["judge_models"], CONFIG["system_prompt"], CONFIG.get("mantle_regions")), f1()]' in code
+    assert "from eval_mcp.scorers.jury import jury_scorer" in code
     assert "from inspect_ai.scorer import f1" in code
     assert cfg["scorers"] == ["jury", "f1"]
     ast.parse(code)
@@ -74,7 +72,7 @@ def test_composition_produces_list_scorer(jc: JudgeConfig) -> None:
 
 def test_all_builtins_compose(jc: JudgeConfig) -> None:
     code, cfg = _render(jc, scorers=["jury", "f1", "exact", "includes", "match"])
-    assert "scorer=[jury_scorer(), f1(), exact(), includes(), match()]" in code
+    assert 'scorer=[jury_scorer(CONFIG["criteria"], CONFIG["judge_models"], CONFIG["system_prompt"], CONFIG.get("mantle_regions")), f1(), exact(), includes(), match()]' in code
     assert "from inspect_ai.scorer import exact, f1, includes, match" in code
     ast.parse(code)
 
@@ -95,22 +93,27 @@ def test_empty_list_falls_back_to_default() -> None:
 
 
 def test_render_scorer_expression_single() -> None:
-    assert _render_scorer_expression(["jury"]) == "jury_scorer()"
+    assert _render_scorer_expression(["jury"]) == 'jury_scorer(CONFIG["criteria"], CONFIG["judge_models"], CONFIG["system_prompt"], CONFIG.get("mantle_regions"))'
     assert _render_scorer_expression(["f1"]) == "f1()"
 
 
 def test_render_scorer_expression_list() -> None:
-    assert _render_scorer_expression(["jury", "f1"]) == "[jury_scorer(), f1()]"
+    assert _render_scorer_expression(["jury", "f1"]) == '[jury_scorer(CONFIG["criteria"], CONFIG["judge_models"], CONFIG["system_prompt"], CONFIG.get("mantle_regions")), f1()]'
 
 
-def test_render_builtin_imports_excludes_jury() -> None:
-    # jury defines its scorer inline; no import-from-inspect-scorer needed
-    assert _render_builtin_scorer_imports(["jury"]) == ""
+def test_render_builtin_imports_includes_jury_module() -> None:
+    # The jury imports from eval_mcp.scorers.jury like the RAG suite does.
+    assert _render_builtin_scorer_imports(["jury"]) == (
+        "from eval_mcp.scorers.jury import jury_scorer"
+    )
 
 
 def test_render_builtin_imports_sorted_unique() -> None:
     line = _render_builtin_scorer_imports(["match", "f1", "exact", "jury"])
-    assert line == "from inspect_ai.scorer import exact, f1, match"
+    assert line == (
+        "from eval_mcp.scorers.jury import jury_scorer\n"
+        "from inspect_ai.scorer import exact, f1, match"
+    )
 
 
 def test_registry_keys_are_documented_set() -> None:
@@ -164,7 +167,7 @@ def test_all_rag_scorers_compose_with_jury(jc: JudgeConfig) -> None:
     ]
     code, cfg = _render(jc, scorers=scorers)
     assert (
-        "scorer=[jury_scorer(), faithfulness(), answer_relevancy(), "
+        'scorer=[jury_scorer(CONFIG["criteria"], CONFIG["judge_models"], CONFIG["system_prompt"], CONFIG.get("mantle_regions")), faithfulness(), answer_relevancy(), '
         "contextual_precision(), contextual_recall(), "
         "contextual_relevancy()]"
     ) in code
@@ -175,7 +178,7 @@ def test_all_rag_scorers_compose_with_jury(jc: JudgeConfig) -> None:
         "contextual_relevancy, faithfulness"
     )
     assert expected_import in code
-    assert "def jury_scorer" in code  # jury block still emitted
+    assert "from eval_mcp.scorers.jury import jury_scorer" in code
     assert cfg["scorers"] == scorers
     ast.parse(code)
 
@@ -263,9 +266,9 @@ def test_score_only_emits_static_solver(jc: JudgeConfig) -> None:
 
 def test_score_only_with_jury(jc: JudgeConfig) -> None:
     code, _ = _render_score_only(jc, scorers=["jury"])
-    # Jury scorer block still emitted — jury grades the pre-generated answer
-    assert "def jury_scorer" in code
-    assert "scorer=jury_scorer()" in code
+    # Jury still wired in — it grades the pre-generated answer
+    assert "from eval_mcp.scorers.jury import jury_scorer" in code
+    assert 'scorer=jury_scorer(CONFIG["criteria"], CONFIG["judge_models"], CONFIG["system_prompt"], CONFIG.get("mantle_regions"))' in code
     # Static solver still wired in
     assert "solver=[static_output_solver()]" in code
     ast.parse(code)
@@ -316,29 +319,44 @@ def test_non_score_only_unchanged(jc: JudgeConfig) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_jury_scorer_block_flags_truncation_not_quality():
-    """The emitted scorer must distinguish truncation from a bad answer."""
-    from eval_mcp.tools.create_config import JURY_SCORER_BLOCK
+def test_jury_scorer_flags_truncation_not_quality():
+    """The jury scorer must distinguish truncation from a bad answer.
 
-    assert "TRUNCATED" in JURY_SCORER_BLOCK
-    assert "truncated_no_output" in JURY_SCORER_BLOCK
-    # It must key off stop_reason, not just the empty string.
-    assert "stop_reason" in JURY_SCORER_BLOCK
-    # And still handle plain no-output separately.
-    assert "No output generated" in JURY_SCORER_BLOCK
-
-
-def test_generated_config_contains_truncation_guard(tmp_path, monkeypatch):
-    """A freshly generated config carries the guard.
-
-    The scorer reaches the eval as *source text* inside the generated task file,
-    so editing the module without the template would silently ship the old
-    behaviour — which is exactly the trap here.
+    It used to be emitted as source text (JURY_SCORER_BLOCK); it now lives in
+    eval_mcp.scorers.jury, which generated configs import. Same invariants,
+    pinned against the module source.
     """
-    from eval_mcp.tools.create_config import JURY_SCORER_BLOCK
+    import inspect as _inspect
 
-    # The block is emitted verbatim; assert the guard survives .format() by
-    # confirming it carries no unescaped format placeholders around the guard.
-    guard_start = JURY_SCORER_BLOCK.index("TRUNCATED")
-    guard = JURY_SCORER_BLOCK[guard_start - 400 : guard_start + 400]
-    assert "stop_reason ==" in guard or 'stop_reason == "max_tokens"' in guard
+    from eval_mcp.scorers import jury as jury_module
+
+    src = _inspect.getsource(jury_module)
+    assert "TRUNCATED" in src
+    assert "truncated_no_output" in src
+    # It must key off stop_reason, not just the empty string.
+    assert "stop_reason" in src
+    # And still handle plain no-output separately.
+    assert "No output generated" in src
+
+
+def test_generated_config_imports_the_jury_module():
+    """A freshly generated jury config must import the scorer from
+    eval_mcp.scorers.jury and wire the CONFIG fields into it — the scorer no
+    longer ships as inline source, so a bad import line breaks every eval."""
+    import ast
+
+    from eval_mcp.core.judge_config import JudgeConfig
+    from eval_mcp.tools.create_config import create_inspect_task_file
+
+    code, _ = create_inspect_task_file(
+        dataset_path="/tmp/x.json",
+        providers=["bedrock/us.amazon.nova-pro-v1:0"],
+        config_name="probe",
+        config_dir="/tmp",
+        judge_config=JudgeConfig(),
+        scorers=["jury"],
+    )
+    ast.parse(code)
+    assert "from eval_mcp.scorers.jury import jury_scorer" in code
+    assert 'jury_scorer(CONFIG["criteria"], CONFIG["judge_models"], ' in code
+    assert 'CONFIG["system_prompt"], CONFIG.get("mantle_regions"))' in code

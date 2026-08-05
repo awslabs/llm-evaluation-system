@@ -32,20 +32,29 @@ logger = logging.getLogger(__name__)
 # Scorer registry — names accepted on the ``scorers`` parameter
 # ---------------------------------------------------------------------------
 #
-# "jury" is implemented inline in the generated task file (see
-# JURY_SCORER_BLOCK below). All other entries map to Inspect AI's built-in
-# scorers, which work directly against the ``(question, golden_answer,
-# completion)`` dataset shape this MCP already produces.
+# Every entry maps to an importable scorer. The jury lives in
+# ``eval_mcp.scorers.jury`` (it was historically inlined into the generated
+# file as a template string — see that module's docstring); the rest are
+# Inspect AI's built-ins, which work directly against the ``(question,
+# golden_answer, completion)`` dataset shape this MCP already produces.
 
 # Each entry maps a public scorer name (the value users pass on the
 # ``scorers`` parameter) to:
 #   - expr:   the Python expression to emit into Task(scorer=[...])
-#   - import: the symbol to import (None when the scorer is defined inline
-#             in the generated task file, like jury)
+#   - import: the symbol to import
 #   - module: where to import the symbol from. ``inspect_ai.scorer`` for
-#             the built-ins, ``eval_mcp.scorers.rag`` for the RAG suite.
+#             the built-ins, ``eval_mcp.scorers.*`` for ours.
 SCORER_REGISTRY: Dict[str, Dict[str, Any]] = {
-    "jury": {"expr": "jury_scorer()", "import": None, "module": None},
+    # The jury reads its panel and rubric from the generated file's CONFIG
+    # global (module-level in every generated task file, so the expr resolves).
+    "jury": {
+        "expr": (
+            'jury_scorer(CONFIG["criteria"], CONFIG["judge_models"], '
+            'CONFIG["system_prompt"], CONFIG.get("mantle_regions"))'
+        ),
+        "import": "jury_scorer",
+        "module": "eval_mcp.scorers.jury",
+    },
     "f1": {"expr": "f1()", "import": "f1", "module": "inspect_ai.scorer"},
     "exact": {"expr": "exact()", "import": "exact", "module": "inspect_ai.scorer"},
     "includes": {"expr": "includes()", "import": "includes", "module": "inspect_ai.scorer"},
@@ -129,8 +138,8 @@ def _render_scorer_expression(scorers: List[str]) -> str:
 
 def _render_builtin_scorer_imports(scorers: List[str]) -> str:
     """Render extra ``from <module> import …`` lines for built-in and
-    library scorers, one line per module. The jury defines its own
-    scorer inline so it doesn't contribute to these imports.
+    library scorers, one line per module (the jury included — it
+    imports from ``eval_mcp.scorers.jury`` like the RAG suite does).
 
     The render is stable per module — sorted names within a module,
     modules sorted alphabetically — so diffs of the generated task file
@@ -254,9 +263,9 @@ def _resolve_mantle_regions(model_ids: list) -> dict:
 # Task-file template parts
 # ---------------------------------------------------------------------------
 #
-# ``TASK_FILE_BASE`` is emitted for every config. ``JURY_SCORER_BLOCK`` is
-# appended only when ``"jury"`` is in the scorers list. The task definition
-# template (SINGLE / PROMPT) is parameterised by ``{scorer_expr}``.
+# ``TASK_FILE_BASE`` is emitted for every config; the task definition
+# template (SINGLE / PROMPT) is parameterised by ``{scorer_expr}``. Scorers
+# (including the jury) are imported from their modules via the registry.
 
 TASK_FILE_BASE = '''"""Inspect AI evaluation task: {config_name}
 
@@ -281,233 +290,6 @@ CONFIG = json.loads(_config_path.read_text())
 DATASET_PATH = CONFIG["dataset_path"]
 PROVIDERS = CONFIG.get("providers", [])
 {rag_init}'''
-
-
-JURY_SCORER_BLOCK = '''
-from inspect_ai.model import ChatMessageUser, ChatMessageSystem, get_model
-from inspect_ai.scorer import Score, mean, scorer, stderr
-from inspect_ai.tool._tool_info import ToolInfo
-from inspect_ai.tool._tool_params import ToolParams
-
-JUDGE_MODELS = CONFIG["judge_models"]
-CRITERIA = CONFIG["criteria"]
-SYSTEM_PROMPT = CONFIG["system_prompt"]
-
-# Region routing for Bedrock Mantle judges, baked in at config-creation time by
-# create_eval_config. Mantle model availability is per-region (gpt-5.5 and
-# gpt-5.6-sol are us-east-1/us-east-2 only) while AWS credentials are global, so
-# a judge that isn't served in the user's own region is invoked against one that
-# does serve it. Only openai/bedrock/* inference is affected — Converse judges,
-# storage and logs all stay in the user's region.
-MANTLE_REGIONS = CONFIG.get("mantle_regions") or {}
-
-
-def _judge_model_args(model_id):
-    """Extra get_model() kwargs for a judge — an aws_region override, if needed."""
-    region = MANTLE_REGIONS.get(model_id)
-    return {"aws_region": region} if region else {}
-
-
-def _build_scoring_tool():
-    # Schema is intentionally flat: each criterion gets a sibling
-    # `<name>_improvement` string slot. Nested objects-per-criterion would
-    # be cleaner but Inspect's tool-forced output handles flat int/string
-    # fields most reliably across models. Improvement slots are optional —
-    # old judge runs without them still parse fine.
-    properties = {}
-    required = []
-    for c in CRITERIA:
-        properties[c["name"]] = {
-            "type": "integer",
-            "description": f"Score for {c['name']}: 1 if pass, 0 if fail",
-            "enum": [0, 1],
-        }
-        required.append(c["name"])
-        properties[f"{c['name']}_improvement"] = {
-            "type": "string",
-            "description": (
-                f"If {c['name']} scored 0, ONE short sentence on what the "
-                "answer should change to satisfy the criterion. Empty string "
-                "when scored 1."
-            ),
-        }
-    properties["reason"] = {
-        "type": "string",
-        "description": "Brief overall explanation of the scoring decision",
-    }
-    required.append("reason")
-
-    return ToolInfo(
-        name="submit_scores",
-        description="Submit binary scores plus per-criterion improvement hints",
-        parameters=ToolParams(type="object", properties=properties, required=required),
-    )
-
-
-def _extract_scores(output, criteria_names):
-    """Pull scores + per-criterion improvement notes + shared reason out
-    of the judge's submit_scores call. Returns
-    ``(scores, reason, improvements, error)`` where improvements maps
-    criterion name -> string (empty when the judge passed the criterion
-    or omitted the hint).
-    """
-    if not output or not output.message or not output.message.tool_calls:
-        text = output.completion[:200] if output and output.completion else "(empty)"
-        return None, None, None, f"No tool call. Response: {text}"
-
-    args = {}
-    for tc in output.message.tool_calls:
-        if tc.function == "submit_scores":
-            args.update(tc.arguments)
-
-    if not args:
-        return None, None, None, f"No submit_scores tool call found"
-
-    missing = [n for n in criteria_names if n not in args]
-    if missing:
-        return None, None, None, f"Missing criteria: {missing}. Got: {list(args.keys())}"
-
-    scores = {n: int(bool(args[n])) for n in criteria_names}
-    improvements = {
-        n: str(args.get(f"{n}_improvement", "") or "").strip()
-        for n in criteria_names
-    }
-    return scores, args.get("reason", ""), improvements, None
-
-
-@scorer(metrics=[mean(), stderr()])
-def jury_scorer():
-    async def score(state, target):
-        output = state.output.completion if state.output else ""
-        if not output:
-            # Distinguish "the model produced a bad answer" from "the model
-            # never got to answer". A reasoning model (gpt-5.6-*, gpt-oss-*)
-            # can spend its entire token budget on the reasoning channel and
-            # emit zero visible tokens: stop_reason == "max_tokens" with an
-            # empty completion. Scoring that a plain 0 is a measurement error
-            # masquerading as a quality signal — it silently penalises exactly
-            # the models that think hardest, and the run still reports success.
-            stop_reason = getattr(state.output, "stop_reason", None) if state.output else None
-            if stop_reason == "max_tokens":
-                return Score(
-                    value=0.0,
-                    answer="",
-                    explanation=(
-                        "TRUNCATED: the model hit its max_tokens limit before emitting "
-                        "any answer (all output tokens went to the reasoning channel). "
-                        "This is a token-budget problem, NOT a quality result — do not "
-                        "compare this model against others on this run. We pass no "
-                        "max_tokens, so the ceiling is Bedrock's own default for this "
-                        "model, which for some reasoning models is smaller than the task "
-                        "needs. This is a known limitation of the model/endpoint, not a "
-                        "measure of answer quality."
-                    ),
-                    metadata={"truncated_no_output": True, "stop_reason": stop_reason},
-                )
-            return Score(value=0.0, answer="", explanation="No output generated")
-
-        # Output exists but was cut off mid-answer. Unlike the empty case above
-        # this still gets scored — a partial answer carries real signal, and
-        # discarding it would throw away every long response. But the score is
-        # depressed by the truncation, not only by quality (criteria like
-        # completeness necessarily fail on a severed answer), so flag it: a
-        # reader comparing models needs to know this number is a floor, not a
-        # measurement. Recorded in metadata rather than the score so it can't
-        # silently pass as a clean result.
-        truncated_partial = (
-            getattr(state.output, "stop_reason", None) == "max_tokens"
-            if state.output
-            else False
-        )
-
-        question = str(state.input)
-        golden = target.text if target else ""
-        criteria_names = [c["name"] for c in CRITERIA]
-        tool = _build_scoring_tool()
-
-        votes = {n: [] for n in criteria_names}
-        # Per-criterion improvement hints collected from judges that
-        # scored 0. List of {judge, note} pairs so downstream
-        # consumers (optimizer, report) can attribute hints to judges
-        # and de-dupe across them.
-        improvements_per_criterion = {n: [] for n in criteria_names}
-        details = []
-        errors = []
-
-        for label, model_id in JUDGE_MODELS.items():
-            try:
-                judge = get_model(model_id, **_judge_model_args(model_id))
-                result = await judge.generate(
-                    [
-                        ChatMessageSystem(content=SYSTEM_PROMPT),
-                        ChatMessageUser(
-                            content=f"Question:\\n{question}\\n\\nAI Answer:\\n{output}\\n\\nReference Answer:\\n{golden}"
-                        ),
-                    ],
-                    tools=[tool],
-                    tool_choice="any",
-                )
-
-                scores, reason, improvements, err = _extract_scores(result, criteria_names)
-                if scores is not None:
-                    for n in criteria_names:
-                        votes[n].append(scores[n])
-                        if scores[n] == 0 and improvements and improvements.get(n):
-                            improvements_per_criterion[n].append(
-                                {"judge": label, "note": improvements[n]}
-                            )
-                    details.append(f"  {label}: {scores} - {reason}")
-                else:
-                    errors.append(f"  {label}: {err}")
-                    details.append(f"  {label}: EXCLUDED ({err[:80]})")
-            except Exception as e:
-                errors.append(f"  {label}: {str(e)[:200]}")
-                details.append(f"  {label}: ERROR ({str(e)[:80]})")
-
-        results = []
-        for n in criteria_names:
-            v = votes[n]
-            if not v:
-                results.append({"name": n, "votes_for": 0, "total": 0, "score": 0.0, "note": "no valid responses"})
-            else:
-                vf = sum(v)
-                entry = {"name": n, "votes_for": vf, "total": len(v), "score": vf / len(v)}
-                if improvements_per_criterion[n]:
-                    entry["improvement_notes"] = improvements_per_criterion[n]
-                results.append(entry)
-
-        # Sample score = mean of per-criterion judge-fractions. No thresholds.
-        scored = [r for r in results if "note" not in r]
-        jury_score = sum(r["score"] for r in scored) / len(scored) if scored else 0.0
-
-        lines = [f"Jury score: {jury_score:.2f} ({len(scored)}/{len(criteria_names)} criteria graded)", ""]
-        for r in results:
-            extra = f" - {r['note']}" if "note" in r else ""
-            lines.append(f"  {r['name']}: {r['score']:.2f} ({r['votes_for']}/{r['total']} judges){extra}")
-        lines += ["", "Judges:"] + details
-        if errors:
-            lines += ["", "Errors:"] + errors
-
-        if truncated_partial:
-            lines.append(
-                "NOTE: the answer was cut off at the token ceiling "
-                "(stop_reason=max_tokens), so this score is a floor — criteria "
-                "like completeness fail on a severed answer regardless of quality."
-            )
-
-        return Score(
-            value=jury_score,
-            answer=output[:200],
-            explanation="\\n".join(lines),
-            metadata={
-                "jury_score": jury_score,
-                "criteria_results": results,
-                "truncated_partial_output": truncated_partial,
-            },
-        )
-
-    return score
-'''
 
 
 SINGLE_TASK_TEMPLATE = '''
@@ -624,9 +406,6 @@ def create_inspect_task_file(
         mode_doc=mode_doc,
         rag_init=rag_init,
     ))
-    if "jury" in scorers:
-        parts.append(JURY_SCORER_BLOCK)
-
     # Apply prompt_template whenever a non-default prompt is given, even
     # for a single prompt. The old guard `len > 1` silently dropped
     # single custom templates — caller passes a wrapper, Inspect runs

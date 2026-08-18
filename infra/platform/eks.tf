@@ -250,12 +250,26 @@ resource "kubectl_manifest" "karpenter_node_pool" {
         consolidateAfter: 1m
   YAML
 
-  depends_on = [kubectl_manifest.karpenter_node_class, module.eks]
+  # Listing the cleanup resource is a DESTROY-order edge: Terraform reverses
+  # dependency edges on destroy, so this makes the NodePool go away before the
+  # cleanup loop runs. See null_resource.karpenter_node_cleanup.
+  depends_on = [kubectl_manifest.karpenter_node_class, module.eks, null_resource.karpenter_node_cleanup]
 }
 
-# Karpenter creates EC2 instances outside of Terraform. On destroy, NodePool
-# deletion triggers async instance termination — this resource waits for those
-# instances to fully terminate before Terraform deletes security groups.
+# Karpenter creates EC2 instances outside of Terraform, so on destroy this waits
+# for them to terminate before the node security groups are deleted.
+#
+# It has to run in the window "NodePool already deleted, Karpenter controller
+# still running", which the two depends_on edges bracket (destroy reverses them,
+# so `A depends_on B` = A destroyed first):
+#
+#   node_pool depends_on THIS  -> NodePool gone, so nothing relaunches
+#   THIS depends_on helm        -> controller alive, so it drains gracefully
+#
+# Get either half wrong and this loop force-terminates nodes that Karpenter then
+# replaces; the replacements outlive the helm uninstall, and with no controller
+# left nothing reaps them. They hold ENIs in the node security group — the same
+# orphaned-SG condition null_resource.eks_managed_sg_cleanup exists to fix.
 resource "null_resource" "karpenter_node_cleanup" {
   triggers = {
     cluster_name = local.name
@@ -312,7 +326,7 @@ resource "null_resource" "karpenter_node_cleanup" {
     EOT
   }
 
-  depends_on = [kubectl_manifest.karpenter_node_pool]
+  depends_on = [helm_release.karpenter]
 }
 
 #------------------------------------------------------------------------------

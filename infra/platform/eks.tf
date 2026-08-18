@@ -273,18 +273,20 @@ resource "null_resource" "karpenter_node_cleanup" {
     }
 
     command = <<-EOT
-      # Terminate Karpenter-launched nodes on EVERY iteration, not just once.
-      # The Karpenter controller may still be running during teardown and will
-      # relaunch replacement nodes for any it sees go away — so a terminate-
-      # once approach leaves the replacements orphaned, holding ENIs that block
-      # the EKS security groups from deleting and hanging terraform destroy
-      # indefinitely. Re-terminating each pass kills replacements until the
-      # controller itself is torn down and stops launching, then the loop
-      # converges.
+      # Both filters are required (--filters ANDs them) and neither is safe alone:
+      #
+      #   tag-key karpenter.sh/nodepool  — provisioned by Karpenter. Without it
+      #     we match the EKS managed node group, which module.eks stamps with
+      #     karpenter.sh/discovery via its `tags` block, and terminate the ASG
+      #     nodes Terraform owns. Verified live on cluster eval-managed.
+      #   tag karpenter.sh/discovery     — belongs to THIS cluster, from the
+      #     EC2NodeClass spec.tags above. Without it we match every Karpenter
+      #     instance in the account+region and destroy other clusters' nodes.
       stable=0
       for i in $(seq 1 30); do
         IDS=$(aws ec2 describe-instances \
           --filters "Name=tag-key,Values=karpenter.sh/nodepool" \
+                    "Name=tag:karpenter.sh/discovery,Values=$CLUSTER_NAME" \
                     "Name=instance-state-name,Values=pending,running,stopping,stopped" \
           --region "$REGION" \
           --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)

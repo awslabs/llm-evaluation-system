@@ -9,18 +9,36 @@ resource "null_resource" "eks_managed_sg_cleanup" {
   }
 
   provisioner "local-exec" {
-    when    = destroy
+    when = destroy
+
+    # Values reach the script as environment variables, NEVER interpolated into
+    # the command string. Terraform executes `command` via `/bin/sh -c`, so a
+    # `${self.triggers.*}` reference splices the value into shell *source*: a
+    # `;`, `&&` or backtick in a VPC ID, region or cluster name would then run
+    # as a command on whatever host is running `terraform destroy` — typically a
+    # CI/CD runner holding deploy credentials (CWE-78). Environment values are
+    # handed to the child process as env, so metacharacters in them stay inert.
+    # null_resource.wait_for_cluster below already used this pattern.
+    environment = {
+      VPC_ID       = self.triggers.vpc_id
+      CLUSTER_NAME = self.triggers.cluster_name
+      REGION       = self.triggers.region
+    }
+
     command = <<-EOT
       for i in $(seq 1 18); do
         SGs=$(aws ec2 describe-security-groups \
-          --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
-                    "Name=tag:aws:eks:cluster-name,Values=${self.triggers.cluster_name}" \
+          --filters "Name=vpc-id,Values=$VPC_ID" \
+                    "Name=tag:aws:eks:cluster-name,Values=$CLUSTER_NAME" \
           --query 'SecurityGroups[].GroupId' --output text \
-          --region ${self.triggers.region} 2>/dev/null)
+          --region "$REGION" 2>/dev/null)
         [ -z "$SGs" ] && echo "No EKS-managed security groups remaining." && exit 0
+        # $SGs is deliberately UNQUOTED: it holds a whitespace-separated ID list
+        # that has to word-split into one loop iteration per group. Quoting it
+        # would pass the whole list as a single group id and delete nothing.
         for sg in $SGs; do
           echo "Deleting EKS-managed security group: $sg"
-          if aws ec2 delete-security-group --group-id $sg --region ${self.triggers.region} 2>/dev/null; then
+          if aws ec2 delete-security-group --group-id "$sg" --region "$REGION" 2>/dev/null; then
             echo "Deleted $sg"
           else
             echo "Retrying $sg... ($i/18)"
@@ -51,13 +69,13 @@ module "eks" {
 
   # EKS Addons
   cluster_addons = {
-    coredns                = { most_recent = true }
-    kube-proxy             = { most_recent = true }
-    vpc-cni                = { most_recent = true }
-    eks-pod-identity-agent = { most_recent = true }
-    metrics-server         = { most_recent = true } # Required for HPA to work
+    coredns                         = { most_recent = true }
+    kube-proxy                      = { most_recent = true }
+    vpc-cni                         = { most_recent = true }
+    eks-pod-identity-agent          = { most_recent = true }
+    metrics-server                  = { most_recent = true } # Required for HPA to work
     amazon-cloudwatch-observability = { most_recent = true }
-    aws-ebs-csi-driver             = { most_recent = true }
+    aws-ebs-csi-driver              = { most_recent = true }
   }
 
   # Access
@@ -232,12 +250,26 @@ resource "kubectl_manifest" "karpenter_node_pool" {
         consolidateAfter: 1m
   YAML
 
-  depends_on = [kubectl_manifest.karpenter_node_class, module.eks]
+  # Listing the cleanup resource is a DESTROY-order edge: Terraform reverses
+  # dependency edges on destroy, so this makes the NodePool go away before the
+  # cleanup loop runs. See null_resource.karpenter_node_cleanup.
+  depends_on = [kubectl_manifest.karpenter_node_class, module.eks, null_resource.karpenter_node_cleanup]
 }
 
-# Karpenter creates EC2 instances outside of Terraform. On destroy, NodePool
-# deletion triggers async instance termination — this resource waits for those
-# instances to fully terminate before Terraform deletes security groups.
+# Karpenter creates EC2 instances outside of Terraform, so on destroy this waits
+# for them to terminate before the node security groups are deleted.
+#
+# It has to run in the window "NodePool already deleted, Karpenter controller
+# still running", which the two depends_on edges bracket (destroy reverses them,
+# so `A depends_on B` = A destroyed first):
+#
+#   node_pool depends_on THIS  -> NodePool gone, so nothing relaunches
+#   THIS depends_on helm        -> controller alive, so it drains gracefully
+#
+# Get either half wrong and this loop force-terminates nodes that Karpenter then
+# replaces; the replacements outlive the helm uninstall, and with no controller
+# left nothing reaps them. They hold ENIs in the node security group — the same
+# orphaned-SG condition null_resource.eks_managed_sg_cleanup exists to fix.
 resource "null_resource" "karpenter_node_cleanup" {
   triggers = {
     cluster_name = local.name
@@ -245,24 +277,32 @@ resource "null_resource" "karpenter_node_cleanup" {
   }
 
   provisioner "local-exec" {
-    when    = destroy
+    when = destroy
+
+    # Passed as environment, not interpolated into the command string — see the
+    # comment on null_resource.eks_managed_sg_cleanup above for why (CWE-78).
+    environment = {
+      CLUSTER_NAME = self.triggers.cluster_name
+      REGION       = self.triggers.region
+    }
+
     command = <<-EOT
-      # Terminate Karpenter-launched nodes on EVERY iteration, not just once.
-      # The Karpenter controller may still be running during teardown and will
-      # relaunch replacement nodes for any it sees go away — so a terminate-
-      # once approach leaves the replacements orphaned, holding ENIs that block
-      # the EKS security groups from deleting and hanging terraform destroy
-      # indefinitely. Re-terminating each pass kills replacements until the
-      # controller itself is torn down and stops launching, then the loop
-      # converges. Match BOTH the discovery and nodepool tags (the discovery
-      # tag is the primary signal; nodepool is a belt-and-suspenders fallback
-      # in case a node is missing the discovery tag).
+      # Both filters are required (--filters ANDs them) and neither is safe alone:
+      #
+      #   tag-key karpenter.sh/nodepool  — provisioned by Karpenter. Without it
+      #     we match the EKS managed node group, which module.eks stamps with
+      #     karpenter.sh/discovery via its `tags` block, and terminate the ASG
+      #     nodes Terraform owns. Verified live on cluster eval-managed.
+      #   tag karpenter.sh/discovery     — belongs to THIS cluster, from the
+      #     EC2NodeClass spec.tags above. Without it we match every Karpenter
+      #     instance in the account+region and destroy other clusters' nodes.
       stable=0
       for i in $(seq 1 30); do
         IDS=$(aws ec2 describe-instances \
           --filters "Name=tag-key,Values=karpenter.sh/nodepool" \
+                    "Name=tag:karpenter.sh/discovery,Values=$CLUSTER_NAME" \
                     "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-          --region ${self.triggers.region} \
+          --region "$REGION" \
           --query 'Reservations[].Instances[].InstanceId' --output text 2>/dev/null)
         if [ -z "$IDS" ]; then
           stable=$((stable + 1))
@@ -275,7 +315,9 @@ resource "null_resource" "karpenter_node_cleanup" {
         else
           stable=0
           echo "Terminating Karpenter nodes: $IDS"
-          aws ec2 terminate-instances --instance-ids $IDS --region ${self.triggers.region} >/dev/null 2>&1 || true
+          # $IDS is deliberately UNQUOTED — whitespace-separated instance ids
+          # must word-split into separate --instance-ids arguments.
+          aws ec2 terminate-instances --instance-ids $IDS --region "$REGION" >/dev/null 2>&1 || true
         fi
         echo "Waiting for Karpenter nodes to terminate... ($i/30)"
         sleep 10
@@ -284,7 +326,7 @@ resource "null_resource" "karpenter_node_cleanup" {
     EOT
   }
 
-  depends_on = [kubectl_manifest.karpenter_node_pool]
+  depends_on = [helm_release.karpenter]
 }
 
 #------------------------------------------------------------------------------

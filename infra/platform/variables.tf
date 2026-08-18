@@ -1,7 +1,24 @@
+# Validation on project_name / region / vpc_id is a security control, not just
+# input hygiene: all three reach a `local-exec` provisioner in eks.tf. Those
+# provisioners now pass values through the `environment` map rather than
+# interpolating them into the shell command (the primary CWE-78 fix), and these
+# constraints are the second layer — a value that cannot contain a shell
+# metacharacter cannot be an injection vector even if a future edit reintroduces
+# string interpolation. tests/test_terraform_provisioner_safety.py guards the
+# first layer; keep both.
+
 variable "project_name" {
   description = "Project name prefix for all resources"
   type        = string
   default     = "eval-managed"
+
+  validation {
+    # Also the character set AWS accepts for the resource names this prefixes
+    # (EKS cluster, IAM roles, S3-adjacent names), so this is not purely a
+    # security bound.
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{0,30}[a-z0-9]$", var.project_name))
+    error_message = "project_name must be 2-32 characters of lowercase letters, digits and hyphens, starting and ending with a letter or digit."
+  }
 }
 
 variable "region" {
@@ -14,6 +31,14 @@ variable "region" {
   # set, including the OpenAI frontier models (gpt-5.5, gpt-5.6-sol) that AWS
   # serves only in us-east-1/us-east-2.
   default = "us-east-2"
+
+  validation {
+    # Allows an optional middle segment so the GovCloud and China partitions
+    # still validate (us-gov-west-1, cn-north-1). A stricter
+    # `^[a-z]{2}-[a-z]+-[0-9]+$` would reject those and break those consumers.
+    condition     = can(regex("^[a-z]{2}(-[a-z]+){1,2}-[0-9]+$", var.region))
+    error_message = "region must be a valid AWS region name, e.g. us-east-2, eu-central-1 or us-gov-west-1."
+  }
 }
 
 #------------------------------------------------------------------------------
@@ -73,6 +98,13 @@ variable "cluster_admin_role_arns" {
 variable "vpc_id" {
   description = "VPC ID from data layer"
   type        = string
+
+  validation {
+    # AWS VPC IDs are `vpc-` plus 8 (legacy) or 17 (current) hex characters.
+    # Reaches a local-exec provisioner in eks.tf — see the note at the top.
+    condition     = can(regex("^vpc-[0-9a-f]{8,17}$", var.vpc_id))
+    error_message = "vpc_id must be a valid VPC ID: 'vpc-' followed by 8 or 17 hexadecimal characters."
+  }
 }
 
 variable "vpc_cidr_block" {

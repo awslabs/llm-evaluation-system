@@ -268,20 +268,30 @@ async def _validate_providers(providers: List[str]) -> Dict[str, Any]:
         for model_id in runtime_models:
             actual_model_id = model_id.replace("bedrock/", "", 1)
             try:
+                # 32, not lower: GPT-5.x on Converse rejects max_output_tokens
+                # below 16 with a ValidationException that used to be
+                # mislabeled "Invalid model ID" here (verified live on
+                # gpt-5.6-terra). Keep the probe tiny but above every
+                # model family's minimum.
                 runtime_client.converse(
                     modelId=actual_model_id,
                     messages=[{"role": "user", "content": [{"text": "Hi"}]}],
-                    inferenceConfig={"maxTokens": 10},
+                    inferenceConfig={"maxTokens": 32},
                 )
             except Exception as e:
                 error_msg = str(e)
                 if "AccessDeniedException" in error_msg:
                     hint = "Model not enabled in AWS account"
-                elif "ValidationException" in error_msg:
+                elif "ValidationException" in error_msg and (
+                    "model identifier" in error_msg.lower()
+                    or "provided model" in error_msg.lower()
+                ):
                     hint = "Invalid model ID"
                 elif "ResourceNotFoundException" in error_msg:
                     hint = "Model not found"
                 else:
+                    # Don't collapse every ValidationException into "Invalid
+                    # model ID" — parameter rejections carry the real cause.
                     hint = error_msg[:200]
                 failed.append({"model": model_id, "error": hint})
                 logger.warning(f"Provider validation failed for {model_id}: {hint}")

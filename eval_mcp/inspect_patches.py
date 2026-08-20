@@ -248,11 +248,22 @@ def _patch_bedrock_redacted_reasoning() -> None:
     schema requires ``reasoningText``, so every such response crashes with a
     pydantic ValidationError (verified live on gpt-5.6-sol, 2026-08-19).
 
-    Fix: make ``reasoningText`` optional and accept ``redactedContent`` in
-    the schema, then map redacted-only blocks to an empty reasoning text
-    before conversion — the content is encrypted and unreadable by design;
-    what matters is that the run doesn't die and usage still counts. Remove
-    when upstream models redacted reasoning.
+    Fix: make ``reasoningText`` optional so the response parses, then DROP
+    redacted-only blocks before conversion — the content is encrypted and
+    unreadable by design, so there is nothing to carry forward.
+
+    Do not substitute an empty ``reasoningText`` instead of dropping. That
+    keeps a contentless reasoning block in the message history, and on the
+    next turn Inspect serializes it back as ``reasoningText.text = ""``,
+    which Converse rejects with a bare ``InternalServerException`` — a
+    multi-turn run then dies at the first turn that replays it (verified
+    live on gpt-5.6-luna via aiwf, 2026-08-20: 3/3 runs died at turn 3,
+    and ``fail_on_error=False`` reported them as ``status: success`` with
+    ``results: null``). Replaying the real ``redactedContent`` bytes
+    verbatim does work, so preserving them is the richer fix if a caller
+    ever needs reasoning carried across turns.
+
+    Remove when upstream models redacted reasoning.
     """
     try:
         from typing import Optional
@@ -272,9 +283,8 @@ def _patch_bedrock_redacted_reasoning() -> None:
     rc.__pydantic_fields__["reasoningText"] = FieldInfo(
         annotation=Optional[_bedrock.ConverseReasoningText], default=None
     )
-    rc.__pydantic_fields__["redactedContent"] = FieldInfo(
-        annotation=Optional[bytes], default=None
-    )
+    # No redactedContent field needed: pydantic's default extra="ignore" lets
+    # the payload parse once reasoningText is optional, and we drop the block.
     rc.model_rebuild(force=True)
     # Parents cache the child's core schema — rebuild the chain.
     for name in ("ConverseMessageContent", "ConverseMessage", "ConverseOutput", "ConverseResponse"):
@@ -284,13 +294,13 @@ def _patch_bedrock_redacted_reasoning() -> None:
 
     original = _bedrock.model_output_from_response
 
-    def _model_output_tolerating_redacted(model, response, tools):
-        for c in response.output.message.content:
-            if c.reasoningContent is not None and c.reasoningContent.reasoningText is None:
-                c.reasoningContent.reasoningText = _bedrock.ConverseReasoningText(text="")
+    def _model_output_dropping_redacted(model, response, tools):
+        content = response.output.message.content
+        content[:] = [c for c in content if c.reasoningContent is None
+                      or c.reasoningContent.reasoningText is not None]
         return original(model, response, tools)
 
-    _bedrock.model_output_from_response = _model_output_tolerating_redacted
+    _bedrock.model_output_from_response = _model_output_dropping_redacted
 
 
 # Apply on import so a generated task file gets the patch simply by importing

@@ -666,8 +666,12 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         # Pass models to inspect eval (comma-separated for multiple).
         # Score-only configs invoke no model — Inspect AI supports running
         # without --model when the task's solver never calls generate().
+        # Claude models reroute to Inspect's native anthropic provider here
+        # (bedrock-runtime Messages API; see eval_mcp/core/model_routing.py);
+        # results ingestion maps the log names back to bedrock/<id>.
         if models and not score_only:
-            cmd.extend(["--model", ",".join(models)])
+            from eval_mcp.core.model_routing import to_native
+            cmd.extend(["--model", ",".join(to_native(m) for m in models)])
 
         # Run the evaluation from the user's directory
         process = await asyncio.create_subprocess_exec(

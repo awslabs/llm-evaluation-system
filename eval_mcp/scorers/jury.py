@@ -36,6 +36,7 @@ from inspect_ai.tool._tool_info import ToolInfo
 from inspect_ai.tool._tool_params import ToolParams
 
 from eval_mcp.core.jury import collect_verdicts, fraction
+from eval_mcp.core.model_routing import to_native
 
 
 def _judge_model_args(model_id: str, mantle_regions: Dict[str, str]) -> Dict[str, Any]:
@@ -184,7 +185,8 @@ def jury_scorer(
         tool = _build_scoring_tool(criteria)
 
         async def call(label: str, model_id: str):
-            judge = get_model(model_id, **_judge_model_args(model_id, mantle_regions))
+            # Claude judges ride the native anthropic provider like targets do
+            judge = get_model(to_native(model_id), **_judge_model_args(model_id, mantle_regions))
             result = await judge.generate(
                 [
                     ChatMessageSystem(content=system_prompt),

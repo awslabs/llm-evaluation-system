@@ -307,14 +307,16 @@ def test_converse_run_escapes_inspect_2048_default():
     that scores 0 while the run reports success. Measured: gpt-5.6-luna and
     gpt-5.6-sol both hit 2048/2048 reasoning tokens with no visible output.
 
-    We escape it not by passing a bigger number but by making the provider omit
-    max_tokens (eval_mcp.inspect_patches), so Bedrock applies the model's own
-    default. This guards that the patch neutralises the provider default.
+    We escape it by defaulting to an oversized probe request; Bedrock's
+    validation error then names the model's true ceiling, which is cached
+    (eval_mcp.inspect_patches). This guards that the patch neutralises the
+    provider's 2048 default.
     """
-    import eval_mcp.inspect_patches  # noqa: F401 — applies on import
+    import eval_mcp.inspect_patches as patches
     from inspect_ai.model import get_model
 
-    assert get_model("bedrock/us.amazon.nova-pro-v1:0").api.max_tokens() is None
+    max_tokens = get_model("bedrock/us.amazon.nova-pro-v1:0").api.max_tokens()
+    assert max_tokens == patches._PROBE_MAX_TOKENS
 
 
 # ---------------------------------------------------------------------------

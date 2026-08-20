@@ -55,6 +55,12 @@ dependencies = [
     # OpenAI provider (MIN_VERSION = "2.40.0") but only declares it in a dev
     # extra, so a lower floor here lets the resolver pick an incompatible wheel.
     "openai>=2.40.0",
+    # Claude models on Bedrock — routed through Inspect's native anthropic
+    # provider (`anthropic/bedrock/<model>`, the bedrock-runtime Messages API)
+    # so thinking gates and effort-aware max_tokens come from the upstream SDK
+    # provider instead of Inspect's Converse mirror. See
+    # eval_mcp/core/model_routing.py. Same SigV4 credential chain as boto3.
+    "anthropic>=0.80.0",
     "aws-bedrock-token-generator>=1.1.0",
     "click>=8.1.7",
     "rich>=13.7.0",

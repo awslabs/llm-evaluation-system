@@ -194,7 +194,10 @@ async def handle_run_multiturn_benchmark(args: Dict[str, Any]) -> List[TextConte
             "--adaptive-connections",
             "true",
             "--no-log-images",
-            "--no-fail-on-error",
+            # fail_on_error stays ON: these benchmarks run ONE sample per model,
+            # so there are no sibling samples for --no-fail-on-error to protect.
+            # All it did was relabel a dead run's status from "error" to
+            # "success" (verified live 2026-08-20 on gpt-5.6-luna aiwf).
             "--log-shared",
             "10",
         ]
@@ -208,6 +211,16 @@ async def handle_run_multiturn_benchmark(args: Dict[str, Any]) -> List[TextConte
             # Comma-joined: -T passes one scalar; the task splits it back.
             # Model ids never contain commas.
             cmd.extend(["-T", f"judge_models={','.join(judge_models)}"])
+
+        # Snapshot existing logs so the post-run scored-nothing check below only
+        # inspects the logs this run produces.
+        try:
+            from inspect_ai._view.common import list_eval_logs_async
+
+            pre_existing = {i.name for i in await list_eval_logs_async(log_dir_str)}
+        except Exception as e:  # pragma: no cover - listing shape changed upstream
+            logger.warning("Could not snapshot logs (%s); skipping scored-nothing check.", e)
+            pre_existing = None
 
         process = await asyncio.create_subprocess_exec(
             *cmd,
@@ -253,21 +266,33 @@ async def handle_run_multiturn_benchmark(args: Dict[str, Any]) -> List[TextConte
             logger.warning("precompute failed: %s", e)
 
         if process.returncode != 0:
-            return [
-                TextContent(
-                    type="text",
-                    text=json.dumps(
-                        {
-                            "success": False,
-                            "evalId": eval_id,
-                            "task": task,
-                            "error": f"Benchmark failed with exit code {process.returncode}",
-                            "stderr": stderr_str[:2000],
-                        },
-                        indent=2,
-                    ),
-                )
-            ]
+            return [_err(
+                f"Benchmark failed with exit code {process.returncode}",
+                eval_id, task, stderr=stderr_str[:2000],
+            )]
+
+        # Inspect exits 0 even when a sample errors, so the returncode check above
+        # cannot see a dead run — the log is the only signal.
+        if pre_existing is not None:
+            try:
+                from inspect_ai.log import read_eval_log_async
+
+                dead = [
+                    f"{h.eval.model} ({h.status})"
+                    for info in await list_eval_logs_async(log_dir_str)
+                    if info.name not in pre_existing
+                    for h in [await read_eval_log_async(info.name, header_only=True)]
+                    if h.results is None
+                ]
+            except Exception as e:  # pragma: no cover - log shape changed upstream
+                logger.warning("Result check failed (%s); reporting run as-is.", e)
+                dead = []
+            if dead:
+                return [_err(
+                    "Benchmark scored nothing for: " + ", ".join(dead)
+                    + ". Read the sample's error field in the .eval log for the cause.",
+                    eval_id, task,
+                )]
 
         return [
             TextContent(
@@ -299,8 +324,15 @@ async def handle_run_multiturn_benchmark(args: Dict[str, Any]) -> List[TextConte
         return [_err(f"Benchmark failed: {e}", eval_id)]
 
 
-def _err(message: str, eval_id: str, task: Optional[str] = None) -> TextContent:
+def _err(
+    message: str,
+    eval_id: str,
+    task: Optional[str] = None,
+    stderr: Optional[str] = None,
+) -> TextContent:
     payload: Dict[str, Any] = {"success": False, "evalId": eval_id, "error": message}
     if task:
         payload["task"] = task
+    if stderr:
+        payload["stderr"] = stderr
     return TextContent(type="text", text=json.dumps(payload, indent=2))

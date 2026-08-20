@@ -166,3 +166,17 @@ async def test_inspect_evals_branch_rejects_judge_params_loudly():
         res = json.loads(out[0].text)
         assert not res["success"], key
         assert key in res["error"], res["error"]
+
+
+@pytest.mark.asyncio
+async def test_fail_on_error_is_not_disabled():
+    """These benchmarks run ONE sample per model, so --no-fail-on-error has no
+    sibling samples to protect. All it did was relabel a dead run's status from
+    "error" to "success": three gpt-5.6-luna aiwf runs died at turn 3 and every
+    one reported as a pass (live, 2026-08-20). Verified live that dropping the
+    flag does not cost sibling models — a broken Luna and a healthy Haiku ran
+    together and Haiku still scored."""
+    captured = {}
+    res = await _run({"providers": ["bedrock/x"]}, captured)
+    assert res["success"], res
+    assert "--no-fail-on-error" not in captured["cmd"]

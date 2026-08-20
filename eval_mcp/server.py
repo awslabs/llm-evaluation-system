@@ -1148,14 +1148,16 @@ async def get_optimization_details(
 async def run_evaluation(
     configName: ConfigName,
     user_id: str = None,
+    generateReport: bool = True,
 ) -> str:
     """
     Low-level runner for an already-built config. Most callers should use
     `run_evaluation_and_report` instead — that's the one-shot path that
-    auto-generates dataset/judge/config and writes a PDF report.
+    auto-generates dataset/judge/config and tailors the PDF report with
+    caller-supplied context.
 
-    Only reach for this tool when you already have a configName from a
-    prior `create_eval_config` call and specifically do NOT want the report step.
+    Every successful run auto-generates a PDF report (downloadable from the
+    viewer's REPORT button); pass generateReport=False to skip that step.
 
     Flow:
     1. Runs target model(s) via Inspect AI
@@ -1166,13 +1168,16 @@ async def run_evaluation(
 
     Args:
         configName: Name of an existing eval config (from create_eval_config).
+        generateReport: Auto-generate the PDF report after the run (default True).
 
     Returns:
-        JSON with evaluation results including scores.
+        JSON with evaluation results including scores (and report info when
+        generateReport is enabled).
     """
     args = {
         "configName": configName,
         "user_id": _user(user_id),
+        "generateReport": generateReport,
     }
     result = await handle_run_evaluation(args)
     return result[0].text
@@ -1506,6 +1511,9 @@ async def run_evaluation_and_report(
         "configName": config_name,
         "user_id": uid,
         "openViewer": False,
+        # This path writes its own report below, tailored with the caller's
+        # context and monthly_volume — skip the runner's generic auto-report.
+        "generateReport": False,
     })
     eval_data = json.loads(eval_result[0].text)
     eval_data["configName"] = config_name

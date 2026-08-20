@@ -630,6 +630,7 @@ async def create_eval_config(
     agent_path: str = None,
     agent_entry: str = None,
     scorers: list = None,
+    thinking: str | int | list = None,
 ) -> str:
     """
     Create an Inspect AI evaluation configuration.
@@ -695,6 +696,16 @@ async def create_eval_config(
             so opt into the specific ones you need. For answer correctness
             against the golden answer, use the jury with a "correctness"
             criterion rather than a RAG scorer.
+        thinking: Compare thinking (reasoning) levels for the SAME providers.
+            A single value or a list; each entry is either an adaptive-effort
+            string — "none", "low", "medium", "high", "xhigh", "max" (Claude
+            4.6+ / Claude 5, via Inspect's reasoning_effort) — or an integer
+            thinking-token budget >= 1024 (Claude 4.0/4.5 family, via
+            reasoning_tokens). A list generates one task per level, so e.g.
+            thinking=["none", "high"] evaluates every provider with thinking
+            off AND at high effort on identical inputs in one run. Crossed
+            with `prompts` when both are lists. Not valid with score-only
+            datasets. Non-Claude / non-thinking models ignore the setting.
 
     Returns:
         JSON with the auto-generated configName and summary. Pass that configName
@@ -711,6 +722,7 @@ async def create_eval_config(
         "agent_path": agent_path,
         "agent_entry": agent_entry,
         "scorers": scorers,
+        "thinking": thinking,
     }
     result = await handle_create_eval_config(args)
     return result[0].text
@@ -1327,6 +1339,7 @@ async def run_evaluation_and_report(
     dataset: str = None,
     judge: str = None,
     prompts: str | list = "{question}",
+    thinking: str | int | list = None,
     description: str = None,
     judge_models: list = None,
     documents: list = None,
@@ -1357,6 +1370,11 @@ async def run_evaluation_and_report(
         dataset: Existing dataset name; auto-generated from `documents`/`context` if omitted.
         judge: Existing judge name; auto-generated from the dataset if omitted.
         prompts: Prompt template or list of templates for comparison. Use `{question}`.
+        thinking: Thinking-level comparison for the same providers: effort
+            strings ("none"|"low"|"medium"|"high"|"xhigh"|"max", Claude 4.6+/5)
+            or integer thinking-token budgets >= 1024 (Claude 4.0/4.5). A list
+            runs every provider at each level on identical inputs, e.g.
+            thinking=["none", "high"]. See create_eval_config for details.
         description: Optional description recorded in the eval.
         judge_models: Optional override list of judge model IDs.
         documents: Doc paths used to ground auto-generated datasets (PDFs/markdown).
@@ -1471,6 +1489,7 @@ async def run_evaluation_and_report(
             "judge": judge,
             "user_id": uid,
             "prompts": prompts,
+            "thinking": thinking,
             "description": description,
             "judge_models": judge_models,
         })

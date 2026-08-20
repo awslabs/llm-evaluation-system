@@ -60,7 +60,13 @@ dependencies = [
     # so thinking gates and effort-aware max_tokens come from the upstream SDK
     # provider instead of Inspect's Converse mirror. See
     # eval_mcp/core/model_routing.py. Same SigV4 credential chain as boto3.
-    "anthropic>=0.80.0",
+    # Floor matches inspect-ai's runtime MIN_VERSION for its anthropic
+    # provider (enforced at generate() time but declared only in inspect's
+    # own extra, same trap as openai above). A fresh resolve picked 0.100.0
+    # and every Claude judge call failed with "requires at least 0.109.1"
+    # while the run reported success with score 0.0 (verified live on
+    # 0.17.0). Bump this floor whenever inspect-ai bumps theirs.
+    "anthropic>=0.109.1",
     "aws-bedrock-token-generator>=1.1.0",
     "click>=8.1.7",
     "rich>=13.7.0",
@@ -96,7 +102,13 @@ dependencies = [
 # only install the extra if you plan to evaluate models from those providers.
 providers = [
     "openai>=2.26.0",
-    "anthropic>=0.80.0",
+    # Floor matches inspect-ai's runtime MIN_VERSION for its anthropic
+    # provider (enforced at generate() time but declared only in inspect's
+    # own extra, same trap as openai above). A fresh resolve picked 0.100.0
+    # and every Claude judge call failed with "requires at least 0.109.1"
+    # while the run reported success with score 0.0 (verified live on
+    # 0.17.0). Bump this floor whenever inspect-ai bumps theirs.
+    "anthropic>=0.109.1",
     "google-genai>=1.69.0",
     "azure-identity",
     "azure-ai-inference",

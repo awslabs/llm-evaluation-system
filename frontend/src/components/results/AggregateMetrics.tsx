@@ -252,18 +252,21 @@ export default function AggregateMetrics({
                         return (
                           <div
                             key={name}
-                            className="flex items-baseline gap-2 border bg-ink px-2 py-1"
+                            className="flex min-w-0 items-baseline gap-2 border bg-ink px-2 py-1"
                             style={{ borderColor: scoreColor(value) }}
-                            title={info.description}
+                            title={`${info.label} — ${info.description}`}
                           >
-                            <span className="font-mono text-[10px] uppercase tracking-eyebrow text-bone">
+                            {/* Name + methodology share one shrinkable span so
+                                long scorer names truncate instead of shoving
+                                the value into (and past) the chip border. */}
+                            <span className="min-w-0 flex-1 truncate font-mono text-[10px] uppercase tracking-eyebrow text-bone">
                               {info.label}
-                            </span>
-                            <span className="font-mono text-[10px] text-bone-mute">
-                              {info.short}
+                              <span className="ml-2 normal-case text-bone-mute">
+                                {info.short}
+                              </span>
                             </span>
                             <span
-                              className="ml-auto font-sans text-xs font-medium tabular-nums"
+                              className="flex-shrink-0 font-sans text-xs font-medium tabular-nums"
                               style={{ color: scoreColor(value) }}
                             >
                               {(value * 100).toFixed(0)}%

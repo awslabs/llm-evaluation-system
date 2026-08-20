@@ -135,3 +135,34 @@ def test_gpt5_reasoning_effort_emitted_on_converse() -> None:
     api.model_name = "openai.gpt-oss-120b-1:0"
     fields = BedrockAPI.reasoning_config(api, GenerateConfig(reasoning_effort="low"))
     assert fields == {"reasoning_effort": "low"}
+
+
+# ----- max-effort output ceiling + read timeout -----
+
+
+def test_max_effort_requests_model_ceiling() -> None:
+    """At max/xhigh effort, Claude 4.6+/5 must request their true 128k output
+    ceiling — the 64k heuristic truncated max-effort thinking mid-reasoning."""
+    import eval_mcp.inspect_patches  # noqa: F401
+    from inspect_ai.model import GenerateConfig
+    from inspect_ai.model._providers.anthropic import AnthropicAPI
+
+    api = object.__new__(AnthropicAPI)
+    api.model_name = "bedrock/global.anthropic.claude-sonnet-5"
+    api.service = "bedrock"
+    for eff in ("xhigh", "max"):
+        assert AnthropicAPI.max_tokens_for_config(api, GenerateConfig(reasoning_effort=eff)) == 128_000
+    # lower efforts keep upstream's sizing
+    assert AnthropicAPI.max_tokens_for_config(api, GenerateConfig(reasoning_effort="high")) < 128_000
+
+
+def test_max_effort_ceiling_respects_smaller_models() -> None:
+    """Models whose real cap is below 128k must not be bumped past it."""
+    import eval_mcp.inspect_patches  # noqa: F401
+    from inspect_ai.model import GenerateConfig
+    from inspect_ai.model._providers.anthropic import AnthropicAPI
+
+    api = object.__new__(AnthropicAPI)
+    api.model_name = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    api.service = "bedrock"
+    assert AnthropicAPI.max_tokens_for_config(api, GenerateConfig(reasoning_effort="max")) == 64_000

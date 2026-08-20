@@ -58,7 +58,70 @@ def apply_inspect_patches() -> None:
     _patch_bedrock_default_max_tokens()
     _patch_bedrock_gpt5_reasoning_effort()
     _patch_bedrock_redacted_reasoning()
+    _patch_bedrock_read_timeout()
+    _patch_anthropic_max_effort_ceiling()
     _applied = True
+
+
+def _patch_bedrock_read_timeout() -> None:
+    """Raise the Bedrock provider's 60s HTTP read timeout for reasoning runs.
+
+    Converse calls are non-streaming: zero bytes flow while a model thinks,
+    and max-effort GPT-5.x on hard problems reasons for minutes — verified
+    live, 5/10 AIME samples died on ReadTimeoutError at the default 60s.
+    Bump the default to 30 minutes; an explicit ``read_timeout`` model arg
+    still wins. Remove if upstream moves Converse to streaming.
+    """
+    try:
+        from inspect_ai.model._providers.bedrock import BedrockAPI
+    except Exception as exc:  # pragma: no cover - import shape changed upstream
+        logger.warning("Could not patch Bedrock read timeout (%s).", exc)
+        return
+
+    original_init = BedrockAPI.__init__
+
+    def _init_with_generous_timeout(self, *init_args, **model_args):
+        explicit = "read_timeout" in model_args
+        original_init(self, *init_args, **model_args)
+        if not explicit:
+            self.read_timeout = 1800
+
+    BedrockAPI.__init__ = _init_with_generous_timeout
+
+
+def _patch_anthropic_max_effort_ceiling() -> None:
+    """Request the model's true output ceiling at max/xhigh effort.
+
+    Inspect's native anthropic provider sizes max_tokens as 32k base + 32k
+    for max/xhigh effort = 64k — half of what Claude 4.6+/5 actually allow
+    (128k), even though the same function clamps against the correct family
+    caps a few lines later. On hard problems, max-effort thinking exhausts
+    64k mid-reasoning and the sample silently scores 0 (verified live: 4/10
+    AIME hard-tail samples). Bump the request to the 128k family ceiling for
+    the models that have it, using the provider's own version predicates —
+    no model-name table. Inspect auto-streams at >=8192 tokens, so large
+    ceilings are safe. Remove when upstream requests its own cap.
+    """
+    try:
+        from inspect_ai.model._providers.anthropic import AnthropicAPI
+    except Exception as exc:  # pragma: no cover - import shape changed upstream
+        logger.warning("Could not patch Anthropic max-effort ceiling (%s).", exc)
+        return
+
+    original = AnthropicAPI.max_tokens_for_config
+
+    def _max_tokens_at_model_ceiling(self, config):
+        result = original(self, config)
+        if result is None:
+            return result
+        effort = self.effort_from_reasoning_effort(config)
+        if effort in ("xhigh", "max") and (
+            self.is_claude_frontier() or self.is_claude_3_7()
+        ):
+            return max(result, 128_000)
+        return result
+
+    AnthropicAPI.max_tokens_for_config = _max_tokens_at_model_ceiling
 
 
 # When a request asks for more output tokens than the model allows, Bedrock's

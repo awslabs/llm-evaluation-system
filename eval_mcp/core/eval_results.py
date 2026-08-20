@@ -6,10 +6,12 @@ comparison API can serve directly without re-parsing.
 
 import json
 import logging
+import re
 import os
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from inspect_ai._view.common import list_eval_logs_async
 from inspect_ai.log import read_eval_log_async
@@ -318,6 +320,23 @@ def _build_groups_from_headers(headers: list[dict]) -> dict:
     return {"groups": groups}
 
 
+def _row_key(sample_id: str, log_ids: set[str]) -> str:
+    """Row-alignment key for a sample across a run's per-model logs.
+
+    Inspect uniquifies sample ids per model within a multi-model run by
+    appending ``_<n>`` (e.g. ``abc123`` in the first model's log, ``abc123_1``
+    in the second). Keying rows by the raw id therefore splits every sample
+    into one row per model with a single filled column. Strip the suffix so
+    rows align — but only when the stripped form isn't itself a distinct
+    sample id in the same log (a dataset whose real ids end in ``_1`` must
+    not collapse two different samples into one row).
+    """
+    m = re.match(r"^(?P<base>.+)_\d+$", sample_id)
+    if m and m["base"] not in log_ids:
+        return m["base"]
+    return sample_id
+
+
 def _build_detail_from_logs(
     group_id: str,
     group_logs: list[dict],
@@ -350,8 +369,9 @@ def _build_detail_from_logs(
             column_key = f"{log.get('task', '')}/{log['model']}"
         else:
             column_key = log["model"]
+        log_ids = {s["id"] for s in log.get("samples", [])}
         for sample in log.get("samples", []):
-            sid = sample["id"]
+            sid = _row_key(sample["id"], log_ids)
             if sid not in samples_by_id:
                 entry: dict = {
                     "id": sid,
@@ -787,6 +807,53 @@ def _relabel_score_only_groups(groups_response: dict, user_dir: Path) -> None:
                 group["scoreOnly"] = True
         except Exception:
             continue
+
+
+async def build_merged_detail(user_id: str, parts: list[tuple[str, str]]) -> Optional[dict]:
+    """Build one comparison detail spanning several run groups.
+
+    ``parts`` is [(group_id, label), ...]. Each part's logs are relabeled to
+    the synthetic task name ``eval_<n>`` and the label lands in the detail's
+    ``variants`` map as a thinking level — so the existing multi-column
+    comparison UI (column keys, effort badges, per-sample grid) renders a
+    cross-run view with no frontend changes. Built for prebuilt-benchmark
+    effort comparisons, where Inspect's --reasoning-effort is global per run
+    and each effort level necessarily lands in its own run group. Sample ids
+    must match across parts (same benchmark + limit + shuffle settings) for
+    rows to align.
+    """
+    log_dir = get_user_log_dir(user_id)
+    user_dir = get_user_dir(user_id)
+    headers = await _read_log_headers(log_dir)
+
+    group_logs: list[dict] = []
+    all_files: list[str] = []
+    task_names: dict[str, str] = {}
+    for i, (gid, _label) in enumerate(parts):
+        part_headers = [h for h in headers if (h.get("run_id") or h["file"]) == gid]
+        if not part_headers:
+            return None
+        for h in part_headers:
+            h = dict(h)
+            task_names[h["file"]] = f"eval_{i + 1}"
+            h["task"] = f"eval_{i + 1}"
+            group_logs.append(h)
+            all_files.append(h["file"])
+
+    full_logs = await _read_full_logs(all_files)
+    if not full_logs:
+        return None
+    for fl in full_logs:
+        fl["task"] = task_names.get(fl["file"], fl.get("task", ""))
+
+    merged_id = "+".join(f"{gid}:{label}" for gid, label in parts)
+    detail = _build_detail_from_logs(merged_id, group_logs, full_logs, user_dir)
+    detail["variants"] = {
+        f"eval_{i + 1}": {"thinking": label} for i, (_gid, label) in enumerate(parts)
+    }
+    detail["thinking"] = [label for _gid, label in parts]
+    detail["mergedGroups"] = [gid for gid, _label in parts]
+    return detail
 
 
 async def precompute_eval_results(user_id: str, force: bool = False) -> None:

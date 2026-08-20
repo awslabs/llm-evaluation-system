@@ -193,6 +193,20 @@ def _candidates(model_id: str) -> list[str]:
         if dated:
             out.append(f"bedrock_mantle/{dated['base']}")
 
+    # OpenAI models served on bedrock-runtime via CRIS profiles
+    # ("bedrock/global.openai.gpt-5.6-terra"). LiteLLM has no runtime-form key
+    # for these, but AWS documents identical per-token pricing on both
+    # endpoints, so map onto the Mantle key. Converse's usage.outputTokens
+    # DOES include these models' (redacted) reasoning tokens — verified
+    # against sample logs (output tokens scale with redacted-block volume,
+    # e.g. 9,029 tokens for a ~420-token visible answer) — so costs computed
+    # from it are accurate, not floors.
+    runtime_openai = re.match(
+        r"^bedrock/(?:global\.|us\.|eu\.|apac\.)?(?P<base>openai\..+)$", model_id
+    )
+    if runtime_openai:
+        out.append(f"bedrock_mantle/{runtime_openai['base']}")
+
     bare = model_id
     for pfx in _PROVIDER_PREFIXES:
         if bare.startswith(pfx):

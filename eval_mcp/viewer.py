@@ -47,6 +47,24 @@ def create_viewer_app() -> FastAPI:
         from eval_mcp.core.user_storage import load_eval_detail
 
         user_id = os.environ.get("EVAL_MCP_USER", "local")
+
+        # Cross-run merge: "id1:label1+id2:label2" renders several run groups
+        # as one comparison page (columns labeled per part). Used for prebuilt
+        # benchmark effort comparisons, where each effort level is its own run.
+        # Browsers decode "+" in query strings as a space — accept both.
+        group_id = group_id.replace(" ", "+")
+        if "+" in group_id:
+            from eval_mcp.core.eval_results import build_merged_detail
+
+            parts = []
+            for raw in group_id.split("+"):
+                gid, _, label = raw.partition(":")
+                parts.append((gid, label or gid[:8]))
+            merged = await build_merged_detail(user_id, parts)
+            if merged is None:
+                raise HTTPException(status_code=404, detail="Merged group not found")
+            return merged
+
         data = load_eval_detail(user_id, group_id)
         if data:
             return data

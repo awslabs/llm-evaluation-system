@@ -368,6 +368,26 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
         providers = args.get("providers") or []
         limit = args.get("limit")
         task_args = args.get("task_args") or {}
+        reasoning_effort = args.get("reasoning_effort")
+        if reasoning_effort is not None:
+            allowed = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+            if reasoning_effort not in allowed:
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": f"Invalid reasoning_effort '{reasoning_effort}'. "
+                             f"Choose from: {', '.join(allowed)}",
+                }))]
+            from eval_mcp.core.model_routing import supports_thinking_control
+            unsupported = [m for m in providers if not supports_thinking_control(m)]
+            if unsupported:
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": (
+                        f"reasoning_effort is not controllable for: {unsupported}. "
+                        "Their route silently ignores it, which would mislabel "
+                        "the run."
+                    ),
+                }))]
 
         if not user_id:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": "user_id is required"}))]
@@ -476,10 +496,15 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
         env["AWS_REGION"] = region
         env["AWS_DEFAULT_REGION"] = region
 
+        # Claude targets ride the native anthropic provider (bedrock-runtime
+        # Messages API) so reasoning_effort actually reaches them — the
+        # Converse provider drops it for Claude 5. Log names are normalized
+        # back at results ingestion (eval_mcp/core/model_routing.py).
+        from eval_mcp.core.model_routing import to_native
         cmd: List[str] = [
             *_INSPECT_CMD, "eval",
             f"inspect_evals/{task}",
-            "--model", ",".join(providers),
+            "--model", ",".join(to_native(m) for m in providers),
             "--adaptive-connections", "true",
             "--no-log-images",
             "--no-fail-on-error",
@@ -492,6 +517,10 @@ async def handle_run_benchmark(args: Dict[str, Any]) -> List[TextContent]:
         # their solver.
         if limit:
             cmd.extend(["--limit", str(int(limit))])
+        if reasoning_effort is not None:
+            # Global for the run: applies to every provider. Run the benchmark
+            # once per effort level to compare levels on identical inputs.
+            cmd.extend(["--reasoning-effort", reasoning_effort])
         # Inject the resolved sandbox type for code-execution benchmarks (unless
         # the caller already specified one via task_args).
         if sandbox_override:

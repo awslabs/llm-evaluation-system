@@ -62,6 +62,27 @@ function scoreBg(score: number): string {
   return `hsla(${h}, 35%, 30%, 0.16)`;
 }
 
+
+type VariantInfo = { prompt?: string; thinking?: string | number };
+
+// Column label for comparison runs. Thinking (reasoning-effort) variants
+// label as "effort <level>", prompt variants keep the P<n> shorthand, and
+// crossed runs show both. Falls back to P<n> for runs without a variants map.
+function getVariantLabel(
+  columnKey: string,
+  variants: Record<string, VariantInfo> | undefined,
+  includePrompt: boolean,
+): string | null {
+  const idx = getPromptIndex(columnKey);
+  if (idx === null) return null;
+  const task = columnKey.slice(0, columnKey.indexOf("/"));
+  const v = variants?.[task];
+  const parts: string[] = [];
+  if (includePrompt && (!v || v.prompt)) parts.push(`P${idx + 1}`);
+  if (v?.thinking !== undefined) parts.push(`effort ${v.thinking}`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 function getModelFromKey(columnKey: string): string {
   if (columnKey.startsWith("eval_")) {
     const sep = columnKey.indexOf("/");
@@ -74,6 +95,7 @@ interface ComparisonGridProps {
   models: string[];
   samples: Sample[];
   prompts?: string[];
+  variants?: Record<string, VariantInfo>;
   selectedCell: SelectedCell | null;
   onCellClick: (sampleId: string, model: string) => void;
 }
@@ -81,6 +103,7 @@ interface ComparisonGridProps {
 export default function ComparisonGrid({
   models,
   samples,
+  variants,
   selectedCell,
   onCellClick,
 }: ComparisonGridProps) {
@@ -112,7 +135,7 @@ export default function ComparisonGrid({
               </div>
             </th>
             {models.map((model) => {
-              const promptIdx = getPromptIndex(model);
+              const variantLabel = getVariantLabel(model, variants, true);
               const modelName = getModelFromKey(model);
               return (
                 <th
@@ -126,9 +149,9 @@ export default function ComparisonGrid({
                   >
                     {formatModelName(modelName)}
                   </div>
-                  {promptIdx !== null && (
+                  {variantLabel !== null && (
                     <div className="mt-1 font-mono text-[10px] text-ember">
-                      P{promptIdx + 1}
+                      {variantLabel}
                     </div>
                   )}
                 </th>

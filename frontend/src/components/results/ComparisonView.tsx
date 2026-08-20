@@ -75,6 +75,7 @@ interface ComparisonData {
   stats: Record<string, Record<string, unknown>>;
   pipeline?: PipelineStage[];
   prompts?: string[];
+  variants?: Record<string, { prompt?: string; thinking?: string | number }>;
 }
 
 interface SelectedCell {
@@ -154,6 +155,7 @@ export default function ComparisonView({
           sampleCount={data.samples.length}
           pipeline={data.pipeline}
           prompts={data.prompts}
+          variants={data.variants}
         />
         {data.prompts && data.prompts.length > 0 && (
           <details className="group mb-4 border border-rule bg-ink-elev">
@@ -183,6 +185,7 @@ export default function ComparisonView({
           models={data.models}
           samples={data.samples}
           prompts={data.prompts}
+          variants={data.variants}
           selectedCell={selectedCell}
           onCellClick={(sampleId, model) =>
             setSelectedCell(

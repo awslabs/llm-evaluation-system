@@ -40,6 +40,27 @@ function getPromptIndex(columnKey: string): number | null {
   return null;
 }
 
+
+type VariantInfo = { prompt?: string; thinking?: string | number };
+
+// Column label for comparison runs. Thinking (reasoning-effort) variants
+// label as "effort <level>", prompt variants keep the P<n> shorthand, and
+// crossed runs show both. Falls back to P<n> for runs without a variants map.
+function getVariantLabel(
+  columnKey: string,
+  variants: Record<string, VariantInfo> | undefined,
+  includePrompt: boolean,
+): string | null {
+  const idx = getPromptIndex(columnKey);
+  if (idx === null) return null;
+  const task = columnKey.slice(0, columnKey.indexOf("/"));
+  const v = variants?.[task];
+  const parts: string[] = [];
+  if (includePrompt && (!v || v.prompt)) parts.push(`P${idx + 1}`);
+  if (v?.thinking !== undefined) parts.push(`effort ${v.thinking}`);
+  return parts.length ? parts.join(" · ") : null;
+}
+
 function getModelFromKey(columnKey: string): string {
   if (columnKey.startsWith("eval_")) {
     const sep = columnKey.indexOf("/");
@@ -107,6 +128,7 @@ interface AggregateMetricsProps {
   sampleCount: number;
   pipeline?: PipelineStage[];
   prompts?: string[];
+  variants?: Record<string, VariantInfo>;
 }
 
 
@@ -122,6 +144,7 @@ export default function AggregateMetrics({
   sampleCount,
   pipeline,
   prompts,
+  variants,
 }: AggregateMetricsProps) {
   const [expandedCriteria, setExpandedCriteria] = useState<Set<string>>(
     new Set(),
@@ -172,9 +195,9 @@ export default function AggregateMetrics({
                     ? "Agent evaluation"
                     : formatModelName(getModelFromKey(model))}
                 </span>
-                {prompts && getPromptIndex(model) !== null && (
+                {getVariantLabel(model, variants, !!prompts) !== null && (
                   <span className="font-mono text-[10px] flex-shrink-0 text-ember">
-                    P{getPromptIndex(model)! + 1}
+                    {getVariantLabel(model, variants, !!prompts)}
                   </span>
                 )}
               </div>
@@ -466,9 +489,9 @@ export default function AggregateMetrics({
                       >
                         {formatModelName(getModelFromKey(model))}
                       </span>
-                      {getPromptIndex(model) !== null && (
+                      {getVariantLabel(model, variants, true) !== null && (
                         <span className="font-mono text-[10px] text-ember">
-                          P{getPromptIndex(model)! + 1}
+                          {getVariantLabel(model, variants, true)}
                         </span>
                       )}
                     </span>

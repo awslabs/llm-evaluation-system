@@ -74,21 +74,21 @@ def test_unrelated_filter_excludes_mantle():
 # ---------------------------------------------------------------------------
 
 
-def test_static_fallback_covers_gpt56_family():
-    """The offline fallback must list the current GPT-5.6 variants.
+def test_static_fallback_is_mantle_exclusives_only():
+    """The offline fallback lists ONLY Mantle-exclusive models.
 
-    This list is only consulted when the live catalog is unreachable, so it can
-    rot silently. It's asserted here because a user with no network still gets
-    *some* usable set of IDs — and a fallback that omits the newest models is
-    how we ended up telling users gpt-5.6-sol didn't exist.
+    Policy: bedrock-runtime is the default path. The GPT-5.6 family has
+    runtime CRIS profiles and is surfaced by list_bedrock_models, so listing
+    it here would reintroduce duplicate competing ids for the same weights.
+    The fallback exists so a user whose Mantle catalog is unreachable still
+    sees the models that ONLY Mantle serves (GPT-5.4/5.5, Daybreak).
     """
     ids = {m["id"] for m in ep.EXTERNAL_PROVIDERS["bedrock-mantle"]["models"]}
     assert {
-        "openai/bedrock/gpt-5.6-sol",
-        "openai/bedrock/gpt-5.6-terra",
-        "openai/bedrock/gpt-5.6-luna",
         "openai/bedrock/gpt-5.5",
+        "openai/bedrock/gpt-5.4",
     } <= ids
+    assert not any("gpt-5.6" in i for i in ids)
 
 
 # ---------------------------------------------------------------------------

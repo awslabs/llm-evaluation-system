@@ -128,6 +128,84 @@ def _validate_scorers(scorers: Optional[List[str]]) -> List[str]:
     return ordered
 
 
+# Adaptive-thinking effort levels understood by Inspect AI's Bedrock provider
+# (Claude 4.6+ / 5). "none" explicitly disables thinking. Integer values are
+# accepted too and map to a `reasoning_tokens` budget for the older
+# budget-based thinking models (Claude 4.0/4.5 family).
+THINKING_EFFORTS = ("none", "low", "medium", "high", "xhigh", "max")
+
+# Anthropic's minimum thinking budget; smaller budgets are rejected by the API.
+_MIN_THINKING_TOKENS = 1024
+
+
+def _validate_thinking(thinking: Any) -> Optional[List[Any]]:
+    """Normalize/validate the ``thinking`` argument.
+
+    Accepts a single value or a list. Each value is either an effort string
+    from ``THINKING_EFFORTS`` or an integer token budget (>= 1024). Returns
+    None when nothing was requested, so callers can keep today's task-file
+    shape byte-for-byte when the feature is unused. Duplicates raise —
+    two identical variants would silently double the eval's cost.
+    """
+    if thinking is None:
+        return None
+    values = thinking if isinstance(thinking, list) else [thinking]
+    if not values:
+        return None
+    out: List[Any] = []
+    for v in values:
+        if isinstance(v, bool):
+            raise ValueError(
+                f"thinking accepts effort strings {THINKING_EFFORTS} or integer "
+                f"token budgets, not booleans (got {v})"
+            )
+        if isinstance(v, (int, float)):
+            iv = int(v)
+            if iv < _MIN_THINKING_TOKENS:
+                raise ValueError(
+                    f"thinking token budget must be >= {_MIN_THINKING_TOKENS}, got {iv}"
+                )
+            out.append(iv)
+        elif isinstance(v, str):
+            s = v.strip().lower()
+            if s.isdigit():
+                iv = int(s)
+                if iv < _MIN_THINKING_TOKENS:
+                    raise ValueError(
+                        f"thinking token budget must be >= {_MIN_THINKING_TOKENS}, got {iv}"
+                    )
+                out.append(iv)
+            elif s in THINKING_EFFORTS:
+                out.append(s)
+            else:
+                raise ValueError(
+                    f"Unknown thinking level '{v}'. Use one of "
+                    f"{', '.join(THINKING_EFFORTS)} or an integer token budget "
+                    f">= {_MIN_THINKING_TOKENS}."
+                )
+        else:
+            raise ValueError(
+                f"thinking accepts effort strings {THINKING_EFFORTS} or integer "
+                f"token budgets, got {type(v).__name__}"
+            )
+    if len(set(out)) != len(out):
+        raise ValueError(f"Duplicate thinking levels: {out}")
+    return out
+
+
+def _thinking_generate_args(level: Any) -> str:
+    """Render the ``generate()`` kwargs for one thinking level.
+
+    Effort strings ride ``reasoning_effort`` (adaptive thinking, Claude 4.6+);
+    integers ride ``reasoning_tokens`` (budget thinking, Claude 4.0/4.5).
+    "none" is passed explicitly rather than omitted so the task file documents
+    the intent and stays correct if a provider ever defaults thinking on.
+    """
+    if isinstance(level, int):
+        return f"reasoning_tokens={level}"
+    return f"reasoning_effort={level!r}"
+
+
 def _render_scorer_expression(scorers: List[str]) -> str:
     """Render the value passed to ``Task(scorer=...)``."""
     exprs = [SCORER_REGISTRY[s]["expr"] for s in scorers]
@@ -205,6 +283,7 @@ def build_config_json(
     prompts: Optional[List[str]] = None,
     scorers: Optional[List[str]] = None,
     score_only: bool = False,
+    thinking: Optional[List[Any]] = None,
 ) -> dict:
     """Build the JSON config that the task file will load.
 
@@ -223,6 +302,8 @@ def build_config_json(
     }
     if prompts and len(prompts) > 1:
         config["prompts"] = prompts
+    if thinking:
+        config["thinking"] = thinking
     if score_only:
         config["score_only"] = True
 
@@ -302,12 +383,15 @@ def eval_task():
     )
 '''
 
-PROMPT_TASK_TEMPLATE = '''
+# One numbered task per variant — a variant being a (prompt, thinking) pair.
+# ``solver_chain`` already carries the prompt_template()/generate(...) calls
+# for that variant, so this template stays shape-identical to SINGLE_TASK.
+VARIANT_TASK_TEMPLATE = '''
 @task
 def eval_{index}():
     return Task(
         dataset=json_dataset(DATASET_PATH, FieldSpec(input="question", target="golden_answer"{field_spec_metadata})),
-        solver=[prompt_template({prompt_repr}), {solver_chain}],
+        solver=[{solver_chain}],
         scorer={scorer_expr},
     )
 '''
@@ -323,6 +407,7 @@ def create_inspect_task_file(
     prompts: Optional[List[str]] = None,
     scorers: Optional[List[str]] = None,
     score_only: bool = False,
+    thinking: Optional[List[Any]] = None,
 ) -> tuple[str, dict]:
     """Create task file code and config JSON.
 
@@ -331,13 +416,25 @@ def create_inspect_task_file(
     each sample's ``actual_output`` metadata field is written directly
     into ``state.output`` so scorers run against the pre-generated answer.
 
+    ``thinking`` turns the run into a thinking-level comparison: one task
+    per level (crossed with ``prompts`` when both are given), each level
+    rendered as ``generate(reasoning_effort=...)`` / ``generate(
+    reasoning_tokens=...)``. Incompatible with ``score_only`` — there is
+    no model call to configure.
+
     Returns:
         (task_code, config_dict) — caller writes both to disk.
     """
     scorers = _validate_scorers(scorers)
+    thinking = _validate_thinking(thinking)
+    if thinking and score_only:
+        raise ValueError(
+            "thinking cannot be combined with a score-only dataset: no "
+            "candidate model is invoked, so there is no thinking to configure."
+        )
     config_data = build_config_json(
         dataset_path, providers, judge_config, description, prompts, scorers,
-        score_only=score_only,
+        score_only=score_only, thinking=thinking,
     )
 
     extra_imports_parts: List[str] = []
@@ -384,19 +481,25 @@ def create_inspect_task_file(
     # - default: plain generate.
     # Plain generate(). The per-model token ceiling is handled by importing
     # eval_mcp.inspect_patches above (Bedrock omits max_tokens → model default),
-    # not by a custom solver.
-    if score_only:
-        solver_chain = "static_output_solver()"
-    elif rag_enabled:
-        solver_chain = "rag_prompt_solver(), generate()"
-    else:
-        solver_chain = "generate()"
+    # not by a custom solver. A thinking level rides as generate() config
+    # kwargs, which Inspect merges over the model's active GenerateConfig.
+    def _solver_chain(thinking_level: Any = None) -> str:
+        if score_only:
+            return "static_output_solver()"
+        gen = (
+            f"generate({_thinking_generate_args(thinking_level)})"
+            if thinking_level is not None
+            else "generate()"
+        )
+        return f"rag_prompt_solver(), {gen}" if rag_enabled else gen
 
     mode_doc = ""
     if score_only:
         mode_doc = "\nMode: score-only (no candidate model invoked)."
     elif rag_enabled:
         mode_doc = "\nMode: RAG (retrieval_context injected into prompt)."
+    if thinking:
+        mode_doc += "\nThinking levels compared: " + ", ".join(str(t) for t in thinking)
 
     parts: List[str] = []
     parts.append(TASK_FILE_BASE.format(
@@ -413,23 +516,45 @@ def create_inspect_task_file(
     # candidate prompt at a time); single-prompt evals created from the
     # chat agent path hit the same latent bug.
     has_custom_prompt = bool(prompts) and any(p and p != "{question}" for p in prompts)
-    if has_custom_prompt:
-        for i, prompt in enumerate(prompts):
-            # prompt_template() uses {prompt} as the placeholder for input text
-            normalized = prompt.replace("{question}", "{prompt}")
-            parts.append(PROMPT_TASK_TEMPLATE.format(
-                index=i + 1,
-                prompt_repr=repr(normalized),
-                scorer_expr=scorer_expr,
-                field_spec_metadata=field_spec_metadata,
-                solver_chain=solver_chain,
-            ))
-    else:
+
+    # Variant grid: (prompt × thinking). None means "axis unused" so a run
+    # with neither collapses to the single unnamed task (today's shape), and
+    # a single thinking level with no custom prompt stays a single task too —
+    # the level just lands in its generate() call.
+    prompt_axis: List[Optional[str]] = list(prompts) if has_custom_prompt else [None]
+    thinking_axis: List[Any] = list(thinking) if thinking else [None]
+    variant_grid = [(p, t) for p in prompt_axis for t in thinking_axis]
+
+    if len(variant_grid) == 1 and not has_custom_prompt:
         parts.append(SINGLE_TASK_TEMPLATE.format(
             scorer_expr=scorer_expr,
             field_spec_metadata=field_spec_metadata,
-            solver_chain=solver_chain,
+            solver_chain=_solver_chain(thinking_axis[0]),
         ))
+    else:
+        variants: Dict[str, Dict[str, Any]] = {}
+        for i, (prompt, level) in enumerate(variant_grid):
+            chain = _solver_chain(level)
+            if prompt is not None:
+                # prompt_template() uses {prompt} as the placeholder for input text
+                normalized = prompt.replace("{question}", "{prompt}")
+                chain = f"prompt_template({normalized!r}), {chain}"
+            parts.append(VARIANT_TASK_TEMPLATE.format(
+                index=i + 1,
+                scorer_expr=scorer_expr,
+                field_spec_metadata=field_spec_metadata,
+                solver_chain=chain,
+            ))
+            variant: Dict[str, Any] = {}
+            if prompt is not None:
+                variant["prompt"] = prompt
+            if level is not None:
+                variant["thinking"] = level
+            variants[f"eval_{i + 1}"] = variant
+        # Task-name → axis-values map, so results/report layers can label
+        # columns (e.g. "thinking=high") instead of showing bare eval_N.
+        if any(v for v in variants.values()):
+            config_data["variants"] = variants
 
     return "".join(parts), config_data
 
@@ -462,6 +587,32 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             scorers = _validate_scorers(scorers_arg)
         except ValueError as e:
             return [TextContent(type="text", text=json.dumps({"success": False, "error": str(e)}))]
+
+        try:
+            thinking = _validate_thinking(args.get("thinking"))
+        except ValueError as e:
+            return [TextContent(type="text", text=json.dumps({"success": False, "error": str(e)}))]
+
+        # Fail loud instead of silently no-oping: a thinking comparison on a
+        # provider whose route drops reasoning_effort would emit identical
+        # runs labeled as different efforts.
+        if thinking:
+            from eval_mcp.core.model_routing import supports_thinking_control
+            unsupported = [
+                p for p in (providers or []) if not supports_thinking_control(p)
+            ]
+            if unsupported:
+                return [TextContent(type="text", text=json.dumps({
+                    "success": False,
+                    "error": (
+                        f"thinking is not controllable for: {unsupported}. "
+                        "These models' current route silently ignores "
+                        "reasoning effort, so the comparison would be "
+                        "meaningless. Supported: Claude on Bedrock, GPT-5.x, "
+                        "gpt-oss, Nova, Mantle openai/bedrock/* models, and "
+                        "external openai/anthropic/google providers."
+                    ),
+                }))]
 
         judge_data = get_judge_by_name(user_id, judge_name)
         if not judge_data:
@@ -507,6 +658,15 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
                 rows_without_ao_indices.append(i)
 
         score_only = rows_with_ao > 0 and not rows_without_ao_indices
+        if score_only and thinking:
+            return [TextContent(type="text", text=json.dumps({
+                "success": False,
+                "error": (
+                    "thinking cannot be used with a score-only dataset (every "
+                    "sample has actual_output, so no candidate model is invoked "
+                    "and there is no thinking to configure)."
+                ),
+            }))]
         if rows_with_ao > 0 and rows_without_ao_indices:
             return [TextContent(type="text", text=json.dumps({
                 "success": False,
@@ -585,6 +745,7 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             prompts=prompts,
             scorers=scorers,
             score_only=score_only,
+            thinking=thinking,
         )
 
         # Write both files
@@ -607,6 +768,8 @@ async def handle_create_eval_config(args: Dict[str, Any]) -> List[TextContent]:
             },
             "nextStep": f"Run evaluation: run_evaluation(configName='{config_name}')",
         }
+        if thinking:
+            result["summary"]["thinking"] = thinking
         if score_only:
             result["summary"]["mode"] = "score-only"
 

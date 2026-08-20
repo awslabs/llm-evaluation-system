@@ -360,3 +360,106 @@ def test_generated_config_imports_the_jury_module():
     assert "from eval_mcp.scorers.jury import jury_scorer" in code
     assert 'jury_scorer(CONFIG["criteria"], CONFIG["judge_models"], ' in code
     assert 'CONFIG["system_prompt"], CONFIG.get("mantle_regions"))' in code
+
+
+# ----- thinking-level comparison -----
+
+
+def _render_thinking(jc: JudgeConfig, thinking=None, prompts=None, scorers=None) -> tuple[str, dict]:
+    return create_inspect_task_file(
+        dataset_path="/tmp/ds.json",
+        providers=["mockllm/model"],
+        config_name="t",
+        config_dir="/tmp",
+        judge_config=jc,
+        thinking=thinking,
+        prompts=prompts,
+        scorers=scorers,
+    )
+
+
+def test_thinking_comparison_emits_task_per_level(jc: JudgeConfig) -> None:
+    code, cfg = _render_thinking(jc, thinking=["none", "high"])
+    assert "def eval_1" in code
+    assert "def eval_2" in code
+    assert "generate(reasoning_effort='none')" in code
+    assert "generate(reasoning_effort='high')" in code
+    assert cfg["thinking"] == ["none", "high"]
+    assert cfg["variants"] == {
+        "eval_1": {"thinking": "none"},
+        "eval_2": {"thinking": "high"},
+    }
+    ast.parse(code)
+
+
+def test_thinking_single_level_stays_single_task(jc: JudgeConfig) -> None:
+    code, cfg = _render_thinking(jc, thinking=["high"])
+    assert "def eval_task" in code
+    assert "def eval_1" not in code
+    assert "solver=[generate(reasoning_effort='high')]" in code
+    assert cfg["thinking"] == ["high"]
+    assert "variants" not in cfg
+    ast.parse(code)
+
+
+def test_thinking_integer_budget_uses_reasoning_tokens(jc: JudgeConfig) -> None:
+    code, _ = _render_thinking(jc, thinking=["none", 16384])
+    assert "generate(reasoning_effort='none')" in code
+    assert "generate(reasoning_tokens=16384)" in code
+    ast.parse(code)
+
+
+def test_thinking_crossed_with_prompts(jc: JudgeConfig) -> None:
+    code, cfg = _render_thinking(
+        jc,
+        thinking=["none", "high"],
+        prompts=["Prompt A: {question}", "Prompt B: {question}"],
+    )
+    # 2 prompts x 2 levels = 4 tasks
+    for i in range(1, 5):
+        assert f"def eval_{i}" in code
+    assert code.count("prompt_template(") == 4
+    assert code.count("generate(reasoning_effort='none')") == 2
+    assert code.count("generate(reasoning_effort='high')") == 2
+    assert cfg["variants"]["eval_1"] == {"prompt": "Prompt A: {question}", "thinking": "none"}
+    assert cfg["variants"]["eval_4"] == {"prompt": "Prompt B: {question}", "thinking": "high"}
+    ast.parse(code)
+
+
+def test_thinking_invalid_level_raises(jc: JudgeConfig) -> None:
+    with pytest.raises(ValueError, match="Unknown thinking level"):
+        _render_thinking(jc, thinking=["ultra"])
+
+
+def test_thinking_budget_below_minimum_raises(jc: JudgeConfig) -> None:
+    with pytest.raises(ValueError, match=">= 1024"):
+        _render_thinking(jc, thinking=[512])
+
+
+def test_thinking_duplicate_levels_raise(jc: JudgeConfig) -> None:
+    with pytest.raises(ValueError, match="Duplicate"):
+        _render_thinking(jc, thinking=["high", "high"])
+
+
+def test_thinking_rejects_score_only(jc: JudgeConfig) -> None:
+    with pytest.raises(ValueError, match="score-only"):
+        create_inspect_task_file(
+            dataset_path="/tmp/ds.json",
+            providers=[],
+            config_name="t",
+            config_dir="/tmp",
+            judge_config=jc,
+            thinking=["high"],
+            score_only=True,
+        )
+
+
+def test_no_thinking_is_byte_identical_to_before(jc: JudgeConfig) -> None:
+    # The feature must be invisible when unused: default render carries no
+    # reasoning kwargs, no thinking config keys, and no variants map.
+    code, cfg = _render(jc)
+    assert "reasoning_effort" not in code
+    assert "reasoning_tokens" not in code
+    assert "thinking" not in cfg
+    assert "variants" not in cfg
+    ast.parse(code)

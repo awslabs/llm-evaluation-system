@@ -268,20 +268,30 @@ async def _validate_providers(providers: List[str]) -> Dict[str, Any]:
         for model_id in runtime_models:
             actual_model_id = model_id.replace("bedrock/", "", 1)
             try:
+                # 32, not lower: GPT-5.x on Converse rejects max_output_tokens
+                # below 16 with a ValidationException that used to be
+                # mislabeled "Invalid model ID" here (verified live on
+                # gpt-5.6-terra). Keep the probe tiny but above every
+                # model family's minimum.
                 runtime_client.converse(
                     modelId=actual_model_id,
                     messages=[{"role": "user", "content": [{"text": "Hi"}]}],
-                    inferenceConfig={"maxTokens": 10},
+                    inferenceConfig={"maxTokens": 32},
                 )
             except Exception as e:
                 error_msg = str(e)
                 if "AccessDeniedException" in error_msg:
                     hint = "Model not enabled in AWS account"
-                elif "ValidationException" in error_msg:
+                elif "ValidationException" in error_msg and (
+                    "model identifier" in error_msg.lower()
+                    or "provided model" in error_msg.lower()
+                ):
                     hint = "Invalid model ID"
                 elif "ResourceNotFoundException" in error_msg:
                     hint = "Model not found"
                 else:
+                    # Don't collapse every ValidationException into "Invalid
+                    # model ID" — parameter rejections carry the real cause.
                     hint = error_msg[:200]
                 failed.append({"model": model_id, "error": hint})
                 logger.warning(f"Provider validation failed for {model_id}: {hint}")
@@ -666,8 +676,12 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
         # Pass models to inspect eval (comma-separated for multiple).
         # Score-only configs invoke no model — Inspect AI supports running
         # without --model when the task's solver never calls generate().
+        # Claude models reroute to Inspect's native anthropic provider here
+        # (bedrock-runtime Messages API; see eval_mcp/core/model_routing.py);
+        # results ingestion maps the log names back to bedrock/<id>.
         if models and not score_only:
-            cmd.extend(["--model", ",".join(models)])
+            from eval_mcp.core.model_routing import to_native
+            cmd.extend(["--model", ",".join(to_native(m) for m in models)])
 
         # Run the evaluation from the user's directory
         process = await asyncio.create_subprocess_exec(
@@ -909,6 +923,25 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 result["viewResults"] = view_results_msg
             return [TextContent(type="text", text=json.dumps(result, indent=2))]
 
+        # Auto-generate the PDF report so every successful run is immediately
+        # downloadable from the viewer's REPORT button — no separate step.
+        # Best-effort: a report failure never fails a successful eval.
+        # run_evaluation_and_report passes generateReport=False because it
+        # writes its own report with caller-supplied context/monthly_volume.
+        report_data: Optional[Dict[str, Any]] = None
+        if run_id and args.get("generateReport", True):
+            try:
+                from eval_mcp.tools.generate_report import handle_generate_report
+                report_result = await handle_generate_report({
+                    "user_id": user_id,
+                    "group_id": run_id,
+                    "context": (config_data or {}).get("description") or None,
+                })
+                report_data = json.loads(report_result[0].text)
+            except Exception as e:
+                logger.warning(f"Auto report generation failed: {e}")
+                report_data = {"success": False, "error": str(e)}
+
         result = {
             "success": True,
             "evalId": eval_id,
@@ -922,8 +955,10 @@ async def handle_run_evaluation(args: Dict[str, Any]) -> List[TextContent]:
                 f"Call generate_report(group_id=\"{run_id}\") to create a PDF "
                 f"report for the user. Pass `context` describing what they "
                 f"were evaluating so the narrative is tailored."
-            ) if run_id else None,
+            ) if run_id and not (report_data or {}).get("success") else None,
         }
+        if report_data is not None:
+            result["report"] = report_data
         if view_results_msg is not None:
             result["viewResults"] = view_results_msg
 

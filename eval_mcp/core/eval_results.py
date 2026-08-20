@@ -14,6 +14,7 @@ from pathlib import Path
 from inspect_ai._view.common import list_eval_logs_async
 from inspect_ai.log import read_eval_log_async
 
+from eval_mcp.core.model_routing import from_native
 from eval_mcp.core.pricing import calculate_cost
 from eval_mcp.core.user_storage import (
     get_user_base_dir,
@@ -119,7 +120,10 @@ async def _read_log_headers(log_dir: str) -> list[dict]:
                 "run_id": log.eval.run_id if log.eval.run_id else None,
                 "task": log.eval.task,
                 "task_file": log.eval.task_file if hasattr(log.eval, "task_file") else None,
-                "model": log.eval.model,
+                # Claude targets run as anthropic/bedrock/<id> inside Inspect
+                # (see eval_mcp/core/model_routing.py) — normalize back to the
+                # user-facing bedrock/<id> so results/pricing/UI are unchanged.
+                "model": from_native(log.eval.model),
                 "status": log.status,
                 "created": log.eval.created,
                 "dataset_samples": log.eval.dataset.samples if log.eval.dataset else 0,
@@ -133,7 +137,7 @@ async def _read_log_headers(log_dir: str) -> list[dict]:
                 usage = {}
                 if log.stats.model_usage:
                     for model_name, mu in log.stats.model_usage.items():
-                        usage[model_name] = {
+                        usage[from_native(model_name)] = {
                             "input_tokens": mu.input_tokens,
                             "output_tokens": mu.output_tokens,
                             "total_tokens": mu.total_tokens,
@@ -160,7 +164,7 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
             entry: dict = {
                 "file": f,
                 "task": log.eval.task,
-                "model": log.eval.model,
+                "model": from_native(log.eval.model),
                 "status": log.status,
                 "samples": [],
             }
@@ -193,7 +197,7 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
                             sample["scores"][scorer_name] = score_data
                     if s.model_usage:
                         sample["model_usage"] = {
-                            k: {"input_tokens": v.input_tokens, "output_tokens": v.output_tokens, "total_tokens": v.total_tokens}
+                            from_native(k): {"input_tokens": v.input_tokens, "output_tokens": v.output_tokens, "total_tokens": v.total_tokens}
                             for k, v in s.model_usage.items()
                         }
                     if hasattr(s, 'events') and s.events:
@@ -208,7 +212,7 @@ async def _read_full_logs(log_files: list[str]) -> list[dict]:
                         for ev in s.events:
                             if type(ev).__name__ == "ModelEvent" and ev.span_id in solver_spans:
                                 if hasattr(ev, "output") and ev.output and ev.output.usage:
-                                    m = ev.model
+                                    m = from_native(ev.model)
                                     if m not in agent_usage:
                                         agent_usage[m] = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
                                     agent_usage[m]["input_tokens"] += ev.output.usage.input_tokens
@@ -729,6 +733,13 @@ def _build_detail_from_logs(
         result["scoreOnly"] = True
     if config_data and config_data.get("prompts"):
         result["prompts"] = config_data["prompts"]
+    # Thinking-level comparisons ride the same multi-task mechanism as prompt
+    # comparisons; surface the levels and the task-name → axis map so the
+    # UI/report can label columns (e.g. "thinking=high") instead of eval_N.
+    if config_data and config_data.get("thinking"):
+        result["thinking"] = config_data["thinking"]
+    if config_data and config_data.get("variants"):
+        result["variants"] = config_data["variants"]
     return result
 
 

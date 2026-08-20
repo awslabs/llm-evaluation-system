@@ -1,21 +1,21 @@
-"""We pass NO max_tokens to any eval; Bedrock applies the model's own default.
+"""No eval hand-tunes max_tokens; the Converse patch discovers each model's max.
 
 Inspect's Bedrock provider injects a constant `max_tokens` when the caller
-passes none — `DEFAULT_MAX_TOKENS = 2048` (`inspect_ai/_util/constants.py`),
-via a hand-coded family table in `_providers/bedrock.py`. On the Converse API
-that overrides a *correct* AWS default: per the API reference, omitting
-`maxTokens` yields "the maximum allowed value for the model". So Inspect turns
-"run to the model's limit" into "stop at 2048", and for reasoning models
-(gpt-oss, GPT-5.x) that produces EMPTY completions — the whole budget goes to
-the reasoning channel — which score 0 while the run reports success.
+passes none — `DEFAULT_MAX_TOKENS = 2048`. And Bedrock's own omitted-maxTokens
+default is NOT "the maximum allowed value" as the AWS docs claim (measured
+live: claude-sonnet-5 defaults to 4096). Either way, long completions and
+reasoning truncate silently while the run reports success.
 
-The fix is to stop Inspect injecting anything, via `eval_mcp.inspect_patches`,
-loaded inside the eval subprocess by `eval_mcp/_inspect_main.py`. There is
-deliberately NO per-model lookup: verified against live Bedrock, LiteLLM's
-advertised limits are wrong for 35 of 38 on-demand models, and no single
-constant works (8192 is rejected by writer.palmyra-vision, whose max is 4096,
-while being too low for gpt-oss). Omitting is the only option that never
-crashes and needs no external data.
+The fix (`eval_mcp.inspect_patches`, loaded inside the eval subprocess by
+`eval_mcp/_inspect_main.py`): default to a deliberately oversized request
+(`_PROBE_MAX_TOKENS`); Bedrock's validation error names the model's true
+ceiling, which is cached and retried. No hand-maintained per-model table —
+verified live, LiteLLM's advertised limits are wrong for 35 of 38 on-demand
+models, so the API's own error message is the only trustworthy source.
+
+Claude models normally bypass all of this: they route through Inspect's
+native anthropic provider (eval_mcp/core/model_routing.py), which sizes
+max_tokens itself.
 """
 from __future__ import annotations
 
@@ -42,14 +42,14 @@ def test_wrapper_imports_patches_before_delegating():
     assert "inspect_ai._cli.main" in src
 
 
-def test_patch_makes_bedrock_omit_max_tokens():
-    """After the patch, the Bedrock provider reports no default max_tokens, so
-    Inspect sends nothing and Bedrock applies the model's own maximum.
+def test_patch_defaults_to_probe_ceiling():
+    """After the patch, an undiscovered model defaults to the oversized probe
+    value — never Inspect's 2048 constant, never a silent small default.
 
     Guards the exact regression: a 2048 default here is what truncated real
     answers and emptied reasoning models.
     """
-    import eval_mcp.inspect_patches  # noqa: F401 — applies on import
+    import eval_mcp.inspect_patches as patches
     from inspect_ai.model import get_model
 
     for model_id in (
@@ -57,20 +57,38 @@ def test_patch_makes_bedrock_omit_max_tokens():
         "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0",
         "bedrock/openai.gpt-oss-20b-1:0",
     ):
-        assert get_model(model_id).api.max_tokens() is None, (
-            f"{model_id} still has a provider default max_tokens; the patch "
+        api = get_model(model_id).api
+        assert api.max_tokens() == patches._PROBE_MAX_TOKENS, (
+            f"{model_id} did not default to the probe ceiling; the patch "
             f"didn't apply. Reasoning models will truncate/empty at 2048."
         )
 
 
-def test_patch_is_idempotent():
-    """Imported by several modules and called explicitly; must be safe to repeat."""
-    from eval_mcp.inspect_patches import apply_inspect_patches
+def test_discovered_limit_replaces_probe():
+    """Once Bedrock's validation error reveals a model's ceiling, max_tokens()
+    must return exactly that ceiling for the model."""
+    import eval_mcp.inspect_patches as patches
     from inspect_ai.model import get_model
 
-    apply_inspect_patches()
-    apply_inspect_patches()
-    assert get_model("bedrock/us.amazon.nova-pro-v1:0").api.max_tokens() is None
+    model_id = "us.amazon.nova-lite-v1:0"
+    patches._discovered_max_tokens[model_id] = 12345
+    try:
+        assert get_model(f"bedrock/{model_id}").api.max_tokens() == 12345
+    finally:
+        patches._discovered_max_tokens.pop(model_id, None)
+
+
+def test_patch_is_idempotent():
+    """Imported by several modules and called explicitly; must be safe to repeat
+    — a double-applied generate() wrapper would retry limit errors twice."""
+    import eval_mcp.inspect_patches as patches
+    from inspect_ai.model import get_model
+
+    patches.apply_inspect_patches()
+    patches.apply_inspect_patches()
+    api = get_model("bedrock/us.amazon.nova-pro-v1:0").api
+    assert api.max_tokens() == patches._PROBE_MAX_TOKENS
+    assert api.generate.__name__ == "_generate_discovering_limit"
 
 
 def test_no_eval_path_passes_a_global_max_tokens():

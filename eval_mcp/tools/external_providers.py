@@ -99,16 +99,20 @@ def _refresh_keys_from_file() -> None:
 #   models:       curated list of models — IDs use Inspect AI's provider/model format
 EXTERNAL_PROVIDERS: dict[str, dict[str, Any]] = {
     # OpenAI frontier models hosted on Amazon Bedrock via the Mantle endpoint
-    # (bedrock-mantle, OpenAI-compatible Responses API). These are NOT on
-    # bedrock-runtime/Converse, so they never appear in list_foundation_models —
-    # they must be surfaced explicitly. Inspect resolves the `openai/bedrock/<id>`
-    # string natively: it derives the bedrock-mantle URL, mints a short-lived
-    # bearer token from the ambient AWS credentials, and routes through the
-    # Responses API. Auth is AWS creds (the same chain the rest of the app uses),
-    # so there's no API key — env_var is None and availability follows from
-    # having AWS credentials. Whether the account is actually entitled (C-score /
-    # model access) is proven by the run-time validation in run_eval, matching
-    # our "no allowlist; validate at run time" approach for Bedrock models.
+    # (bedrock-mantle, OpenAI-compatible Responses API). POLICY: bedrock-runtime
+    # is this system's default path — the GPT-5.6 family now has runtime CRIS
+    # profiles and rides `bedrock/<profile>` like every other runtime model, and
+    # list_available_models dedupes in runtime's favor. This Mantle route exists
+    # ONLY for Mantle-exclusive models (GPT-5.4/5.5, Daybreak variants — see
+    # docs.aws.amazon.com/bedrock/latest/userguide/models-endpoint-availability.html).
+    # Inspect resolves the `openai/bedrock/<id>` string natively: it derives the
+    # bedrock-mantle URL, mints a short-lived bearer token from the ambient AWS
+    # credentials, and routes through the Responses API. Auth is AWS creds (the
+    # same chain the rest of the app uses), so there's no API key — env_var is
+    # None and availability follows from having AWS credentials. Whether the
+    # account is actually entitled (C-score / model access) is proven by the
+    # run-time validation in run_eval, matching our "no allowlist; validate at
+    # run time" approach for Bedrock models.
     "bedrock-mantle": {
         "env_var": None,
         "display_name": "OpenAI on Bedrock (Mantle)",
@@ -125,10 +129,9 @@ EXTERNAL_PROVIDERS: dict[str, dict[str, Any]] = {
         # catalog, so hard-coding IDs here would repeat the mistake this repo
         # already avoids for Converse models: a stale allowlist that hides
         # newly launched models and advertises ones the region doesn't have.
+        # Mantle-exclusive models only — the GPT-5.6 family has runtime CRIS
+        # profiles and is surfaced by list_bedrock_models instead.
         "models": [
-            {"id": "openai/bedrock/gpt-5.6-sol", "name": "GPT-5.6 Sol (Bedrock)"},
-            {"id": "openai/bedrock/gpt-5.6-terra", "name": "GPT-5.6 Terra (Bedrock)"},
-            {"id": "openai/bedrock/gpt-5.6-luna", "name": "GPT-5.6 Luna (Bedrock)"},
             {"id": "openai/bedrock/gpt-5.5", "name": "GPT-5.5 (Bedrock)"},
             {"id": "openai/bedrock/gpt-5.4", "name": "GPT-5.4 (Bedrock)"},
         ],
@@ -279,8 +282,13 @@ def list_mantle_models(region: str | None = None) -> list[dict[str, Any]] | None
     Only ``openai.*`` IDs are returned. Mantle also hosts Anthropic, Qwen,
     Mistral and others, but Inspect's ``openai/bedrock/`` provider prefix routes
     through the OpenAI client, so a non-OpenAI ID listed under it wouldn't be
-    invokable the way callers expect. Those models are reachable on Converse via
-    ``list_bedrock_models`` instead.
+    invokable the way callers expect. Those models are reachable on
+    bedrock-runtime via ``list_bedrock_models`` instead.
+
+    Models that ALSO have runtime CRIS profiles (the GPT-5.6 family) are still
+    returned here but dropped at the ``list_available_models`` merge in
+    runtime's favor — bedrock-runtime is the default path; Mantle serves only
+    its exclusive models (GPT-5.4/5.5, Daybreak).
     """
     from eval_mcp.core.bedrock_client import resolve_region
 

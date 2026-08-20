@@ -166,3 +166,17 @@ def test_max_effort_ceiling_respects_smaller_models() -> None:
     api.model_name = "bedrock/us.anthropic.claude-haiku-4-5-20251001-v1:0"
     api.service = "bedrock"
     assert AnthropicAPI.max_tokens_for_config(api, GenerateConfig(reasoning_effort="max")) == 64_000
+
+
+def test_runtime_openai_ids_price_via_mantle_key() -> None:
+    """GPT models on bedrock-runtime CRIS profiles must resolve to the
+    bedrock_mantle pricing key — AWS documents identical per-token pricing on
+    both endpoints, and there is no runtime-form key in the catalog."""
+    from eval_mcp.core.pricing import _candidates
+
+    for mid, base in (
+        ("bedrock/global.openai.gpt-5.6-terra", "openai.gpt-5.6-terra"),
+        ("bedrock/us.openai.gpt-5.6-sol", "openai.gpt-5.6-sol"),
+        ("bedrock/openai.gpt-oss-120b-1:0", "openai.gpt-oss-120b-1:0"),
+    ):
+        assert f"bedrock_mantle/{base}" in _candidates(mid), mid

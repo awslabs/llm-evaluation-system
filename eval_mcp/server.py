@@ -1258,6 +1258,7 @@ async def run_benchmark(
     judge_model: str = None,
     judge_models: list = None,
     max_turns: int = None,
+    reasoning_effort: str = None,
     user_id: str = None,
 ) -> str:
     """
@@ -1295,6 +1296,10 @@ async def run_benchmark(
             comparing target models.
         max_turns: Cap the conversation for a cheap smoke run of a multi-turn
             bundled benchmark. Those scores are NOT comparable to a full run.
+        reasoning_effort: Run every provider at this reasoning-effort level
+            (none|minimal|low|medium|high|xhigh|max). Global for the run —
+            call run_benchmark once per level to compare levels on identical
+            inputs. Providers whose route cannot honor effort are rejected.
 
     Returns:
         JSON with success, task, runId, viewerUrl, and a scores summary.
@@ -1307,6 +1312,7 @@ async def run_benchmark(
         "judge_model": judge_model,
         "judge_models": judge_models,
         "max_turns": max_turns,
+        "reasoning_effort": reasoning_effort,
         "user_id": _user(user_id),
     }
     result = await handle_run_benchmark(args)

@@ -765,6 +765,10 @@ def aiwf_turn_judge(
                 **({"judge_errors": judge_errors} if judge_errors else {}),
                 "task_version": TASK_VERSION,
                 "turn_cap": cap,
+                # Which user inputs were scored. Without this an ASR-transcript
+                # run and a scripted-text run are indistinguishable in the log,
+                # and the two are not comparable.
+                "turns_source": os.environ.get("EVAL_MCP_AIWF_TURNS_FILE") or "vendored",
                 **counters,
                 "per_turn": per_turn,
             },

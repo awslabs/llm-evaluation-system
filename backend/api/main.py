@@ -1020,10 +1020,25 @@ async def run_agent_background(
         user_msg_id = str(uuid.uuid4())
         await db.save_message(user_msg_id, session_id, "user", user_message_for_db)
 
-        # Clear any stale cross-pod cancellation flag — a new turn is
-        # starting, the user wants this one to run. Without this, a
-        # previous Stop's row in session_cancellations would make the
-        # very first iteration of THIS new turn immediately cancel.
+        # Clear any stale cancellation flag — a new turn is starting, the
+        # user wants this one to run.
+        #
+        # BOTH halves matter, and the in-memory one is not redundant.
+        # `cancel_chat` writes `cancelled_sessions[session_id]` on
+        # whichever pod receives the Stop request, while this task's
+        # `finally` pops it only on the pod that RAN the cancelled turn.
+        # Under multi-pod traffic those are routinely different pods, so
+        # the receiving pod keeps its entry forever. The cancellation
+        # check below reads that dict FIRST and short-circuits before any
+        # DB read, so the next message routed to that pod is killed
+        # instantly — user message persisted, no assistant reply, an
+        # immediate "[Request cancelled]" bubble.
+        #
+        # Observed live 2026-09-22 19:47 UTC: Stop at 19:46:17 landed on a
+        # different replica than the run; the next two messages died in
+        # 78ms each and left the session ending in two unanswered user
+        # turns.
+        cancelled_sessions.pop(session_id, None)
         try:
             await asyncio.wait_for(
                 db.clear_session_cancellation(session_id), timeout=2.0
@@ -1123,8 +1138,23 @@ async def run_agent_background(
         # Save assistant message to DB (even partial if cancelled).
         # Bounded by timeout — see the matching block in the
         # CancelledError handler below for why.
+        #
+        # A cancel that lands before the model emits anything leaves
+        # full_response empty. Persist the marker alone in that case:
+        # skipping the write leaves the user's message in the transcript
+        # with no reply beside it, so the turn reads as if it never
+        # happened. The marker is also what carries the eval id and
+        # resume hint into the next turn, since history is re-hydrated
+        # from the DB rather than from in-memory agent state.
+        if was_cancelled and not full_response:
+            full_response = _cancel_suffix(
+                cancelled_sessions.get(session_id, {})
+            ).strip()
+            suffix_needed = False
+        else:
+            suffix_needed = was_cancelled
         if full_response:
-            if was_cancelled:
+            if suffix_needed:
                 full_response += _cancel_suffix(cancelled_sessions.get(session_id, {}))
             assistant_msg_id = str(uuid.uuid4())
             try:
@@ -1169,8 +1199,21 @@ async def run_agent_background(
         # the page after stopping it works" — only a fresh React state
         # unblocks the user. 5s is generous; the DB save normally takes
         # <50ms.
+        # Persist a turn even with no partial text. A Stop that lands
+        # while a tool is still running (the common case — that's when
+        # users reach for Stop) produces no assistant text at all, and
+        # the old `if full_response:` gate then saved nothing: the
+        # user's message sat in the transcript with no reply beside it,
+        # so the turn looked like it never happened. Verified against
+        # the local stack on 2026-09-22 — cancelling during a
+        # tool_call left rows [user, assistant, user] with the middle
+        # request unanswered. The marker is also what carries the eval
+        # id and resume hint into the next turn's history.
         if full_response:
             full_response += _cancel_suffix(cancel_info)
+        else:
+            full_response = _cancel_suffix(cancel_info).strip()
+        if full_response:
             assistant_msg_id = str(uuid.uuid4())
             try:
                 await asyncio.wait_for(

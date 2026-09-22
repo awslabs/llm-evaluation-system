@@ -13,6 +13,7 @@ JSON/txt files under ``data/`` are upstream's, converted once at vendor time:
 """
 
 import json
+import os
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -21,6 +22,14 @@ from typing import Any, Dict, List, Optional
 from inspect_ai.tool import Tool, ToolDef
 
 _DATA = Path(__file__).parent / "data"
+
+# Run the same conversation on inputs that did NOT come from a keyboard — e.g.
+# STT transcripts of the spoken form of each turn, for choosing a model to sit
+# behind a speech pipeline. Only ``input`` may differ: the goldens and expected
+# tool calls define the task, so the override is checked against the vendored
+# script and a mismatch is fatal. Silently scoring different targets while
+# reporting the benchmark's name is worse than failing.
+_TURNS_ENV = "EVAL_MCP_AIWF_TURNS_FILE"
 
 # Variant name → knowledge-base file. Upstream's two benchmarks differ ONLY in
 # this file; turns, tools and prompt scaffolding are shared.
@@ -53,11 +62,49 @@ class Turn:
         return (self.required_function_call or {}).get("args") or {}
 
 
-@lru_cache(maxsize=1)
-def turns() -> List[Turn]:
-    """The 30 conversation turns, in order."""
+def _vendored_turns() -> List[Turn]:
     raw = json.loads((_DATA / "turns.json").read_text(encoding="utf-8"))
     return [Turn(**t) for t in raw]
+
+
+def _check_same_task(override: List[Turn]) -> None:
+    """Fail unless `override` differs from the vendored script ONLY in `input`."""
+    base = _vendored_turns()
+    if len(override) != len(base):
+        raise ValueError(
+            f"{_TURNS_ENV}: expected {len(base)} turns, got {len(override)}"
+        )
+    for got, want in zip(override, base):
+        if got.index != want.index:
+            raise ValueError(f"{_TURNS_ENV}: turn order changed at index {want.index}")
+        if got.golden_text != want.golden_text:
+            raise ValueError(
+                f"{_TURNS_ENV}: golden_text edited on turn {want.index}. Only "
+                "`input` may differ — the goldens define the task being scored."
+            )
+        if got.required_function_call != want.required_function_call:
+            raise ValueError(
+                f"{_TURNS_ENV}: required_function_call edited on turn "
+                f"{want.index}. Only `input` may differ."
+            )
+
+
+@lru_cache(maxsize=1)
+def turns() -> List[Turn]:
+    """The 30 conversation turns, in order.
+
+    ``EVAL_MCP_AIWF_TURNS_FILE`` swaps in user inputs from elsewhere (e.g. STT
+    transcripts) while holding the scored targets fixed — see ``_TURNS_ENV``.
+    """
+    override = os.environ.get(_TURNS_ENV)
+    if not override:
+        return _vendored_turns()
+    path = Path(override)
+    if not path.is_file():
+        raise FileNotFoundError(f"{_TURNS_ENV}={override!r} is not a readable file")
+    got = [Turn(**t) for t in json.loads(path.read_text(encoding="utf-8"))]
+    _check_same_task(got)
+    return got
 
 
 @lru_cache(maxsize=None)

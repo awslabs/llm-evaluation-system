@@ -40,6 +40,10 @@ interface ChatContextType {
 
 const ChatContext = createContext<ChatContextType | undefined>(undefined);
 
+// Error name consumeStream uses for a backend-emitted `error` SSE event, as
+// opposed to a fetch/transport failure (a plain TypeError from the browser).
+const BACKEND_STREAM_ERROR = "BackendStreamError";
+
 export function ChatProvider({ children }: { children: React.ReactNode }) {
   const { user, isLoading: authLoading } = useAuth();
   const [messages, setMessages] = useState<Message[]>([]);
@@ -61,6 +65,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
   // Session ids with a reconnect attempt in flight — see
   // reconnectIfRunning.
   const reconnectingRef = useRef<Set<string>>(new Set());
+  // Session id of the stream currently being consumed by sendMessage. The
+  // backend announces it in the first SSE event, which can be AFTER the
+  // sendMessage closure captured a null currentSessionId (fresh chat), so
+  // the catch block needs a ref rather than the closed-over state to know
+  // which run to reattach to after a mid-stream drop.
+  const streamSessionIdRef = useRef<string | null>(null);
 
   const loadUserSessions = async () => {
     if (!user?.name) return;
@@ -229,6 +239,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                 const newSessionId = data.session_id;
                 if (newSessionId) {
                   streamSessionId = newSessionId;
+                  streamSessionIdRef.current = newSessionId;
                   setCurrentSessionId(newSessionId);
                   setChatSessions((prev) => {
                     if (prev.some((s) => s.id === newSessionId)) {
@@ -295,7 +306,12 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
                   metadata: { isStreaming: false },
                 });
               } else if (currentEventType === "error") {
-                throw new Error(data.error || data.message || "Unknown error");
+                // Named so sendMessage can tell "the backend said the turn
+                // failed" (surface it) from "the connection died under us"
+                // (recover — the turn is still running server-side).
+                const err = new Error(data.error || data.message || "Unknown error");
+                err.name = BACKEND_STREAM_ERROR;
+                throw err;
               }
             }
           }
@@ -373,6 +389,50 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
     [consumeStream, user?.id],
   );
 
+  // The SSE connection died mid-answer (fetch rejects with "network
+  // error" / "Failed to fetch"). The backend keeps running the turn
+  // regardless — it only logs CLIENT DISCONNECT and finishes in the
+  // background — so the answer is not lost, it just isn't in this tab.
+  // Seen live 2026-09-22: a 7-minute eval lost its stream at ~4 minutes;
+  // the run completed at 7:30, the user saw a stale "Still working…
+  // (90s elapsed)" status and then a failure bubble, and the result only
+  // existed in the viewer.
+  //
+  // Recovery: drop the frozen bubble, then reattach with the same path a
+  // page refresh uses (status check + empty-message re-POST, cross-pod
+  // safe via LISTEN/NOTIFY). If the run already finished in the gap,
+  // pull the completed transcript from the DB instead. Returns false only
+  // if neither found anything, in which case the caller shows the error.
+  const recoverDroppedStream = useCallback(
+    async (sessionId: string, frozenMessageId: string): Promise<boolean> => {
+      setMessages((prev) => prev.filter((m) => m.id !== frozenMessageId));
+
+      if (await runReconnect(sessionId)) return true;
+
+      // Not running any more — the answer is already persisted.
+      try {
+        const response = await fetch(
+          `/api/sessions?user_id=${encodeURIComponent(user?.name ?? "")}`,
+        );
+        if (!response.ok) return false;
+        const data = await response.json();
+        const sessions: ChatSession[] = data.sessions || [];
+        const found = sessions.find((s) => s.id === sessionId);
+        if (!found || found.messages.length === 0) return false;
+        if (found.messages[found.messages.length - 1].role !== "assistant") {
+          return false;
+        }
+        setChatSessions(sessions);
+        setMessages(found.messages);
+        return true;
+      } catch (error) {
+        console.error("Post-drop transcript fetch failed:", error);
+        return false;
+      }
+    },
+    [runReconnect, user?.name],
+  );
+
   // One reconnect per session at a time. Chat.tsx's effect re-fires
   // whenever chatSessions or currentSessionId changes, so without this a
   // single visit fans out into a burst of concurrent reconnects — the
@@ -406,6 +466,10 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
 
       setMessages((prev) => [...prev, userMessage]);
       setIsLoading(true);
+      streamSessionIdRef.current = currentSessionId;
+      // Set once the SSE bubble exists — recovery only makes sense after
+      // the backend has actually started a turn.
+      let streamingMessageId: string | null = null;
 
       try {
         const response = await fetch("/api/chat/message", {
@@ -428,6 +492,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         // Handle SSE streaming
         if (response.headers.get("content-type")?.includes("text/event-stream")) {
           const assistantMessageId = crypto.randomUUID();
+          streamingMessageId = assistantMessageId;
           const streamingMessage: Message = {
             id: assistantMessageId,
             role: "assistant",
@@ -489,6 +554,19 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
       } catch (error) {
         console.error("Failed to send message:", error);
 
+        // Transport failure after the turn started: the backend is still
+        // (or was, and finished) running it. Reattach or fetch the result
+        // before giving up. A backend-reported `error` event is a real
+        // failure and falls through to the message below.
+        const isBackendError =
+          error instanceof Error && error.name === BACKEND_STREAM_ERROR;
+        const droppedSessionId = streamSessionIdRef.current;
+        if (!isBackendError && streamingMessageId && droppedSessionId) {
+          if (await recoverDroppedStream(droppedSessionId, streamingMessageId)) {
+            return;
+          }
+        }
+
         // Surface the actual error class + ref so the user (or whoever's
         // tailing logs) can correlate. The backend's `_user_safe_error`
         // gives us "ExceptionType (ref: <id>)" which is safe to show
@@ -524,7 +602,7 @@ export function ChatProvider({ children }: { children: React.ReactNode }) {
         setIsCancelling(false);
       }
     },
-    [user?.id, currentSessionId, consumeStream]
+    [user?.id, currentSessionId, consumeStream, recoverDroppedStream]
   );
 
   // Handle document upload results - send a message to inform the AI

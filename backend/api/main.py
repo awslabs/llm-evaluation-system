@@ -144,6 +144,17 @@ active_tasks: Dict[str, asyncio.Task] = {}
 # Event queues for streaming to clients (keyed by session_id)
 event_queues: Dict[str, asyncio.Queue] = {}
 
+# SSE keepalive. The agent emits a "progress" event every 30s while a tool
+# runs, but nothing at all while it waits on the model between tools, and a
+# stall anywhere upstream of the pod (seen live 2026-09-22: CloudFront's
+# origin_read_timeout is 60s) drops the connection when no bytes flow. Emit
+# an SSE comment line from the stream loop itself whenever the queue is
+# quiet, independent of what the agent is doing. Comment lines are ignored
+# by the frontend parser (it only reads "event:"/"data:" lines) and by the
+# SSE spec, so this is invisible to clients and safe to send at any time.
+SSE_KEEPALIVE_SECONDS = 15.0
+SSE_KEEPALIVE = ": keepalive\n\n"
+
 # Sessions marked for cancellation
 cancelled_sessions: Dict[str, dict] = {}  # session_id -> cancel info (evalId, configName)
 
@@ -1239,7 +1250,11 @@ async def chat_stream(request: ChatRequest, user_id: str):
             # Same pod: drain the in-memory queue directly (fast path).
             try:
                 while True:
-                    event = await queue.get()
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_SECONDS)
+                    except asyncio.TimeoutError:
+                        yield SSE_KEEPALIVE
+                        continue
                     if event is None:
                         break
                     yield f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
@@ -1267,15 +1282,18 @@ async def chat_stream(request: ChatRequest, user_id: str):
 
                 while True:
                     try:
-                        event = await asyncio.wait_for(notify_queue.get(), timeout=30.0)
+                        event = await asyncio.wait_for(
+                            notify_queue.get(), timeout=SSE_KEEPALIVE_SECONDS
+                        )
                     except asyncio.TimeoutError:
-                        # No event in 30s — check the session is still
-                        # active before waiting again. Handles the race
-                        # where the task finished between the status check
-                        # and the LISTEN setup.
+                        # Quiet — check the session is still active before
+                        # waiting again. Handles the race where the task
+                        # finished between the status check and the LISTEN
+                        # setup. Then keep the connection warm.
                         still_running = await db.get_session_active(session_id)
                         if not still_running:
                             break
+                        yield SSE_KEEPALIVE
                         continue
                     if event.get("type") == "__end__":
                         break
@@ -1415,7 +1433,11 @@ async def chat_stream(request: ChatRequest, user_id: str):
     # Stream events from queue to client
     try:
         while True:
-            event = await queue.get()
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_SECONDS)
+            except asyncio.TimeoutError:
+                yield SSE_KEEPALIVE
+                continue
             if event is None:
                 # Task completed
                 break

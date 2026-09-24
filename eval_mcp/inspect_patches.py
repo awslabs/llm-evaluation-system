@@ -149,6 +149,110 @@ def _limit_from_result(result: "object") -> "int | None":
     return int(match.group(1)) if match else None
 
 
+# Some models report their CONTEXT WINDOW, not a separate output cap, as "the
+# model limit" — the window is shared between prompt and completion. Verified
+# live on nvidia.nemotron-super-3-120b (2026-09-23): a 512000 probe is told
+# "exceeds the model limit of 262144", and the retry at exactly 262144 is then
+# rejected with
+#
+#   maximum context length is 262144 tokens. However, you requested 262144
+#   output tokens and your prompt contains 99 characters ...
+#
+# so every call failed, as a target and as a judge. The error states both the
+# window and the prompt's size, which is enough to compute the real budget.
+_CONTEXT_LIMIT_RE = re.compile(r"maximum context length is (\d+) tokens")
+_PROMPT_CHARS_RE = re.compile(r"prompt contains (\d+) characters")
+
+# Headroom for chat-template and tool-schema tokens the character count may
+# not fully reflect. Tiny next to any window this code path can hit.
+_CONTEXT_MARGIN_TOKENS = 1024
+
+# model_name -> (context window, prompt overhead) for models whose limit is
+# shared with input. The overhead is how many more characters the rendered
+# prompt had than our own estimate of it (chat template, tool-schema framing),
+# learned from the error's own count, so later budgets account for it.
+_context_windows: "dict[str, tuple[int, int]]" = {}
+
+
+def _context_overflow_from_result(result: "object") -> "tuple[int, int] | None":
+    """``(context_window, prompt_chars)`` if the result is a context-window
+    overflow error, else None."""
+    ex = result[0] if isinstance(result, tuple) else None
+    if not isinstance(ex, Exception):
+        return None
+    text = str(ex)
+    window = _CONTEXT_LIMIT_RE.search(text)
+    if not window:
+        return None
+    chars = _PROMPT_CHARS_RE.search(text)
+    return int(window.group(1)), int(chars.group(1)) if chars else 0
+
+
+def _estimate_prompt_chars(input: "list", tools: "list") -> int:
+    """Upper-ish bound on the rendered prompt size, in characters.
+
+    Characters are a safe stand-in for tokens here: a token spans at least
+    one character in practice, so budgeting by characters never over-asks.
+    """
+    total = 0
+    for message in input or []:
+        total += len(getattr(message, "text", "") or "")
+    for tool in tools or []:
+        dump = getattr(tool, "model_dump_json", None)
+        total += len(dump()) if dump else len(str(tool))
+    return total
+
+
+def _output_budget(window: int, prompt_chars: int) -> int:
+    return window - prompt_chars - _CONTEXT_MARGIN_TOKENS
+
+
+async def _generate_within_limits(original_generate, api, input, tools, tool_choice, config):
+    """Call ``original_generate`` and repair an over-large default max_tokens.
+
+    Two ways a request can ask for too much. Both are only ever LOWERED to
+    what the model accepts — a max_tokens already inside the limit is never
+    raised, and an error that isn't an over-ask is surfaced unchanged:
+
+    1. Above the model's output cap: Bedrock names the cap; cache it, retry.
+    2. Above what the context window leaves after the prompt: the cap is the
+       whole window. Remember the window, retry with window minus prompt.
+       Later calls to the same model start from that budget directly, so the
+       failed round-trip is paid once per model, not once per call.
+    """
+    model = getattr(api, "model_name", "")
+
+    estimate = _estimate_prompt_chars(input, tools)
+    if model in _context_windows:
+        window, overhead = _context_windows[model]
+        budget = _output_budget(window, estimate + overhead)
+        if budget > 0 and (config.max_tokens is None or config.max_tokens > budget):
+            config = config.model_copy(update={"max_tokens": budget})
+
+    while True:
+        result = await original_generate(api, input, tools, tool_choice, config)
+
+        limit = _limit_from_result(result)
+        if limit is not None:
+            if config.max_tokens is not None and config.max_tokens <= limit:
+                return result  # not an over-ask we can fix — surface it
+            _discovered_max_tokens[model] = limit
+            config = config.model_copy(update={"max_tokens": limit})
+            continue
+
+        overflow = _context_overflow_from_result(result)
+        if overflow is not None:
+            window, prompt_chars = overflow
+            budget = _output_budget(window, prompt_chars)
+            current = config.max_tokens
+            if budget > 0 and (current is None or budget < current):
+                _context_windows[model] = (window, max(0, prompt_chars - estimate))
+                config = config.model_copy(update={"max_tokens": budget})
+                continue
+
+        return result
+
+
 def _patch_bedrock_default_max_tokens() -> None:
     """Always run at the model's true output ceiling, discovered from Bedrock.
 
@@ -189,15 +293,9 @@ def _patch_bedrock_default_max_tokens() -> None:
     original_generate = BedrockAPI.generate
 
     async def _generate_discovering_limit(self, input, tools, tool_choice, config):
-        while True:
-            result = await original_generate(self, input, tools, tool_choice, config)
-            limit = _limit_from_result(result)
-            if limit is None:
-                return result
-            if config.max_tokens is not None and config.max_tokens <= limit:
-                return result  # not an over-ask we can fix — surface it
-            _discovered_max_tokens[self.model_name] = limit
-            config = config.model_copy(update={"max_tokens": limit})
+        return await _generate_within_limits(
+            original_generate, self, input, tools, tool_choice, config
+        )
 
     BedrockAPI.generate = _generate_discovering_limit
 

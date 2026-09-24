@@ -521,10 +521,15 @@ def _verdict(tool=True, instr=True, kb=True, reasoning=""):
     }
 
 
-def test_normalize_judges_defaults_to_the_claude_judge():
-    from eval_mcp.core.judge_config import JUDGE_MODELS
+def test_normalize_judges_defaults_to_the_benchmark_judge_not_the_jury():
+    """The benchmark fallback is its own constant. Changing the jury's Claude
+    slot (now Sonnet 5) must never silently recalibrate a benchmark, and
+    Sonnet 5 specifically was rejected as the aiwf judge (see NOTICE.md)."""
+    from eval_mcp.core.judge_config import BENCHMARK_JUDGE_MODEL, JUDGE_MODELS
 
-    assert normalize_judges(None, None) == [JUDGE_MODELS["claude"]]
+    assert normalize_judges(None, None) == [BENCHMARK_JUDGE_MODEL]
+    assert BENCHMARK_JUDGE_MODEL == "bedrock/us.anthropic.claude-opus-5"
+    assert BENCHMARK_JUDGE_MODEL != JUDGE_MODELS["claude"]
 
 
 def test_normalize_judges_single_judge_passthrough():

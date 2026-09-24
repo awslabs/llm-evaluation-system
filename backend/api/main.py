@@ -144,6 +144,17 @@ active_tasks: Dict[str, asyncio.Task] = {}
 # Event queues for streaming to clients (keyed by session_id)
 event_queues: Dict[str, asyncio.Queue] = {}
 
+# SSE keepalive. The agent emits a "progress" event every 30s while a tool
+# runs, but nothing at all while it waits on the model between tools, and a
+# stall anywhere upstream of the pod (seen live 2026-09-22: CloudFront's
+# origin_read_timeout is 60s) drops the connection when no bytes flow. Emit
+# an SSE comment line from the stream loop itself whenever the queue is
+# quiet, independent of what the agent is doing. Comment lines are ignored
+# by the frontend parser (it only reads "event:"/"data:" lines) and by the
+# SSE spec, so this is invisible to clients and safe to send at any time.
+SSE_KEEPALIVE_SECONDS = 15.0
+SSE_KEEPALIVE = ": keepalive\n\n"
+
 # Sessions marked for cancellation
 cancelled_sessions: Dict[str, dict] = {}  # session_id -> cancel info (evalId, configName)
 
@@ -1009,10 +1020,25 @@ async def run_agent_background(
         user_msg_id = str(uuid.uuid4())
         await db.save_message(user_msg_id, session_id, "user", user_message_for_db)
 
-        # Clear any stale cross-pod cancellation flag — a new turn is
-        # starting, the user wants this one to run. Without this, a
-        # previous Stop's row in session_cancellations would make the
-        # very first iteration of THIS new turn immediately cancel.
+        # Clear any stale cancellation flag — a new turn is starting, the
+        # user wants this one to run.
+        #
+        # BOTH halves matter, and the in-memory one is not redundant.
+        # `cancel_chat` writes `cancelled_sessions[session_id]` on
+        # whichever pod receives the Stop request, while this task's
+        # `finally` pops it only on the pod that RAN the cancelled turn.
+        # Under multi-pod traffic those are routinely different pods, so
+        # the receiving pod keeps its entry forever. The cancellation
+        # check below reads that dict FIRST and short-circuits before any
+        # DB read, so the next message routed to that pod is killed
+        # instantly — user message persisted, no assistant reply, an
+        # immediate "[Request cancelled]" bubble.
+        #
+        # Observed live 2026-09-22 19:47 UTC: Stop at 19:46:17 landed on a
+        # different replica than the run; the next two messages died in
+        # 78ms each and left the session ending in two unanswered user
+        # turns.
+        cancelled_sessions.pop(session_id, None)
         try:
             await asyncio.wait_for(
                 db.clear_session_cancellation(session_id), timeout=2.0
@@ -1112,8 +1138,23 @@ async def run_agent_background(
         # Save assistant message to DB (even partial if cancelled).
         # Bounded by timeout — see the matching block in the
         # CancelledError handler below for why.
+        #
+        # A cancel that lands before the model emits anything leaves
+        # full_response empty. Persist the marker alone in that case:
+        # skipping the write leaves the user's message in the transcript
+        # with no reply beside it, so the turn reads as if it never
+        # happened. The marker is also what carries the eval id and
+        # resume hint into the next turn, since history is re-hydrated
+        # from the DB rather than from in-memory agent state.
+        if was_cancelled and not full_response:
+            full_response = _cancel_suffix(
+                cancelled_sessions.get(session_id, {})
+            ).strip()
+            suffix_needed = False
+        else:
+            suffix_needed = was_cancelled
         if full_response:
-            if was_cancelled:
+            if suffix_needed:
                 full_response += _cancel_suffix(cancelled_sessions.get(session_id, {}))
             assistant_msg_id = str(uuid.uuid4())
             try:
@@ -1158,8 +1199,21 @@ async def run_agent_background(
         # the page after stopping it works" — only a fresh React state
         # unblocks the user. 5s is generous; the DB save normally takes
         # <50ms.
+        # Persist a turn even with no partial text. A Stop that lands
+        # while a tool is still running (the common case — that's when
+        # users reach for Stop) produces no assistant text at all, and
+        # the old `if full_response:` gate then saved nothing: the
+        # user's message sat in the transcript with no reply beside it,
+        # so the turn looked like it never happened. Verified against
+        # the local stack on 2026-09-22 — cancelling during a
+        # tool_call left rows [user, assistant, user] with the middle
+        # request unanswered. The marker is also what carries the eval
+        # id and resume hint into the next turn's history.
         if full_response:
             full_response += _cancel_suffix(cancel_info)
+        else:
+            full_response = _cancel_suffix(cancel_info).strip()
+        if full_response:
             assistant_msg_id = str(uuid.uuid4())
             try:
                 await asyncio.wait_for(
@@ -1239,7 +1293,11 @@ async def chat_stream(request: ChatRequest, user_id: str):
             # Same pod: drain the in-memory queue directly (fast path).
             try:
                 while True:
-                    event = await queue.get()
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_SECONDS)
+                    except asyncio.TimeoutError:
+                        yield SSE_KEEPALIVE
+                        continue
                     if event is None:
                         break
                     yield f"event: {event['type']}\ndata: {json.dumps(event['data'])}\n\n"
@@ -1267,15 +1325,18 @@ async def chat_stream(request: ChatRequest, user_id: str):
 
                 while True:
                     try:
-                        event = await asyncio.wait_for(notify_queue.get(), timeout=30.0)
+                        event = await asyncio.wait_for(
+                            notify_queue.get(), timeout=SSE_KEEPALIVE_SECONDS
+                        )
                     except asyncio.TimeoutError:
-                        # No event in 30s — check the session is still
-                        # active before waiting again. Handles the race
-                        # where the task finished between the status check
-                        # and the LISTEN setup.
+                        # Quiet — check the session is still active before
+                        # waiting again. Handles the race where the task
+                        # finished between the status check and the LISTEN
+                        # setup. Then keep the connection warm.
                         still_running = await db.get_session_active(session_id)
                         if not still_running:
                             break
+                        yield SSE_KEEPALIVE
                         continue
                     if event.get("type") == "__end__":
                         break
@@ -1415,7 +1476,11 @@ async def chat_stream(request: ChatRequest, user_id: str):
     # Stream events from queue to client
     try:
         while True:
-            event = await queue.get()
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=SSE_KEEPALIVE_SECONDS)
+            except asyncio.TimeoutError:
+                yield SSE_KEEPALIVE
+                continue
             if event is None:
                 # Task completed
                 break

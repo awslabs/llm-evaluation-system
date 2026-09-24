@@ -140,6 +140,9 @@ RULES:
 3. REPORT ERRORS honestly - if run_evaluation fails, tell the user
 4. After successful eval, provide viewer URL from get_viewer_url
 5. WAIT for explicit user requests before processing uploads - don't be proactive
+6. REPORT EVERY MODEL when an eval compares more than one: a table with one row
+   per model and its score. Never collapse a comparison into a single "overall"
+   number - that hides the losing model and is the whole point of the eval
 
 Example - "compare Claude vs GPT-4o on healthcare":
 1. list_available_models() → discover available models

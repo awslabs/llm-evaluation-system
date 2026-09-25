@@ -21,7 +21,7 @@ its own ``call`` coroutine and picks its tally; the mechanics live here once.
 import asyncio
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union
 
-from eval_mcp.core.judge_config import JUDGE_MODELS
+from eval_mcp.core.judge_config import BENCHMARK_JUDGE_MODEL
 
 
 def normalize_judges(
@@ -47,7 +47,7 @@ def normalize_judges(
     elif judge_model:
         models = [judge_model]
     if not models:
-        models = [default or JUDGE_MODELS["claude"]]
+        models = [default or BENCHMARK_JUDGE_MODEL]
     seen = set()
     deduped: List[str] = []
     for m in models:

@@ -11,24 +11,39 @@ from typing import Dict, List
 # Judge models for multi-judge evaluation
 # Model IDs use Inspect AI provider format (bedrock/ prefix)
 #
-# The "claude" entry is the most load-bearing: it's the jury's strongest voice
-# AND the default single judge for the multi-turn benchmarks. Before changing
-# it, measure — a judge is the measuring instrument, so "newer model" is not by
-# itself a reason. Two things to check, both of which have bitten us:
-#   1. Accuracy against hand-adjudicated verdicts, not against another judge's
-#      output (comparing two judges across two different eval RUNS measures the
-#      target model's variance, not the judge's).
-#   2. Stability across repeated calls on the SAME input. Sonnet 5 was rejected
-#      here for swinging 0.100 in the headline metric on identical input.
-# Scored that way over 16 calls on two fixed transcripts, Opus 5 made 2 errors
-# vs Sonnet 4.6's 9 (mostly false positives — it failed a factually correct
-# answer that merely added detail). Details in
-# eval_mcp/benchmarks/aiwf/NOTICE.md.
+# One judge per model family, so no family grades only its own kind. Chosen
+# 2026-09-23 by running each candidate through the jury scorer's exact call
+# path (same submit_scores tool, tool_choice="any", native Claude routing) on
+# five known-verdict cases x3 repeats, including the "correct answer plus extra
+# correct detail" trap that makes a good model look bad:
+#
+#   claude-sonnet-5   0 errors, 0 wrong on unambiguous cases
+#   gpt-6-luna        0 errors, 0 wrong on unambiguous cases (~6s/call)
+#   nova-pro-v1       0 errors, 0 wrong on unambiguous cases
+#   nova-2-lite-v1    failed the extra-detail trap 3/3 -> rejected
+#   nova-premier-v1   end of life on Bedrock -> rejected
+#
+# There is no Sonnet 5.1 or Nova 2 Pro on Bedrock in any US region yet. When
+# one launches, re-run the same comparison before swapping it in.
+#
+# Nemotron was dropped from the jury. It did NOT fail on quality: every call
+# died in eval_mcp/inspect_patches.py, which retried max_tokens at a number
+# that was really Nemotron's whole context window (fixed there). Nemotron now
+# works as a target or an opt-in judge.
 JUDGE_MODELS: Dict[str, str] = {
-    "claude": "bedrock/us.anthropic.claude-opus-5",
+    "claude": "bedrock/us.anthropic.claude-sonnet-5",
     "nova": "bedrock/us.amazon.nova-pro-v1:0",
-    "nemotron": "bedrock/nvidia.nemotron-super-3-120b",
+    "gpt": "bedrock/us.openai.gpt-6-luna",
 }
+
+# Fallback single judge for a multi-turn benchmark whose eval.yaml declares no
+# judge.default. Deliberately NOT JUDGE_MODELS["claude"]: a benchmark's judge is
+# part of its measuring instrument, and Sonnet 5 was measured and rejected as
+# one, swinging 0.100 in aiwf pass_rate across repeated calls on identical
+# input (eval_mcp/benchmarks/aiwf/NOTICE.md). Opus 5 made 2 errors in 16 on
+# hand-adjudicated turns vs Sonnet 4.6's 9. Keeping this separate means
+# changing the jury can never silently recalibrate a benchmark.
+BENCHMARK_JUDGE_MODEL: str = "bedrock/us.anthropic.claude-opus-5"
 
 # Default criteria for evaluation - binary (0 or 1)
 DEFAULT_CRITERIA: List[Dict[str, str]] = [

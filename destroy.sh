@@ -122,6 +122,10 @@ echo "  CodeBuild project found: $CODEBUILD_PROJECT"
 echo ""
 echo "=== Phase 4: Uploading source to S3 ==="
 
+# shellcheck source=scripts/state-bucket.sh
+source "$SCRIPT_DIR/scripts/state-bucket.sh"
+require_state_bucket
+
 cd "$SCRIPT_DIR"
 TMPZIP="$(mktemp /tmp/source-XXXXXX).zip"
 zip -r "$TMPZIP" . \
@@ -137,7 +141,7 @@ zip -r "$TMPZIP" . \
   -x "*.tfvars" \
   > /dev/null
 
-aws s3 cp "$TMPZIP" "s3://$STATE_BUCKET/deploy-source/source.zip" --region "$AWS_REGION"
+upload_to_state_bucket "$TMPZIP" deploy-source/source.zip
 rm -f "$TMPZIP"
 echo "  Source uploaded."
 
@@ -323,7 +327,8 @@ if [ "$CLEANUP_BOOTSTRAP" = true ]; then
   echo "  Bootstrap resources removed."
   echo ""
   echo "  Note: The S3 state bucket ($STATE_BUCKET) was NOT deleted."
-  echo "  To delete it manually:"
+  echo "  To delete it manually (note: once deleted, another AWS account could"
+  echo "  register the same name; deploy.sh will refuse to use it if that happens):"
   echo "    aws s3 rb s3://$STATE_BUCKET --force --region $AWS_REGION"
 fi
 

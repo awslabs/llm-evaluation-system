@@ -180,12 +180,15 @@ resource "aws_iam_policy" "backend" {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket"]
         Resource = [var.documents_bucket_arn, "${var.documents_bucket_arn}/*"]
+        # Bucket ARNs carry no account ID; only allow buckets this account owns.
+        Condition = { StringEquals = { "s3:ResourceAccount" = local.account_id } }
       },
       {
         # Primary data bucket — eval logs, judges, datasets, configs
-        Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation"]
-        Resource = [var.data_bucket_arn, "${var.data_bucket_arn}/*"]
+        Effect    = "Allow"
+        Action    = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:ListBucket", "s3:GetBucketLocation"]
+        Resource  = [var.data_bucket_arn, "${var.data_bucket_arn}/*"]
+        Condition = { StringEquals = { "s3:ResourceAccount" = local.account_id } }
       },
       {
         Effect   = "Allow"

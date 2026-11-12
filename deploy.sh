@@ -90,23 +90,9 @@ fi
 echo ""
 echo "=== Phase 3: Ensuring state bucket exists ==="
 
-if aws s3api head-bucket --bucket "$STATE_BUCKET" 2>/dev/null; then
-  echo "  State bucket exists: $STATE_BUCKET"
-else
-  echo "  Creating state bucket: $STATE_BUCKET"
-  if [ "$AWS_REGION" = "us-east-1" ]; then
-    aws s3api create-bucket --bucket "$STATE_BUCKET" --region "$AWS_REGION"
-  else
-    aws s3api create-bucket --bucket "$STATE_BUCKET" --region "$AWS_REGION" \
-      --create-bucket-configuration LocationConstraint="$AWS_REGION"
-  fi
-  aws s3api put-bucket-versioning --bucket "$STATE_BUCKET" \
-    --versioning-configuration Status=Enabled
-  aws s3api put-public-access-block --bucket "$STATE_BUCKET" \
-    --public-access-block-configuration \
-    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-  echo "  State bucket created."
-fi
+# shellcheck source=scripts/state-bucket.sh
+source "$SCRIPT_DIR/scripts/state-bucket.sh"
+ensure_state_bucket
 
 #------------------------------------------------------------------------------
 # Phase 4: Bootstrap deploy-runner CodeBuild project
@@ -206,7 +192,7 @@ zip -r "$TMPZIP" . \
   -x "*.tfvars" \
   > /dev/null
 
-aws s3 cp "$TMPZIP" "s3://$STATE_BUCKET/deploy-source/source.zip" --region "$AWS_REGION"
+upload_to_state_bucket "$TMPZIP" deploy-source/source.zip
 rm -f "$TMPZIP"
 echo "  Source uploaded to s3://$STATE_BUCKET/deploy-source/source.zip"
 

@@ -39,6 +39,16 @@ def get_sync_region() -> Optional[str]:
     return get_config().get("region")
 
 
+def get_bucket_owner() -> Optional[str]:
+    """AWS account ID that must own the sync bucket.
+
+    Set by `eval-mcp init` after verifying ownership. Override with
+    `eval-mcp config set bucket_owner <account-id>` for a bucket that
+    intentionally lives in another account you trust.
+    """
+    return get_config().get("bucket_owner")
+
+
 def get_user() -> str:
     configured = get_config().get("user")
     if configured:

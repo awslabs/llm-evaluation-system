@@ -22,6 +22,8 @@ module "eval_logs_bucket" {
   version = "~> 4.0"
 
   bucket = "${var.bucket_name}-${data.aws_caller_identity.current.account_id}"
+  # Reject a same-named bucket in another account.
+  expected_bucket_owner = data.aws_caller_identity.current.account_id
 
   block_public_acls       = true
   block_public_policy     = true

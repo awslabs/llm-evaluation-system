@@ -6,7 +6,8 @@ module "source_bucket" {
   source  = "terraform-aws-modules/s3-bucket/aws"
   version = "~> 4.0"
 
-  bucket = "${local.name}-source-${local.account_id}-${var.region}"
+  bucket                = "${local.name}-source-${local.account_id}-${var.region}"
+  expected_bucket_owner = local.account_id # reject a same-named bucket in another account
 
   block_public_acls       = true
   block_public_policy     = true
@@ -91,6 +92,8 @@ resource "aws_iam_role_policy" "codebuild" {
         Effect   = "Allow"
         Action   = ["s3:GetObject", "s3:GetObjectVersion"]
         Resource = "${module.source_bucket.s3_bucket_arn}/*"
+        # Bucket ARNs carry no account ID; only allow buckets this account owns.
+        Condition = { StringEquals = { "s3:ResourceAccount" = local.account_id } }
       },
       {
         Effect   = "Allow"

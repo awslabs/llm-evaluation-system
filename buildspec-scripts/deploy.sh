@@ -46,23 +46,9 @@ tf_with_retry() {
 echo ""
 echo "=== Phase 1: Ensuring remote state bucket exists ==="
 
-if aws s3api head-bucket --bucket "$STATE_BUCKET" 2>/dev/null; then
-  echo "  State bucket exists: $STATE_BUCKET"
-else
-  echo "  Creating state bucket: $STATE_BUCKET"
-  if [ "$AWS_REGION" = "us-east-1" ]; then
-    aws s3api create-bucket --bucket "$STATE_BUCKET" --region "$AWS_REGION"
-  else
-    aws s3api create-bucket --bucket "$STATE_BUCKET" --region "$AWS_REGION" \
-      --create-bucket-configuration LocationConstraint="$AWS_REGION"
-  fi
-  aws s3api put-bucket-versioning --bucket "$STATE_BUCKET" \
-    --versioning-configuration Status=Enabled
-  aws s3api put-public-access-block --bucket "$STATE_BUCKET" \
-    --public-access-block-configuration \
-    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
-  echo "  State bucket created with versioning enabled."
-fi
+# shellcheck source=../scripts/state-bucket.sh
+source "$SRC/scripts/state-bucket.sh"
+ensure_state_bucket
 
 #------------------------------------------------------------------------------
 # Phase 2: Terraform configuration
@@ -232,6 +218,7 @@ npm ci
 # backend, so no secrets or env are baked into the bundle.
 VITE_SHOW_CHAT=true npm run build
 
+require_owned_bucket "$SPA_BUCKET"
 echo "  Syncing bundle to s3://$SPA_BUCKET ..."
 # Hashed assets are content-addressed → cache immutably. index.html must NOT
 # be cached so new asset hashes are picked up immediately. --delete purges

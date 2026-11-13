@@ -6,8 +6,9 @@ module "documents_bucket" {
   source  = "terraform-aws-modules/s3-bucket/aws"
   version = "~> 4.0"
 
-  bucket        = "${local.name}-documents-${local.account_id}"
-  force_destroy = true
+  bucket                = "${local.name}-documents-${local.account_id}"
+  expected_bucket_owner = local.account_id # reject a same-named bucket in another account
+  force_destroy         = true
 
   block_public_acls       = true
   block_public_policy     = true
@@ -40,8 +41,9 @@ module "data_bucket" {
   source  = "terraform-aws-modules/s3-bucket/aws"
   version = "~> 4.0"
 
-  bucket        = "${local.name}-data-${local.account_id}"
-  force_destroy = true
+  bucket                = "${local.name}-data-${local.account_id}"
+  expected_bucket_owner = local.account_id # reject a same-named bucket in another account
+  force_destroy         = true
 
   block_public_acls       = true
   block_public_policy     = true
@@ -76,8 +78,9 @@ module "spa_bucket" {
   source  = "terraform-aws-modules/s3-bucket/aws"
   version = "~> 4.0"
 
-  bucket        = "${local.name}-spa-${local.account_id}"
-  force_destroy = true
+  bucket                = "${local.name}-spa-${local.account_id}"
+  expected_bucket_owner = local.account_id # reject a same-named bucket in another account
+  force_destroy         = true
 
   block_public_acls       = true
   block_public_policy     = true

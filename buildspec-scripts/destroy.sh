@@ -11,6 +11,11 @@ DATA_DIR="$SRC/infra/data"
 PLATFORM_DIR="$SRC/infra/platform"
 TF_BACKEND_ARGS=(-backend-config="bucket=$STATE_BUCKET" -backend-config="region=$AWS_REGION")
 
+# Refuse to read or write Terraform state in a bucket this account does not own.
+# shellcheck source=../scripts/state-bucket.sh
+source "$SRC/scripts/state-bucket.sh"
+require_state_bucket
+
 # Retry wrapper for terraform commands — handles transient AWS API errors
 tf_with_retry() {
   local max_attempts=3

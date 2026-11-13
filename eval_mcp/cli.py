@@ -1,6 +1,7 @@
 """CLI entry point for eval-mcp."""
 
 import sys
+from typing import Optional
 
 import click
 
@@ -192,14 +193,18 @@ def _print_install_guide():
 # next steps instead of a generic "could not reach" line.
 _ERR_NO_CREDS = "no_creds"     # NoCredentialsError — no AWS_PROFILE / no profile
 _ERR_EXPIRED = "expired"        # ExpiredToken / TokenRefreshRequired — SSO session lapsed
-_ERR_FORBIDDEN = "forbidden"    # 403 — bucket exists in another account
+_ERR_FORBIDDEN = "forbidden"    # 403 — bucket exists in another account (or no access)
+_ERR_NO_OWNER = "no_owner"      # could not determine the expected bucket owner
 _ERR_NOT_FOUND = "not_found"    # 404 — bucket doesn't exist
 _ERR_NETWORK = "network"        # EndpointConnectionError — proxy/VPN/DNS
 _ERR_UNKNOWN = "unknown"        # anything else
 
 
-def _detect_bucket_region(bucket: str):
+def _detect_bucket_region(bucket: str, expected_owner: Optional[str] = None):
     """Probe S3 for the bucket's home region.
+
+    When `expected_owner` is set, S3 returns 403 unless that account owns the
+    bucket, so a same-named bucket in someone else's account is rejected.
 
     head_bucket returns `x-amz-bucket-region` even on a 301 redirect, so a
     fixed probe region works regardless of where the bucket actually lives.
@@ -215,7 +220,10 @@ def _detect_bucket_region(bucket: str):
 
     client = boto3.client("s3", region_name="us-east-1")
     try:
-        response = client.head_bucket(Bucket=bucket)
+        kwargs = {"Bucket": bucket}
+        if expected_owner:
+            kwargs["ExpectedBucketOwner"] = expected_owner
+        response = client.head_bucket(**kwargs)
         region = response["ResponseMetadata"]["HTTPHeaders"].get("x-amz-bucket-region")
         return (region, None) if region else (None, _ERR_UNKNOWN)
     except NoCredentialsError:
@@ -252,33 +260,45 @@ def _get_account_id():
 
 
 def _resolve_bucket(name: str):
-    """Resolve a logical bucket name to (actual_name, region, error_code).
+    """Resolve a logical bucket name to (actual_name, region, owner, error_code).
 
     Tries the literal name first (existing buckets, custom names), then falls
     back to `<name>-<account-id>` — the convention produced by this repo's
-    Terraform module. On success returns (name, region, None). On failure
-    returns (None, None, error_code) where error_code is one of the _ERR_*
+    Terraform module. Both probes require the bucket to be owned by the
+    expected account (config `bucket_owner`, else the caller's account), so a
+    bucket someone else pre-created under that name is never used.
+    On success returns (name, region, owner, None). On failure returns
+    (None, None, None, error_code) where error_code is one of the _ERR_*
     constants so the caller can surface a specific message.
     """
-    region, error = _detect_bucket_region(name)
+    from eval_mcp.config import get_bucket_owner
+
+    account_id = _get_account_id()
+    owner = get_bucket_owner() or account_id
+    if not owner:
+        # Probe without an owner only to classify the error (no creds,
+        # expired, network); never accept the bucket unverified.
+        _, error = _detect_bucket_region(name)
+        return None, None, None, error or _ERR_NO_OWNER
+
+    region, error = _detect_bucket_region(name, expected_owner=owner)
     if region:
-        return name, region, None
+        return name, region, owner, None
 
     # Credentials issues won't be fixed by trying a different bucket name.
     if error in (_ERR_NO_CREDS, _ERR_EXPIRED, _ERR_NETWORK):
-        return None, None, error
+        return None, None, None, error
 
-    account_id = _get_account_id()
     if account_id and not name.endswith(f"-{account_id}"):
         suffixed = f"{name}-{account_id}"
-        region2, error2 = _detect_bucket_region(suffixed)
+        region2, error2 = _detect_bucket_region(suffixed, expected_owner=owner)
         if region2:
-            return suffixed, region2, None
+            return suffixed, region2, owner, None
         # Prefer the suffixed lookup's error — it's the more specific
         # "neither variant exists" signal.
-        return None, None, error2 or error
+        return None, None, None, error2 or error
 
-    return None, None, error
+    return None, None, None, error
 
 
 def _init_error_message(bucket: str, error: str) -> str:
@@ -297,9 +317,17 @@ def _init_error_message(bucket: str, error: str) -> str:
         )
     if error == _ERR_FORBIDDEN:
         return (
-            f"Bucket s3://{bucket} (or s3://{bucket}-<account-id>) exists but you don't have access.\n"
+            f"Bucket s3://{bucket} (or s3://{bucket}-<account-id>) exists but is not owned by your\n"
+            "  AWS account, or you don't have access. eval-mcp only uses buckets owned by your account.\n"
             "  • Are you in the right AWS account? Check: aws sts get-caller-identity\n"
-            "  • The bucket name may belong to another team — try a different logical name."
+            "  • The bucket name may belong to another account — try a different logical name.\n"
+            "  • If your team's bucket intentionally lives in another account you trust:\n"
+            "      eval-mcp config set bucket_owner <owner-account-id>"
+        )
+    if error == _ERR_NO_OWNER:
+        return (
+            "Could not determine your AWS account ID to verify who owns the bucket.\n"
+            "  • Check: aws sts get-caller-identity"
         )
     if error == _ERR_NOT_FOUND:
         return (
@@ -382,19 +410,21 @@ def init(bucket):
 
     _ensure_aws_profile()
 
-    resolved, region, error = _resolve_bucket(bucket)
+    resolved, region, owner, error = _resolve_bucket(bucket)
     if not resolved:
         click.echo(_init_error_message(bucket, error), err=True)
         sys.exit(1)
 
     set_config_value("bucket", resolved)
     set_config_value("region", region)
+    set_config_value("bucket_owner", owner)
     user = get_user()
     click.echo(f"Configured S3 sharing:")
     click.echo(f"  bucket: {resolved}")
     if resolved != bucket:
         click.echo(f"          (resolved from '{bucket}' via account-ID suffix)")
     click.echo(f"  region: {region}")
+    click.echo(f"  owner:  {owner} (verified)")
     click.echo(f"  user:   {user} (auto-detected from AWS identity)")
     click.echo(f"\nLogs will sync to s3://{resolved}/users/{user}/")
     click.echo(f"Shared projects auto-discovered from s3://{resolved}/projects/*/")

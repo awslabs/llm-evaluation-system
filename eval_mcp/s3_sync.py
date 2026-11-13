@@ -25,7 +25,7 @@ from typing import List, Optional, Set
 import boto3
 from botocore.config import Config
 
-from eval_mcp.config import get_bucket, get_sync_region, get_user, get_projects
+from eval_mcp.config import get_bucket, get_bucket_owner, get_sync_region, get_user, get_projects
 from eval_mcp.storage import get_logs_dir
 
 logger = logging.getLogger(__name__)
@@ -82,10 +82,36 @@ def _get_s3_client():
     return boto3.client("s3", region_name=region, config=config)
 
 
+_owner_lock = threading.Lock()
+_caller_account: Optional[str] = None
+
+
+def _expected_owner() -> str:
+    """Account ID that must own the sync bucket.
+
+    Uses config `bucket_owner` (written by `eval-mcp init`), else the caller's
+    account. Every S3 call passes it as ExpectedBucketOwner, so S3 rejects the
+    request if the bucket belongs to anyone else. Raises if neither is known,
+    so callers fail closed instead of talking to an unverified bucket.
+    """
+    owner = get_bucket_owner()
+    if owner:
+        return owner
+    global _caller_account
+    with _owner_lock:
+        if _caller_account is None:
+            _caller_account = boto3.client("sts").get_caller_identity()["Account"]
+        return _caller_account
+
+
+def _owner_args() -> dict:
+    return {"ExpectedBucketOwner": _expected_owner()}
+
+
 def _list_remote_keys(s3, bucket: str, prefix: str) -> Set[str]:
     keys: Set[str] = set()
     paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix, **_owner_args()):
         for obj in page.get("Contents", []):
             keys.add(obj["Key"])
     return keys
@@ -94,7 +120,7 @@ def _list_remote_keys(s3, bucket: str, prefix: str) -> Set[str]:
 def _discover_projects(s3, bucket: str) -> List[str]:
     projects = []
     paginator = s3.get_paginator("list_objects_v2")
-    for page in paginator.paginate(Bucket=bucket, Prefix="projects/", Delimiter="/"):
+    for page in paginator.paginate(Bucket=bucket, Prefix="projects/", Delimiter="/", **_owner_args()):
         for cp in page.get("CommonPrefixes", []):
             name = cp["Prefix"].removeprefix("projects/").rstrip("/")
             if name:
@@ -149,7 +175,7 @@ def replicate_async(local_path: Path, user_id: Optional[str] = None) -> None:
 
     def _do_upload():
         try:
-            _get_s3_client().upload_file(local_real, bucket, key)
+            _get_s3_client().upload_file(local_real, bucket, key, ExtraArgs=_owner_args())
             logger.debug("replicated %s -> s3://%s/%s", os.path.basename(local_real), bucket, key)
         except Exception as e:
             logger.warning("replicate failed for %s: %s", local_real, e)
@@ -215,7 +241,7 @@ def sync_up(user_id: Optional[str] = None) -> dict:
         if key in remote_keys:
             continue
         try:
-            s3.upload_file(str(path), bucket, key)
+            s3.upload_file(str(path), bucket, key, ExtraArgs=_owner_args())
             uploaded += 1
         except Exception as e:
             logger.warning("sync_up failed for %s: %s", path, e)
@@ -254,7 +280,7 @@ def sync_down(user_id: Optional[str] = None) -> dict:
                 continue
             try:
                 local_path.parent.mkdir(parents=True, exist_ok=True)
-                s3.download_file(bucket, key, str(local_path))
+                s3.download_file(bucket, key, str(local_path), ExtraArgs=_owner_args())
                 downloaded += 1
             except Exception as e:
                 logger.warning("sync_down failed for %s: %s", key, e)
@@ -281,7 +307,7 @@ def sync_to_project(project: str, user_id: Optional[str] = None) -> dict:
         if key in remote_keys:
             continue
         try:
-            s3.upload_file(str(path), bucket, key)
+            s3.upload_file(str(path), bucket, key, ExtraArgs=_owner_args())
             uploaded += 1
         except Exception as e:
             logger.warning("share failed for %s: %s", path, e)
